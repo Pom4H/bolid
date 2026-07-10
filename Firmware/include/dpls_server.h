@@ -1,0 +1,108 @@
+#ifndef DPLS_SERVER_H
+#define DPLS_SERVER_H
+
+#include "dpls_protocol.h"
+
+#define DPLS_AUTH_NONCE_SIZE 16u
+#define DPLS_AUTH_SALT_SIZE 16u
+#define DPLS_AUTH_PROOF_SIZE 32u
+#define DPLS_SESSION_TOKEN_SIZE 8u
+#define DPLS_COMMAND_CACHE_SIZE 8u
+#ifndef DPLS_EVENT_CAPACITY
+#define DPLS_EVENT_CAPACITY 200u
+#endif
+#define DPLS_MODE_MAX_MS 300000u
+#define DPLS_SESSION_TIMEOUT_MS 10000u
+#define DPLS_AUTH_BLOCK_MS 300000u
+#define DPLS_IDENTIFY_MAX_MS 60000u
+
+typedef enum {
+    DPLS_MODE_NORMAL = 0,
+    DPLS_MODE_OPEN_T = 1,
+    DPLS_MODE_OPEN_MAIN = 2,
+    DPLS_MODE_SHORT_1 = 3,
+    DPLS_MODE_SHORT_2 = 4,
+    DPLS_MODE_SHORT_T = 5
+} dpls_mode_t;
+
+typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
+typedef enum {
+    DPLS_RETURN_OPERATOR = 0,
+    DPLS_RETURN_MODE_TIMEOUT = 1,
+    DPLS_RETURN_SESSION_TIMEOUT = 2,
+    DPLS_RETURN_DISCONNECT = 3,
+    DPLS_RETURN_LOW_RESERVE = 4,
+    DPLS_RETURN_INTERNAL_ERROR = 5,
+    DPLS_RETURN_BOOT = 6
+} dpls_return_reason_t;
+
+typedef struct {
+    uint32_t sequence;
+    uint32_t timestamp_seconds;
+    uint8_t event_type;
+    uint8_t parameter;
+} dpls_event_t;
+
+typedef struct {
+    bool (*link_encrypted)(void *context);
+    bool (*hardware_apply_mode)(void *context, dpls_mode_t mode);
+    void (*hardware_safe_normal)(void *context);
+    uint16_t (*voltage_mv)(void *context);
+    dpls_power_t (*power_source)(void *context);
+    bool (*reserve_low)(void *context);
+    void (*identify_led)(void *context, bool enabled);
+    void (*random_bytes)(void *context, uint8_t *out, size_t length);
+    bool (*settings_initialized)(void *context);
+    void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
+    bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
+    bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
+    void (*event_persist)(void *context, const dpls_event_t *event);
+    bool (*tx_indicate)(void *context, const uint8_t *frame, size_t length);
+    bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
+    void *context;
+    void (*diagnostic_error)(void *context, bool critical);
+} dpls_hal_t;
+
+typedef struct {
+    bool valid;
+    uint32_t session_id;
+    uint32_t command_id;
+    uint8_t status;
+    dpls_mode_t resulting_mode;
+    uint16_t remaining_seconds;
+} dpls_cached_command_t;
+
+typedef struct {
+    dpls_hal_t hal;
+    bool connected;
+    bool authenticated;
+    bool identify_active;
+    uint8_t failed_auth_attempts;
+    uint32_t blocked_until_ms;
+    uint32_t now_ms;
+    uint32_t session_id;
+    uint32_t last_authenticated_activity_ms;
+    uint32_t mode_deadline_ms;
+    uint32_t identify_deadline_ms;
+    uint32_t state_revision;
+    uint16_t tx_sequence;
+    uint8_t device_nonce[16];
+    uint8_t client_nonce[16];
+    uint8_t session_token[8];
+    dpls_mode_t mode;
+    dpls_cached_command_t command_cache[DPLS_COMMAND_CACHE_SIZE];
+    uint8_t command_cache_cursor;
+    dpls_event_t events[DPLS_EVENT_CAPACITY];
+    uint16_t event_count;
+    uint16_t event_cursor;
+    uint32_t next_event_sequence;
+} dpls_server_t;
+
+void dpls_server_init(dpls_server_t *server, const dpls_hal_t *hal, uint32_t now_ms);
+void dpls_server_connected(dpls_server_t *server, uint32_t now_ms);
+void dpls_server_disconnected(dpls_server_t *server, uint32_t now_ms);
+void dpls_server_tick(dpls_server_t *server, uint32_t now_ms);
+bool dpls_server_receive(dpls_server_t *server, const uint8_t *frame, size_t length, uint32_t now_ms);
+void dpls_server_log(dpls_server_t *server, uint8_t type, uint8_t parameter);
+
+#endif

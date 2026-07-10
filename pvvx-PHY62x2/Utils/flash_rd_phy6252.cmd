@@ -1,0 +1,1 @@
+@python3.exe rdwr_phy62x2.py -p COM14 -b 1000000 rc 0x11000000 0x00040000 ff_phy6252.bin

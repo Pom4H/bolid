@@ -1,0 +1,159 @@
+project:
+  packs:
+    - pack: ARM::CMSIS@^5.0.0
+    - pack: ARM::CMSIS-NN@^4.0.0
+    - pack: ARM::CMSIS-DSP@^1.10.1
+  setups:
+    - setup: Options for Target_1
+      processor:
+        endian: little
+      add-path:
+        - ../../../components/inc
+        - ../../../components/ble/controller
+        - ../../../components/osal/include
+        - ../../../components/common
+        - ../../../components/ble/include
+        - ../../../components/ble/hci
+        - ../../../components/ble/host
+        - ../../../components/profiles/ota_app
+        - ../../../components/profiles/DevInfo
+        - ../../../components/profiles/SimpleProfile
+        - ../../../components/profiles/Roles
+        - source
+        - ../../../components/libraries/crc16
+        - ../../../components/driver/watchdog
+        - ../../../components/driver/clock
+        - ../../../components/arch/cm0
+        - ../../../components/driver/pwrmgr
+        - ../../../components/driver/uart
+        - ../../../components/driver/gpio
+        - ../../../components/driver/timer
+        - ../../../misc
+        - ../../../components/driver/log
+        - ../../../components/libraries/cliface
+        - ../../../components/driver/key
+        - ../../../components/driver/pwm
+        - ../../../components/driver/flash
+        - ../../../components/libraries/fs
+        - ../../../components/driver/led_light
+        - /Users/rom/Documents/Bolid/Firmware/include
+        - /Users/rom/Documents/Bolid/Firmware/phy6252
+        - ../../../components/libraries/tinycrypt-0.2.8/lib/include
+      debug: "on"
+      define:
+        - CFG_CP
+        - OSAL_CBTIMER_NUM_TASKS: "1"
+        - MTU_SIZE: "247"
+        - HOST_CONFIG: "4"
+        - HCI_TL_NONE: "1"
+        - ENABLE_LOG_ROM_: "0"
+        - _BUILD_FOR_DTM_: "0"
+        - DEBUG_INFO: "1"
+        - DBG_ROM_MAIN: "0"
+        - APP_CFG: "0"
+        - OSALMEM_METRICS: "0"
+        - PHY_MCU_TYPE: MCU_BUMBEE_M0
+        - CFG_SLEEP_MODE: PWR_MODE_SLEEP
+        - DEF_GAPBOND_MGR_ENABLE: "1"
+        - USE_FS: "1"
+        - MAX_NUM_LL_CONN: "1"
+        - DPLS_EVENT_CAPACITY: "64"
+        - __MICROLIB
+      define-asm:
+        - __MICROLIB
+      misc:
+        - C:
+            - -std=c99
+          C-CPP:
+            - -fno-rtti
+            - -funsigned-char
+            - -fshort-enums
+            - -fshort-wchar
+            - -ffunction-sections
+            - -Wall
+            - -Wextra
+            - -Wno-packed
+            - -Wno-reserved-id-macro
+            - -Wno-unused-macros
+            - -Wno-documentation-unknown-command
+            - -Wno-documentation
+            - -Wno-license-management
+            - -Wno-parentheses-equality
+            - -DADV_NCONN_CFG=0x01  -DADV_CONN_CFG=0x02  -DSCAN_CFG=0x04   -DINIT_CFG=0x08   -DBROADCASTER_CFG=0x01 -DOBSERVER_CFG=0x02  -DPERIPHERAL_CFG=0x04  -DCENTRAL_CFG=0x08
+          CPP:
+            - -xc++
+            - -std=c++98
+            - -fno-exceptions
+          ASM:
+            - -masm=auto
+          Link:
+            - --library_type=microlib
+            - --map
+            - --load_addr_map_info
+            - --xref
+            - --callgraph
+            - --symbols
+            - --info sizes
+            - --info totals
+            - --info unused
+            - --info veneers
+            - ../../../../../../../misc/bb_rom_sym_m0.txt
+            - --keep=jump_table_base
+            - --keep=global_config
+            - --summary_stderr
+            - --info summarysizes
+  linker:
+    - script: scatter_load.sct
+  groups:
+    - group: arch
+      files:
+        - file: main.c
+    - group: driver
+      files:
+        - file: ../../../components/driver/uart/uart.c
+        - file: ../../../components/driver/clock/clock.c
+        - file: ../../../components/driver/gpio/gpio.c
+        - file: ../../../components/driver/timer/timer.c
+        - file: ../../../components/driver/watchdog/watchdog.c
+        - file: ../../../components/driver/pwrmgr/pwrmgr.c
+        - file: ../../../components/driver/log/my_printf.c
+        - file: ../../../components/driver/key/key.c
+        - file: ../../../components/driver/pwm/pwm.c
+        - file: ../../../components/osal/snv/osal_snv.c
+        - file: ../../../components/libraries/fs/fs.c
+        - file: ../../../components/driver/flash/flash.c
+        - file: ../../../components/driver/led_light/led_light.c
+    - group: profile
+      files:
+        - file: ../../../components/profiles/Roles/gap.c
+        - file: ../../../components/profiles/Roles/gapbondmgr.c
+        - file: ../../../components/profiles/Roles/gapgattserver.c
+        - file: ../../../components/profiles/Roles/peripheral.c
+        - file: ../../../components/profiles/GATT/gattservapp.c
+    - group: jump
+      files:
+        - file: ../../../misc/jump_table.c
+    - group: lib
+      files:
+        - file: ../../../lib/rf.lib
+        - file: ../../../lib/ble_host.lib
+    - group: simpleBlePeripheral
+      files:
+        - file: source/OSAL_SimpleBLEPeripheral.c
+        - file: source/dplsBLEPeripheral.c
+        - file: source/SimpleBLEPeripheral_Main.c
+    - group: dpls
+      files:
+        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_protocol.c
+        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_server.c
+        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_gatt_service.c
+        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_phy6252_app.c
+        - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/hmac.c
+        - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/sha256.c
+        - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/utils.c
+  components:
+    - component: ARM::CMSIS:CORE
+    - component: ARM::Device:Startup
+      misc:
+        - ASM:
+            - -masm=auto

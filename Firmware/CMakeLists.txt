@@ -1,0 +1,14 @@
+cmake_minimum_required(VERSION 3.16)
+project(test_dpls_server C)
+set(CMAKE_C_STANDARD 99)
+add_library(test_dpls_server
+    src/dpls_protocol.c
+    src/dpls_server.c
+)
+target_include_directories(test_dpls_server PUBLIC include)
+target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
+add_executable(test_dpls_server_tests tests/test_server.c)
+target_link_libraries(test_dpls_server_tests PRIVATE test_dpls_server)
+target_compile_options(test_dpls_server_tests PRIVATE -Wall -Wextra -Werror)
+enable_testing()
+add_test(NAME server COMMAND test_dpls_server_tests)
