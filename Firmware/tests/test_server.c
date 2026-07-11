@@ -8,6 +8,8 @@ typedef struct {
     dpls_mode_t mode;
     uint8_t tx[DPLS_MAX_FRAME];
     size_t tx_len;
+    uint8_t notif[64][DPLS_MAX_FRAME];
+    size_t notif_len[64];
     unsigned apply_count, indication_count, notification_count;
 } fake_t;
 static bool encrypted(void *c) { return ((fake_t *)c)->encrypted; }
@@ -17,16 +19,33 @@ static uint16_t voltage(void *c) { (void)c; return 24100; }
 static dpls_power_t power(void *c) { (void)c; return DPLS_POWER_LINE; }
 static bool low(void *c) { (void)c; return false; }
 static void identify(void *c, bool on) { ((fake_t *)c)->identify = on; }
-static void random_bytes(void *c, uint8_t *p, size_t n) { (void)c; memset(p, 0x55, n); }
-static bool initialized(void *c) { return ((fake_t *)c)->initialized; }
+static bool random_bytes(void *c, uint8_t *p, size_t n) { (void)c; memset(p, 0x55, n); return true; }
+static dpls_settings_state_t settings_state(void *c) { return ((fake_t *)c)->initialized ? DPLS_SETTINGS_VALID : DPLS_SETTINGS_EMPTY; }
 static void salt(void *c, uint8_t p[16]) { (void)c; memset(p, 0x11, 16); }
 static bool settings(void *c, const char *n, const uint8_t s[16], const uint8_t v[32]) { (void)n; (void)s; (void)v; ((fake_t *)c)->initialized = true; return true; }
 static bool verify(void *c, const uint8_t d[16], const uint8_t n[16], uint32_t id, const uint8_t p[32]) { (void)c; (void)d; (void)n; (void)id; return p[0] == 0xa5; }
 static bool indicate(void *c, const uint8_t *p, size_t n) {
-    fake_t *f = c; memcpy(f->tx, p, n); f->tx_len = n; ++f->indication_count; return true;
+    fake_t *f = c;
+    if (f->notification_count < 64u) {
+        memcpy(f->notif[f->notification_count], p, n);
+        f->notif_len[f->notification_count] = n;
+    }
+    memcpy(f->tx, p, n);
+    f->tx_len = n;
+    ++f->indication_count;
+    ++f->notification_count;
+    return true;
 }
 static bool notify(void *c, const uint8_t *p, size_t n) {
-    fake_t *f = c; memcpy(f->tx, p, n); f->tx_len = n; ++f->notification_count; return true;
+    fake_t *f = c;
+    if (f->notification_count < 64u) {
+        memcpy(f->notif[f->notification_count], p, n);
+        f->notif_len[f->notification_count] = n;
+    }
+    memcpy(f->tx, p, n);
+    f->tx_len = n;
+    ++f->notification_count;
+    return true;
 }
 
 static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) {
@@ -36,7 +55,13 @@ static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) 
 
 int main(void) {
     fake_t fake = {.encrypted = true, .initialized = true};
-    dpls_hal_t hal = {encrypted, apply, normal, voltage, power, low, identify, random_bytes, initialized, salt, settings, verify, 0, indicate, notify, &fake};
+    dpls_hal_t hal = {
+        .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
+        .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
+        .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
+        .settings_write = settings, .verify_auth_proof = verify,
+        .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
+    };
     dpls_server_t server; uint8_t buf[DPLS_MAX_FRAME], payload[64]; size_t n; dpls_frame_t response;
     dpls_server_init(&server, &hal, 0); assert(fake.normal);
     dpls_server_connected(&server, 10);
@@ -48,12 +73,31 @@ int main(void) {
     dpls_server_receive(&server, buf, n, 50); assert(fake.apply_count == 1); /* idempotent */
     dpls_server_tick(&server, DPLS_SESSION_TIMEOUT_MS + 51); assert(server.mode == DPLS_MODE_NORMAL); assert(fake.normal);
     memcpy(payload, &server.session_id, 4); memcpy(payload + 4, server.session_token, 8); payload[12] = payload[13] = 0;
+    fake.notification_count = 0;
     n = request(DPLS_MSG_LOG_START, payload, 14, buf); dpls_server_receive(&server, buf, n, 60);
-    assert(fake.notification_count == 1); assert(dpls_frame_decode(fake.tx, fake.tx_len, &response));
-    assert(response.type == DPLS_MSG_LOG_CHUNK); assert(response.payload[0] == 0 && response.payload[1] == 0);
+    assert(fake.notification_count == 1);
+    assert(dpls_frame_decode(fake.notif[0], fake.notif_len[0], &response));
+    assert(response.type == DPLS_MSG_LOG_INFO);
+    payload[12] = 0; payload[13] = 0;
+    fake.notification_count = 0;
+    n = request(DPLS_MSG_LOG_ACK, payload, 14, buf); dpls_server_receive(&server, buf, n, 65);
+    assert(fake.notification_count == 1);
+    assert(dpls_frame_decode(fake.tx, fake.tx_len, &response));
+    assert(response.type == DPLS_MSG_LOG_CHUNK);
+    assert(response.payload[0] == 0 && response.payload[1] == 0);
     payload[12] = 1; payload[13] = 0;
+    fake.notification_count = 0;
     n = request(DPLS_MSG_LOG_ACK, payload, 14, buf); dpls_server_receive(&server, buf, n, 70);
-    assert(fake.notification_count == 2); assert(dpls_frame_decode(fake.tx, fake.tx_len, &response));
-    assert(response.type == DPLS_MSG_LOG_CHUNK); assert(response.payload[0] == 1 && response.payload[1] == 0);
+    assert(fake.notification_count == 1);
+    assert(dpls_frame_decode(fake.tx, fake.tx_len, &response));
+    assert(response.type == DPLS_MSG_LOG_CHUNK);
+    assert(response.payload[0] == 1 && response.payload[1] == 0);
+    unsigned indications_before = fake.indication_count;
+    n = request(DPLS_MSG_IDENTIFY_START, NULL, 0, buf); dpls_server_receive(&server, buf, n, 80);
+    assert(server.identify_active); assert(fake.identify);
+    assert(fake.indication_count == indications_before);
+    dpls_server_tick(&server, 80 + DPLS_IDENTIFY_BLINK_MS);
+    assert(!fake.identify);
+    assert(fake.indication_count == indications_before);
     puts("test_dpls_server: OK"); return 0;
 }

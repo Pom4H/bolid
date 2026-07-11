@@ -14,6 +14,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import android.content.pm.ApplicationInfo
 import com.thebutton.ble.ui.DplsScreen
 import com.thebutton.ble.ui.MainViewModel
 import com.thebutton.ble.ui.theme.TheButtonTheme
@@ -66,8 +67,8 @@ class MainActivity : ComponentActivity() {
                         createDocumentLauncher.launch("test-dpls-events.csv")
                     },
                     onExportJson = {
-                        pendingExport = viewModel::eventLogJson
-                        createDocumentLauncher.launch("test-dpls-events.json")
+                        pendingExport = viewModel::eventLogTxt
+                        createDocumentLauncher.launch("test-dpls-events.txt")
                     },
                     modifier = Modifier.fillMaxSize(),
                 )

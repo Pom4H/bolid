@@ -1,5 +1,6 @@
 #include "dpls_phy6252_app.h"
 
+#include "dpls_ble_identity.h"
 #include "dpls_gatt_service.h"
 #include "dpls_server.h"
 #include "OSAL.h"
@@ -8,13 +9,21 @@
 #include "linkdb.h"
 #include "ll_enc.h"
 #include "osal_snv.h"
+#include "gapbondmgr.h"
+#include "peripheral.h"
+#include <core_cm0.h>
 #include <tinycrypt/hmac.h>
 #include <stddef.h>
 #include <string.h>
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
 #define DPLS_SETTINGS_SNV_ID 0x80u
+#define DPLS_SETTINGS_STATE_SNV_ID 0x81u
 #define DPLS_NAME_SIZE 32u
+#define DPLS_SETTINGS_EMPTY_MARKER 0x45u
+#define DPLS_SETTINGS_VALID_MARKER 0x56u
+#define DPLS_FACTORY_RESET_PIN GPIO_P14
+#define DPLS_FACTORY_RESET_HOLD_MS 5000u
 
 /* PB-03F-Kit schematic: P11 is the green RGB LED and P7 is red. Relays are
  * deliberately not assigned on the bare evaluation board. */
@@ -34,9 +43,13 @@ static dpls_settings_t settings;
 static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
 static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
-static bool settings_valid;
-static uint8 pending_rx[DPLS_MAX_FRAME];
-static uint16 pending_rx_length;
+static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
+static bool factory_reset_armed;
+static uint32_t factory_reset_started_ms;
+#define DPLS_RX_QUEUE_DEPTH 4u
+typedef struct { uint8 data[DPLS_MAX_FRAME]; uint16 length; } dpls_rx_slot_t;
+static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
+static uint8 rx_head, rx_tail, rx_count;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -88,7 +101,7 @@ static void identify_led(void *context, bool enabled)
     hal_gpio_write(DPLS_IDENTIFY_LED, enabled ? 1 : 0);
 }
 
-static void random_bytes(void *context, uint8_t *out, size_t length)
+static bool random_bytes(void *context, uint8_t *out, size_t length)
 {
     uint8_t generated;
     size_t offset = 0;
@@ -97,33 +110,33 @@ static void random_bytes(void *context, uint8_t *out, size_t length)
         uint8_t chunk = (uint8_t)((length - offset) > 16u ? 16u : (length - offset));
         generated = LL_ENC_GenerateTrueRandNum(out + offset, chunk);
         if (generated != SUCCESS) {
-            uint32_t fallback = now_ms() ^ (uint32_t)(uintptr_t)(out + offset);
-            uint8_t i;
-            for (i = 0; i < chunk; ++i) {
-                fallback = fallback * 1664525u + 1013904223u;
-                out[offset + i] = (uint8_t)(fallback >> 24);
-            }
+            memset(out, 0, length);
+            safe_normal(NULL);
+            return false;
         }
         offset += chunk;
     }
+    return true;
 }
 
-static bool is_settings_initialized(void *context)
+static dpls_settings_state_t get_settings_state(void *context)
 {
     (void)context;
-    return settings_valid;
+    return settings_state;
 }
 
 static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
 {
     (void)context;
-    if (settings_valid) memcpy(out, settings.salt, DPLS_AUTH_SALT_SIZE);
+    if (settings_state == DPLS_SETTINGS_VALID) memcpy(out, settings.salt, DPLS_AUTH_SALT_SIZE);
     else memset(out, 0, DPLS_AUTH_SALT_SIZE);
 }
 
 static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
 {
     size_t name_length;
+    dpls_settings_t verified;
+    uint8 marker = DPLS_SETTINGS_VALID_MARKER;
     (void)context;
     memset(&settings, 0, sizeof(settings));
     settings.magic = DPLS_SETTINGS_MAGIC;
@@ -133,11 +146,16 @@ static bool write_settings(void *context, const char *name, const uint8_t salt[1
     memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
     memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
     settings.crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
-    if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) != SUCCESS) {
+    if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) != SUCCESS ||
+        osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(verified), &verified) != SUCCESS ||
+        verified.magic != DPLS_SETTINGS_MAGIC ||
+        verified.crc != dpls_crc16((const uint8_t *)&verified, offsetof(dpls_settings_t, crc)) ||
+        osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) != SUCCESS) {
         memset(&settings, 0, sizeof(settings));
+        settings_state = DPLS_SETTINGS_CORRUPT;
         return false;
     }
-    settings_valid = true;
+    settings_state = DPLS_SETTINGS_VALID;
     return true;
 }
 
@@ -150,7 +168,7 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
     uint8_t difference = 0;
     uint8_t i;
     (void)context;
-    if (!settings_valid) return false;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
     memcpy(signed_data, device_nonce, 16);
     memcpy(signed_data + 16, client_nonce, 16);
     signed_data[32] = (uint8_t)session_id;
@@ -180,28 +198,81 @@ static bool tx_notify(void *context, const uint8_t *frame, size_t length)
 
 static void receive_frame(const uint8 *data, uint16 length)
 {
-    if (length > sizeof(pending_rx) || pending_rx_length != 0u) return;
-    memcpy(pending_rx, data, length);
-    pending_rx_length = length;
+    dpls_rx_slot_t *slot;
+    if (length > DPLS_MAX_FRAME || rx_count >= DPLS_RX_QUEUE_DEPTH) return;
+    slot = &rx_queue[rx_tail];
+    memcpy(slot->data, data, length);
+    slot->length = length;
+    rx_tail = (uint8)((rx_tail + 1u) % DPLS_RX_QUEUE_DEPTH);
+    ++rx_count;
     osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+}
+
+static void clear_settings_and_bonds(void)
+{
+    uint8 marker = DPLS_SETTINGS_EMPTY_MARKER;
+    memset(&settings, 0, sizeof(settings));
+    /* The explicit marker is written only by the physical reset path. A bad
+     * settings record never becomes remotely commissionable by accident. */
+    (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
+    (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
+    settings_state = DPLS_SETTINGS_EMPTY;
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+    dpls_ble_identity_reset_bonding_keys();
+    hal_gpio_write(DPLS_IDENTIFY_LED, 1);
+    NVIC_SystemReset();
+}
+
+static void disconnect_after_setup(void *context)
+{
+    (void)context;
+    (void)GAPRole_TerminateConnection();
+}
+
+static void classify_settings(void)
+{
+    uint16_t expected_crc;
+    uint8 marker = 0;
+    uint8 state_read;
+    memset(&settings, 0, sizeof(settings));
+    state_read = osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
+    if (state_read != SUCCESS) {
+        settings_state = DPLS_SETTINGS_EMPTY;
+        return;
+    }
+    expected_crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
+    if (settings.magic == DPLS_SETTINGS_MAGIC && settings.crc == expected_crc) {
+        settings_state = DPLS_SETTINGS_VALID;
+        return;
+    }
+    if (osal_snv_read(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) == SUCCESS &&
+        marker == DPLS_SETTINGS_EMPTY_MARKER) {
+        settings_state = DPLS_SETTINGS_EMPTY;
+        return;
+    }
+    settings_state = DPLS_SETTINGS_CORRUPT;
+    memset(&settings, 0, sizeof(settings));
 }
 
 void dpls_phy6252_init(uint8 new_task_id)
 {
     dpls_hal_t hal;
-    uint16_t expected_crc;
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
-    pending_rx_length = 0;
+    rx_head = rx_tail = rx_count = 0;
     hal_gpio_pin_init(DPLS_IDENTIFY_LED, OEN);
     hal_gpio_pin_init(DPLS_MODE_LED, OEN);
+    hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
+    hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     hal_gpio_write(DPLS_IDENTIFY_LED, 0);
     hal_gpio_write(DPLS_MODE_LED, 0);
-    memset(&settings, 0, sizeof(settings));
-    settings_valid = osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) == SUCCESS;
-    expected_crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
-    settings_valid = settings_valid && settings.magic == DPLS_SETTINGS_MAGIC && settings.crc == expected_crc;
-    if (!settings_valid) memset(&settings, 0, sizeof(settings));
+    classify_settings();
+    factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
+    factory_reset_started_ms = now_ms();
+    if (settings_state == DPLS_SETTINGS_EMPTY) {
+        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+        dpls_ble_identity_reset_bonding_keys();
+    }
 
     memset(&hal, 0, sizeof(hal));
     hal.link_encrypted = link_encrypted;
@@ -212,12 +283,13 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.reserve_low = reserve_low;
     hal.identify_led = identify_led;
     hal.random_bytes = random_bytes;
-    hal.settings_initialized = is_settings_initialized;
+    hal.settings_state = get_settings_state;
     hal.settings_salt = settings_salt;
     hal.settings_write = write_settings;
     hal.verify_auth_proof = verify_proof;
     hal.tx_indicate = tx_indicate;
     hal.tx_notify = tx_notify;
+    hal.disconnect_after_setup = disconnect_after_setup;
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
 }
@@ -232,18 +304,29 @@ void dpls_phy6252_disconnected(void)
 {
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
-    pending_rx_length = 0;
+    rx_head = rx_tail = rx_count = 0;
 }
 
 void dpls_phy6252_process_rx(void)
 {
-    uint16 length = pending_rx_length;
-    if (length == 0u) return;
-    pending_rx_length = 0;
-    (void)dpls_server_receive(&server, pending_rx, length, now_ms());
+    dpls_rx_slot_t *slot;
+    if (rx_count == 0u) return;
+    slot = &rx_queue[rx_head];
+    (void)dpls_server_receive(&server, slot->data, slot->length, now_ms());
+    slot->length = 0;
+    rx_head = (uint8)((rx_head + 1u) % DPLS_RX_QUEUE_DEPTH);
+    --rx_count;
+    if (rx_count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
 void dpls_phy6252_tick(void)
 {
+    if (factory_reset_armed) {
+        if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
+        else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
+            factory_reset_armed = false;
+            clear_settings_and_bonds();
+        }
+    }
     dpls_server_tick(&server, now_ms());
 }

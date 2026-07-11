@@ -59,10 +59,10 @@ class BleConnectionService : Service() {
         )
 
         val error = state.error ?: state.statusText.takeIf { state.phase == ConnectionPhase.ERROR }
-        if (error != null && error != lastError) {
+        if (error != null && error != lastError && state.phase == ConnectionPhase.ERROR) {
             postAlert(ERROR_NOTIFICATION_ID, "Ошибка Test-DPLS", error)
         }
-        lastError = error
+        lastError = if (state.phase == ConnectionPhase.ERROR) error else null
 
         val mode = state.state?.mode
         if (previousMode?.dangerous == true && mode == DplsMode.NORMAL) {

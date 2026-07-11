@@ -67,13 +67,25 @@ class BleClient(context: Context) {
     private var initialized = false
     private var logBytes = ByteArray(0)
     private var logExpectedBytes = 0
+    private var logExpectedEvents = 0
+    private var logReceivedEvents = 0
+    private var logChunkReceived = BooleanArray(0)
     private var logNextChunk = 0
+    private var logInfoReceived = false
+    private var logLoadPending = false
+    private var pendingLogAckIndex: Int? = null
+    private val logPendingChunks = mutableListOf<Pair<Int, ByteArray>>()
     private var identifyAfterConnect = false
+    private var pendingIdentifyAck = false
     private val writeQueue = ArrayDeque<ByteArray>()
     private var writeInProgress = false
+    private var pendingWrite: ByteArray? = null
+    private var writeRetryCount = 0
     private var reachedReady = false
     private var lastKnownBondState = BluetoothDevice.BOND_NONE
     private var reconnectRunnable: Runnable? = null
+    private var pairingTimeoutRunnable: Runnable? = null
+    private var pairingPollRunnable: Runnable? = null
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = acceptScan(result)
@@ -90,10 +102,17 @@ class BleClient(context: Context) {
                     if (device.address != selectedAddress) return
                     when (device.bondState) {
                         BluetoothDevice.BOND_BONDED -> {
+                            cancelPairingTimeout()
                             lastKnownBondState = BluetoothDevice.BOND_BONDED
-                            if (_uiState.value.phase == ConnectionPhase.PAIRING) beginGattNegotiation()
+                            if (_uiState.value.phase == ConnectionPhase.PAIRING) resumeAfterPairing()
                         }
-                        BluetoothDevice.BOND_NONE -> fail("Не удалось создать защищённое BLE-соединение")
+                        BluetoothDevice.BOND_NONE -> {
+                            if (_uiState.value.phase == ConnectionPhase.PAIRING) {
+                                cancelPairingTimeout()
+                                fail("Не удалось создать защищённое BLE-соединение")
+                                closeCurrentGatt()
+                            }
+                        }
                     }
                 }
                 BluetoothAdapter.ACTION_STATE_CHANGED -> when (
@@ -116,7 +135,9 @@ class BleClient(context: Context) {
         appContext.registerReceiver(
             bluetoothReceiver,
             filter,
-            Context.RECEIVER_NOT_EXPORTED,
+            // Bond and adapter state are emitted by Android's Bluetooth
+            // process, not by this application.
+            Context.RECEIVER_EXPORTED,
         )
     }
 
@@ -160,10 +181,14 @@ class BleClient(context: Context) {
                 statusText = "Подключение…",
                 selectedDevice = it.devices.firstOrNull { item -> item.address == address },
                 credentialsReady = false,
+                setupPassword = "",
+                setupRepeatPassword = "",
+                identifyLedLive = false,
                 error = null,
             )
         }
         closeCurrentGatt()
+        pendingIdentifyAck = false
         val connection = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         gatt = connection
         Log.i(TAG, "connectGatt address=$address attempt=$reconnectAttempt")
@@ -171,7 +196,54 @@ class BleClient(context: Context) {
 
     fun identify(address: String) {
         identifyAfterConnect = true
+        pendingIdentifyAck = false
+        _uiState.update { it.copy(identifyActive = true, identifyLedLive = false) }
         connect(address)
+    }
+
+    fun stopIdentify() {
+        identifyAfterConnect = false
+        pendingIdentifyAck = false
+        _uiState.update { it.copy(identifyActive = false, identifyLedLive = false) }
+        if (gatt != null && rx != null) sendPriority(DplsProtocol.Type.IDENTIFY_STOP, byteArrayOf())
+    }
+
+    fun confirmIdentifiedDevice() {
+        stopIdentify()
+        handler.removeCallbacks(preAuthKeepAlive)
+        if (_uiState.value.credentialsReady || gatt == null || rx == null) return
+        _uiState.update {
+            it.copy(
+                phase = ConnectionPhase.AUTHENTICATING,
+                statusText = "Подключение…",
+                identifyActive = false,
+                identifyLedLive = false,
+                error = null,
+            )
+        }
+        sendPriority(DplsProtocol.Type.HELLO, clientNonce)
+    }
+
+    fun updateSetupName(name: String) {
+        _uiState.update { it.copy(setupName = name) }
+    }
+
+    fun updateSetupPassword(password: String) {
+        _uiState.update { it.copy(setupPassword = password) }
+    }
+
+    fun updateSetupRepeatPassword(password: String) {
+        _uiState.update { it.copy(setupRepeatPassword = password) }
+    }
+
+    fun fillSetupFormForE2e(name: String, password: String) {
+        _uiState.update { it.copy(setupName = name, setupPassword = password, setupRepeatPassword = password) }
+        handler.post { setup(name, password.toCharArray()) }
+    }
+
+    fun fillLoginFormForE2e(password: String) {
+        _uiState.update { it.copy(setupPassword = password) }
+        handler.post { authenticate(password.toCharArray()) }
     }
 
     fun authenticate(password: CharArray) {
@@ -192,8 +264,8 @@ class BleClient(context: Context) {
         cachedVerifier = verifier
         pendingSetupName = deviceName.trim()
         val name = pendingSetupName!!.encodeToByteArray().take(31).toByteArray()
-        val payload = ByteBuffer.allocate(1 + name.size + salt.size + verifier.size)
-            .order(ByteOrder.LITTLE_ENDIAN).put(name.size.toByte()).put(name).put(salt).put(verifier).array()
+        val payload = ByteBuffer.allocate(4 + 1 + name.size + salt.size + verifier.size)
+            .order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).put(name.size.toByte()).put(name).put(salt).put(verifier).array()
         send(DplsProtocol.Type.SETUP, payload)
     }
 
@@ -210,6 +282,7 @@ class BleClient(context: Context) {
         val payload = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt()).put(mode.wire.toByte()).array()
         _uiState.update { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена, ожидается подтверждение…") }
+        updateStateRefreshSchedule()
         send(DplsProtocol.Type.MODE_SET, payload)
         handler.postDelayed({
             if (_uiState.value.commandInProgress) {
@@ -225,11 +298,37 @@ class BleClient(context: Context) {
     }
 
     fun loadEventLog() {
+        if (_uiState.value.logProgress != null) return
+        logLoadPending = true
+        handler.removeCallbacks(logLoadTimeout)
+        handler.removeCallbacks(keepAlive)
+        handler.removeCallbacks(stateRefresh)
+        resetLogTransfer()
+        _uiState.update { it.copy(logProgress = 0f, eventLog = emptyList(), error = null) }
+        sendPriority(
+            DplsProtocol.Type.LOG_START,
+            authenticatedPayload() + ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(0).array(),
+            flush = true,
+        )
+        handler.postDelayed(logLoadTimeout, LOG_LOAD_TIMEOUT_MS)
+    }
+
+    fun refreshState() {
+        if (!_uiState.value.authenticated || gatt == null || _uiState.value.logProgress != null) return
+        send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+        updateStateRefreshSchedule()
+    }
+
+    private fun resetLogTransfer() {
         logBytes = byteArrayOf()
         logExpectedBytes = 0
+        logExpectedEvents = 0
+        logReceivedEvents = 0
+        logChunkReceived = booleanArrayOf()
         logNextChunk = 0
-        _uiState.update { it.copy(logProgress = 0f, eventLog = emptyList()) }
-        send(DplsProtocol.Type.LOG_START, authenticatedPayload() + ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(0).array())
+        logInfoReceived = false
+        pendingLogAckIndex = null
+        logPendingChunks.clear()
     }
 
     fun disconnect() {
@@ -274,17 +373,52 @@ class BleClient(context: Context) {
             lastKnownBondState = current.device.bondState
             Log.i(TAG, "Connection state status=$status state=$newState bond=${current.device.bondState}")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                if (current.device.bondState == BluetoothDevice.BOND_BONDED) beginGattNegotiation()
-                else {
-                    _uiState.update { it.copy(phase = ConnectionPhase.PAIRING, statusText = "Подключение…") }
-                    if (!current.device.createBond()) fail("Не удалось начать сопряжение")
+                when (current.device.bondState) {
+                    BluetoothDevice.BOND_BONDED -> beginGattNegotiation()
+                    BluetoothDevice.BOND_BONDING -> {
+                        _uiState.update { it.copy(phase = ConnectionPhase.PAIRING, statusText = pairingStatusText()) }
+                        schedulePairingTimeout()
+                    }
+                    else -> {
+                        _uiState.update { it.copy(phase = ConnectionPhase.PAIRING, statusText = pairingStatusText()) }
+                        schedulePairingTimeout()
+                        if (!current.device.createBond()) {
+                            cancelPairingTimeout()
+                            fail("Не удалось начать сопряжение")
+                        }
+                    }
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                val phase = _uiState.value.phase
+                val wasLoadingLog = _uiState.value.logProgress != null
                 current.close()
                 if (current === gatt) gatt = null
-                cachedVerifier?.fill(0)
-                cachedVerifier = null
-                if (selectedAddress != null) scheduleReconnect() else _uiState.update { it.copy(phase = ConnectionPhase.IDLE) }
+                if (selectedAddress == null) {
+                    cachedVerifier?.fill(0)
+                    cachedVerifier = null
+                }
+                if (wasLoadingLog) {
+                    handler.removeCallbacks(logLoadTimeout)
+                    logInfoReceived = false
+                    logLoadPending = true
+                    resetWriteState()
+                    _uiState.update {
+                        it.copy(
+                            logProgress = null,
+                            error = null,
+                            statusText = "Восстановление связи…",
+                        )
+                    }
+                }
+                if (selectedAddress != null) {
+                    if (phase == ConnectionPhase.PAIRING) {
+                        _uiState.update { it.copy(statusText = pairingStatusText()) }
+                    } else {
+                        scheduleReconnect()
+                    }
+                } else {
+                    _uiState.update { it.copy(phase = ConnectionPhase.IDLE) }
+                }
             }
         }
 
@@ -319,28 +453,66 @@ class BleClient(context: Context) {
             Log.i(TAG, "CCCD written status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) return fail("Подписка на BLE-события отклонена")
             clientNonce = ByteArray(16).also(random::nextBytes)
-            _uiState.update { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…") }
-            send(DplsProtocol.Type.HELLO, clientNonce)
             if (identifyAfterConnect) {
                 identifyAfterConnect = false
-                send(DplsProtocol.Type.IDENTIFY_START, byteArrayOf(60))
+                pendingIdentifyAck = true
+                _uiState.update { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Показать на объекте…") }
+                send(DplsProtocol.Type.IDENTIFY_START)
+            } else {
+                _uiState.update { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…") }
+                send(DplsProtocol.Type.HELLO, clientNonce)
             }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            if (gatt === this@BleClient.gatt && characteristic.uuid == TX_UUID) {
-                Log.i(TAG, "RX indication bytes=${value.size}")
-                handleFrame(value)
+            if (gatt !== this@BleClient.gatt || characteristic.uuid != TX_UUID) return
+            Log.i(TAG, "RX indication bytes=${value.size}")
+            val frame = value.copyOf()
+            if (_uiState.value.logProgress != null) {
+                handler.post { handleFrame(frame) }
+            } else {
+                handleFrame(frame)
             }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (gatt !== this@BleClient.gatt || characteristic.uuid != RX_UUID) return
-            Log.i(TAG, "TX write status=$status")
-            writeInProgress = false
-            if (status != BluetoothGatt.GATT_SUCCESS) fail("Ошибка передачи BLE: $status") else drainWriteQueue()
+            handler.post { completeCharacteristicWrite(status) }
         }
     }
+
+    private fun completeCharacteristicWrite(status: Int) {
+        Log.i(TAG, "TX write status=$status")
+        writeInProgress = false
+        if (status == BluetoothGatt.GATT_SUCCESS) {
+            if (pendingIdentifyAck) {
+                pendingIdentifyAck = false
+                _uiState.update { it.copy(identifyLedLive = true) }
+            }
+            writeRetryCount = 0
+            pendingWrite = null
+            drainWriteQueue()
+            flushLogAck()
+            return
+        }
+        handleWriteFailure(status)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun resumeAfterPairing() {
+        cancelPairingTimeout()
+        val address = selectedAddress ?: return
+        val current = gatt
+        if (current == null) {
+            Log.i(TAG, "Re-opening GATT after pairing address=$address")
+            connect(address)
+            return
+        }
+        beginGattNegotiation()
+    }
+
+    private fun pairingStatusText(): String =
+        if (_uiState.value.identifyActive) "Подтвердите сопряжение…" else "Подключение…"
 
     @SuppressLint("MissingPermission")
     private fun beginGattNegotiation() {
@@ -374,7 +546,20 @@ class BleClient(context: Context) {
                 payload.get(deviceNonce)
                 payload.get(authSalt)
                 initialized = payload.u8() != 0
-                _uiState.update { it.copy(initialized = initialized, credentialsReady = true, statusText = "Подключено") }
+                val autoAuth = initialized && cachedVerifier != null
+                _uiState.update {
+                    it.copy(
+                        initialized = initialized,
+                        credentialsReady = true,
+                        awaitingUserPassword = !autoAuth,
+                        statusText = if (autoAuth) "Вход…" else "Подключено",
+                        setupName = it.setupName.ifBlank {
+                            it.selectedDevice?.userName ?: "Test-DPLS-001"
+                        },
+                        setupPassword = "",
+                        setupRepeatPassword = "",
+                    )
+                }
                 schedulePreAuthKeepAlive()
                 cachedVerifier?.takeIf { initialized }?.let(::sendAuthProof)
             }
@@ -382,9 +567,35 @@ class BleClient(context: Context) {
                 handler.removeCallbacks(preAuthKeepAlive)
                 val ok = payload.u8() == 0
                 val retryAfter = payload.u16()
-                if (!ok) return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
+                if (!ok && frame.payload[0].toInt() == 3) {
+                    _uiState.update {
+                        it.copy(
+                            phase = ConnectionPhase.RECONNECTING,
+                            statusText = "Настройка сохранена. Повторное подключение…",
+                            credentialsReady = true,
+                            initialized = true,
+                            awaitingUserPassword = false,
+                            setupPassword = "",
+                            setupRepeatPassword = "",
+                            error = null,
+                        )
+                    }
+                    return
+                }
+                if (!ok) {
+                    _uiState.update { it.copy(awaitingUserPassword = true) }
+                    return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
+                }
                 if (payload.remaining() >= 8) payload.get(sessionToken)
-                _uiState.update { it.copy(authenticated = true, phase = ConnectionPhase.SYNCHRONIZING, statusText = "Чтение состояния…", error = null) }
+                _uiState.update {
+                    it.copy(
+                        authenticated = true,
+                        awaitingUserPassword = false,
+                        phase = ConnectionPhase.SYNCHRONIZING,
+                        statusText = "Чтение состояния…",
+                        error = null,
+                    )
+                }
                 send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
                 scheduleKeepAlive()
             }
@@ -396,20 +607,45 @@ class BleClient(context: Context) {
                 val remaining = payload.u16()
                 if (result != 0) return fail("Команда отклонена устройством: $result")
                 _uiState.update { it.copy(commandInProgress = false, statusText = "Команда выполнена, проверка состояния…", lastAckMillis = System.currentTimeMillis()) }
-                send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+                if (_uiState.value.logProgress == null) send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
             }
             DplsProtocol.Type.STATE_REPORT -> parseState(payload)
             DplsProtocol.Type.LOG_INFO -> {
-                if (frame.payload.size < 10) return fail("Повреждённый LOG_INFO")
+                if (frame.payload.size < 10) return failLog("Повреждённый LOG_INFO")
                 payload.u32()
-                logExpectedBytes = payload.int
-                payload.u16()
-                logBytes = byteArrayOf()
+                val totalBytes = payload.int
+                val rawCount = payload.u16()
+                logExpectedEvents = minOf(rawCount, totalBytes / 10, MAX_LOG_EVENTS).coerceIn(0, MAX_LOG_EVENTS)
+                logExpectedBytes = logExpectedEvents * 10
+                logInfoReceived = true
+                logReceivedEvents = 0
                 logNextChunk = 0
+                if (rawCount != logExpectedEvents) {
+                    Log.w(TAG, "LOG_INFO clamped events $rawCount -> $logExpectedEvents (totalBytes=$totalBytes)")
+                } else {
+                    Log.i(TAG, "LOG_INFO events=$logExpectedEvents bytes=$logExpectedBytes")
+                }
+                if (logExpectedEvents == 0) {
+                    logBytes = byteArrayOf()
+                    logChunkReceived = booleanArrayOf()
+                    finishLog()
+                    return
+                }
+                logBytes = ByteArray(logExpectedBytes)
+                logChunkReceived = BooleanArray(logExpectedEvents)
+                logPendingChunks.sortedBy { it.first }.forEach { (chunk, data) ->
+                    applyLogChunk(chunk, data)
+                }
+                logPendingChunks.clear()
+                if (logReceivedEvents < logExpectedEvents) scheduleLogAck()
             }
             DplsProtocol.Type.LOG_CHUNK -> parseLogChunk(payload)
             DplsProtocol.Type.LOG_RESULT -> finishLog()
-            DplsProtocol.Type.ERROR -> fail("Ошибка устройства: ${frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0}")
+            DplsProtocol.Type.ERROR -> {
+                val code = frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
+                if (_uiState.value.logProgress != null) failLog("Ошибка загрузки журнала: $code")
+                else fail("Ошибка устройства: $code")
+            }
             else -> Unit
         }
     }
@@ -422,20 +658,25 @@ class BleClient(context: Context) {
         val automaticReturn = payload.u16()
         val reserveLow = payload.u8() != 0
         payload.u8() // state flags; reserved for hardware-confirmation bits
+        val uptimeSeconds = payload.u32()
+        val revision = payload.u32()
+        val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
         val state = DeviceState(
             mode = mode,
             powerSource = power,
             voltageMv = voltage,
             automaticReturnSeconds = automaticReturn,
             reserveLow = reserveLow,
-            uptimeSeconds = payload.u32(),
-            revision = payload.u32(),
+            uptimeSeconds = uptimeSeconds,
+            revision = revision,
+            receivedAtMillis = System.currentTimeMillis(),
         )
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.READY,
                 statusText = "Состояние подтверждено",
                 state = state,
+                deviceBootEpochSeconds = bootEpoch,
                 authenticated = true,
                 commandInProgress = false,
                 staleState = false,
@@ -445,31 +686,106 @@ class BleClient(context: Context) {
         }
         reachedReady = true
         reconnectAttempt = 0
+        if (_uiState.value.logProgress == null) updateStateRefreshSchedule()
+        if (logLoadPending) {
+            handler.post { loadEventLog() }
+        }
     }
 
     private fun parseLogChunk(payload: ByteBuffer) {
-        if (payload.remaining() < 2) return
+        if (payload.remaining() < 12) return
         val chunk = payload.u16()
-        if (chunk != logNextChunk) return sendLogAck()
-        val data = ByteArray(payload.remaining()).also(payload::get)
-        logBytes += data
-        logNextChunk++
-        _uiState.update { it.copy(logProgress = if (logExpectedBytes == 0) 0f else (logBytes.size.toFloat() / logExpectedBytes).coerceAtMost(1f)) }
-        sendLogAck()
+        val data = ByteArray(10)
+        payload.get(data)
+        if (!logInfoReceived) {
+            logPendingChunks.removeAll { it.first == chunk }
+            logPendingChunks.add(chunk to data)
+            return
+        }
+        applyLogChunk(chunk, data)
     }
 
-    private fun sendLogAck() {
-        val chunk = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(logNextChunk.toShort()).array()
-        send(DplsProtocol.Type.LOG_ACK, authenticatedPayload() + chunk)
+    private fun applyLogChunk(chunk: Int, data: ByteArray) {
+        if (logExpectedEvents == 0) return
+        if (chunk >= logExpectedEvents) {
+            Log.w(TAG, "LOG_CHUNK out of range chunk=$chunk expected=$logExpectedEvents")
+            if (logReceivedEvents >= logExpectedEvents) finishLog()
+            return
+        }
+        if (!logChunkReceived[chunk]) {
+            System.arraycopy(data, 0, logBytes, chunk * 10, 10)
+            logChunkReceived[chunk] = true
+            logReceivedEvents++
+            val progress = logReceivedEvents.toFloat() / logExpectedEvents.toFloat()
+            _uiState.update { it.copy(logProgress = progress.coerceIn(0.05f, 1f)) }
+            Log.i(TAG, "LOG_CHUNK $chunk ok received=$logReceivedEvents/$logExpectedEvents")
+        }
+        if (logReceivedEvents >= logExpectedEvents) {
+            finishLog()
+            return
+        }
+        scheduleLogAck()
     }
+
+    private fun scheduleLogAck() {
+        val next = logChunkReceived.indices.firstOrNull { !logChunkReceived[it] } ?: logExpectedEvents
+        pendingLogAckIndex = next
+        handler.removeCallbacks(flushLogAckRunnable)
+        handler.postDelayed(flushLogAckRunnable, LOG_ACK_DELAY_MS)
+    }
+
+    private val flushLogAckRunnable = Runnable { flushLogAck() }
+
+    private fun flushLogAck() {
+        if (_uiState.value.logProgress == null) return
+        if (writeInProgress) {
+            handler.postDelayed(flushLogAckRunnable, LOG_ACK_DELAY_MS)
+            return
+        }
+        val index = pendingLogAckIndex ?: return
+        pendingLogAckIndex = null
+        logNextChunk = index
+        val chunk = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(index.toShort()).array()
+        val bytes = DplsProtocol.encode(
+            DplsProtocol.Frame(DplsProtocol.Type.LOG_ACK, nextSequence(), payload = authenticatedPayload() + chunk),
+        )
+        writeQueue.clear()
+        writeQueue.addLast(bytes)
+        drainWriteQueue()
+    }
+
+    private fun isValidEventRecord(record: EventRecord): Boolean =
+        record.type in 1..11 && record.sequence != 0L
 
     private fun finishLog() {
+        handler.removeCallbacks(logLoadTimeout)
+        handler.removeCallbacks(flushLogAckRunnable)
+        logInfoReceived = false
         val records = logBytes.asList().chunked(10).mapNotNull { raw ->
             if (raw.size != 10) null else ByteBuffer.wrap(raw.toByteArray()).order(ByteOrder.LITTLE_ENDIAN).let {
                 EventRecord(it.u32(), it.u32(), it.u8(), it.u8())
             }
+        }.filter(::isValidEventRecord)
+            .sortedWith(
+                compareByDescending<EventRecord> { it.timestampSeconds }
+                    .thenByDescending { it.sequence },
+            )
+        val rawCount = if (logExpectedBytes == 0) 0 else logBytes.size / 10
+        Log.i(TAG, "LOG_DONE raw=$rawCount records=${records.size}")
+        logLoadPending = false
+        _uiState.update { it.copy(eventLog = records, logProgress = null, statusText = "Журнал загружен: ${records.size} записей", error = null) }
+        scheduleKeepAlive()
+        updateStateRefreshSchedule()
+    }
+
+    private val logLoadTimeout = Runnable {
+        if (_uiState.value.logProgress != null) {
+            logInfoReceived = false
+            logLoadPending = false
+            _uiState.update { it.copy(logProgress = null, error = "Не удалось загрузить журнал") }
+            scheduleKeepAlive()
+            updateStateRefreshSchedule()
         }
-        _uiState.update { it.copy(eventLog = records, logProgress = null, statusText = "Журнал загружен: ${records.size} записей") }
     }
 
     private fun sendAuthProof(verifier: ByteArray) {
@@ -488,10 +804,32 @@ class BleClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun send(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf()) {
-        val bytes = DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload))
-        if (bytes.size > negotiatedMtu - 3) return fail("Кадр ${bytes.size} байт не помещается в MTU $negotiatedMtu")
-        writeQueue.addLast(bytes)
-        drainWriteQueue()
+        enqueueWrite(DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload)))
+    }
+
+    private fun sendPriority(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf(), flush: Boolean = false) {
+        handler.post {
+            if (flush) resetWriteState()
+            if (payload.size > negotiatedMtu - 3) {
+                fail("Кадр ${payload.size} байт не помещается в MTU $negotiatedMtu")
+                return@post
+            }
+            val bytes = DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload))
+            writeQueue.addFirst(bytes)
+            drainWriteQueue()
+        }
+    }
+
+    private fun enqueueWrite(bytes: ByteArray, front: Boolean = false) {
+        if (bytes.size > negotiatedMtu - 3) {
+            fail("Кадр ${bytes.size} байт не помещается в MTU $negotiatedMtu")
+            return
+        }
+        handler.post {
+            if (_uiState.value.logProgress != null) return@post
+            if (front) writeQueue.addFirst(bytes) else writeQueue.addLast(bytes)
+            drainWriteQueue()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -501,11 +839,57 @@ class BleClient(context: Context) {
         val characteristic = rx ?: return
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
+        pendingWrite = bytes
         val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
         if (result != BluetoothStatusCodes.SUCCESS) {
             writeInProgress = false
-            fail("BLE write не запущен: $result")
+            handleWriteFailure(result)
         }
+    }
+
+    private fun handleWriteFailure(status: Int) {
+        val bytes = pendingWrite
+        pendingWrite = null
+        val state = _uiState.value
+        val preAuth = state.credentialsReady && !state.authenticated
+        val identifying = state.identifyActive
+        val transient = isTransientWriteStatus(status)
+
+        if (bytes != null && transient && writeRetryCount < MAX_WRITE_RETRIES) {
+            writeRetryCount++
+            Log.w(TAG, "TX write retry $writeRetryCount/$MAX_WRITE_RETRIES after status=$status")
+            writeQueue.addFirst(bytes)
+            handler.postDelayed({ drainWriteQueue() }, 150L * writeRetryCount)
+            return
+        }
+        writeRetryCount = 0
+
+        if (preAuth || identifying || state.phase == ConnectionPhase.RECONNECTING) {
+            Log.w(TAG, "TX write status=$status ignored during pre-auth/identify/reconnect")
+            if (bytes != null) writeQueue.addLast(bytes)
+            return
+        }
+
+        if (status == 133) {
+            Log.w(TAG, "TX write status=133; waiting for disconnect/reconnect")
+            if (state.logProgress != null && bytes != null) {
+                pendingLogAckIndex = logNextChunk
+                handler.postDelayed(flushLogAckRunnable, 250L)
+            }
+            return
+        }
+
+        fail("Ошибка передачи BLE: $status")
+    }
+
+    private fun isTransientWriteStatus(status: Int): Boolean =
+        status in TRANSIENT_WRITE_STATUSES
+
+    private fun resetWriteState() {
+        writeQueue.clear()
+        writeInProgress = false
+        pendingWrite = null
+        writeRetryCount = 0
     }
 
     private fun nextSequence(): Int = sequence.also { sequence = (sequence + 1) and 0xffff }
@@ -517,7 +901,12 @@ class BleClient(context: Context) {
 
     private val preAuthKeepAlive = object : Runnable {
         override fun run() {
-            if (_uiState.value.credentialsReady && !_uiState.value.authenticated && gatt != null) {
+            val state = _uiState.value
+            if (state.identifyActive) {
+                handler.postDelayed(this, PRE_AUTH_KEEP_ALIVE_MS)
+                return
+            }
+            if (state.credentialsReady && !state.authenticated && gatt != null) {
                 send(DplsProtocol.Type.KEEP_ALIVE)
                 handler.postDelayed(this, PRE_AUTH_KEEP_ALIVE_MS)
             }
@@ -529,10 +918,33 @@ class BleClient(context: Context) {
         handler.postDelayed(keepAlive, KEEP_ALIVE_MS)
     }
 
+    private fun updateStateRefreshSchedule() {
+        handler.removeCallbacks(stateRefresh)
+        if (_uiState.value.logProgress != null) return
+        val state = _uiState.value
+        val mode = state.state?.mode
+        if (state.authenticated && !state.commandInProgress && mode != null && mode != DplsMode.NORMAL && gatt != null) {
+            handler.postDelayed(stateRefresh, STATE_REFRESH_MS)
+        }
+    }
+
+    private val stateRefresh = object : Runnable {
+        override fun run() {
+            val current = _uiState.value
+            if (current.logProgress != null) return
+            if (current.authenticated && current.state?.mode != DplsMode.NORMAL && gatt != null) {
+                send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+                handler.postDelayed(this, STATE_REFRESH_MS)
+            }
+        }
+    }
+
     private val keepAlive = object : Runnable {
         override fun run() {
-            if (_uiState.value.authenticated && gatt != null) {
+            if (_uiState.value.authenticated && gatt != null && _uiState.value.logProgress == null) {
                 send(DplsProtocol.Type.KEEP_ALIVE, authenticatedPayload())
+            }
+            if (_uiState.value.authenticated && gatt != null) {
                 handler.postDelayed(this, KEEP_ALIVE_MS)
             }
         }
@@ -542,13 +954,14 @@ class BleClient(context: Context) {
     private fun handleBluetoothOff() {
         handler.removeCallbacks(preAuthKeepAlive)
         handler.removeCallbacks(keepAlive)
+        handler.removeCallbacks(stateRefresh)
+        cancelPairingTimeout()
         cancelReconnect()
         closeCurrentGatt()
         scanning = false
         rx = null
         tx = null
-        writeQueue.clear()
-        writeInProgress = false
+        resetWriteState()
         sessionToken.fill(0)
         cachedVerifier?.fill(0)
         cachedVerifier = null
@@ -570,8 +983,7 @@ class BleClient(context: Context) {
         handler.removeCallbacks(preAuthKeepAlive)
         rx = null
         tx = null
-        writeQueue.clear()
-        writeInProgress = false
+        resetWriteState()
         sessionToken.fill(0)
         val lastState = _uiState.value.state
         if (!reachedReady && reconnectAttempt >= MAX_INITIAL_RECONNECT_ATTEMPTS) {
@@ -586,9 +998,13 @@ class BleClient(context: Context) {
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.RECONNECTING,
-                statusText = if (reachedReady) "Восстановление связи…" else "Подключение…",
+                statusText = when {
+                    logLoadPending -> "Восстановление связи…"
+                    reachedReady -> "Восстановление связи…"
+                    else -> "Подключение…"
+                },
                 staleState = lastState != null,
-                credentialsReady = false,
+                credentialsReady = cachedVerifier != null,
                 authenticated = false,
             )
         }
@@ -607,10 +1023,13 @@ class BleClient(context: Context) {
         stopScan()
         handler.removeCallbacks(preAuthKeepAlive)
         handler.removeCallbacks(keepAlive)
+        handler.removeCallbacks(stateRefresh)
+        cancelPairingTimeout()
         cancelReconnect()
         closeCurrentGatt()
         rx = null
         tx = null
+        resetWriteState()
         reachedReady = false
         reconnectAttempt = 0
         if (clearSelection) selectedAddress = null
@@ -629,18 +1048,74 @@ class BleClient(context: Context) {
         reconnectRunnable = null
     }
 
+    private fun schedulePairingTimeout() {
+        cancelPairingTimeout()
+        pairingPollRunnable = object : Runnable {
+            @SuppressLint("MissingPermission")
+            override fun run() {
+                if (_uiState.value.phase != ConnectionPhase.PAIRING) return
+                if (gatt?.device?.bondState == BluetoothDevice.BOND_BONDED) {
+                    resumeAfterPairing()
+                    return
+                }
+                handler.postDelayed(this, PAIRING_POLL_MS)
+            }
+        }.also { handler.postDelayed(it, PAIRING_POLL_MS) }
+        pairingTimeoutRunnable = Runnable {
+            pairingTimeoutRunnable = null
+            if (_uiState.value.phase == ConnectionPhase.PAIRING) {
+                fail("Сопряжение не подтверждено. Повторите попытку и нажмите «Сопряжение» в системном окне")
+                closeCurrentGatt()
+            }
+        }.also { handler.postDelayed(it, PAIRING_TIMEOUT_MS) }
+    }
+
+    private fun cancelPairingTimeout() {
+        pairingTimeoutRunnable?.let(handler::removeCallbacks)
+        pairingTimeoutRunnable = null
+        pairingPollRunnable?.let(handler::removeCallbacks)
+        pairingPollRunnable = null
+    }
+
+    private fun failLog(message: String) {
+        Log.e(TAG, message)
+        handler.removeCallbacks(logLoadTimeout)
+        logInfoReceived = false
+        logLoadPending = false
+        _uiState.update { it.copy(logProgress = null, error = message) }
+        scheduleKeepAlive()
+    }
+
     private fun fail(message: String) {
         Log.e(TAG, message)
-        _uiState.update { it.copy(phase = ConnectionPhase.ERROR, statusText = message, error = message, commandInProgress = false) }
+        handler.removeCallbacks(logLoadTimeout)
+        logInfoReceived = false
+        _uiState.update {
+            it.copy(
+                phase = ConnectionPhase.ERROR,
+                statusText = message,
+                error = message,
+                commandInProgress = false,
+                logProgress = null,
+            )
+        }
     }
 
     companion object {
         private const val TAG = "TestDplsBle"
         private const val SCAN_DURATION_MS = 20_000L
+        private const val PAIRING_TIMEOUT_MS = 45_000L
+        private const val PAIRING_POLL_MS = 250L
         private const val COMMAND_TIMEOUT_MS = 3_000L
         private const val PRE_AUTH_KEEP_ALIVE_MS = 3_000L
         private const val KEEP_ALIVE_MS = 3_000L
+        private const val STATE_REFRESH_MS = 1_000L
+        private const val LOG_LOAD_TIMEOUT_MS = 90_000L
+        private const val LOG_ACK_DELAY_MS = 50L
+        private const val MAX_LOG_EVENTS = 200
+        private const val MAX_WRITE_RETRIES = 3
         private const val MAX_INITIAL_RECONNECT_ATTEMPTS = 3
+        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 143, 201)
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
         private const val MANUFACTURER_ID = 0x0B01

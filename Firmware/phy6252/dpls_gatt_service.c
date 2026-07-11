@@ -20,7 +20,10 @@ static uint8 rx_properties = GATT_PROP_WRITE;
 static uint8 tx_properties = GATT_PROP_INDICATE | GATT_PROP_NOTIFY;
 static uint8 rx_value;
 static uint8 tx_value;
-static gattCharCfg_t tx_cccd;
+/* The PHY62XX helpers always iterate GATT_MAX_NUM_CONN entries (which also
+ * includes the loopback slot). A scalar here corrupts adjacent static data
+ * after reconnects and eventually makes ATT writes fail with 0x0e. */
+static gattCharCfg_t tx_cccd[GATT_MAX_NUM_CONN];
 static dpls_gatt_rx_cb_t app_rx;
 
 static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *len, uint16 offset, uint8 max_len);
@@ -39,7 +42,8 @@ static gattAttribute_t attrs[DPLS_ATTR_COUNT] = {
 CONST gattServiceCBs_t callbacks = {(pfnGATTReadAttrCB_t)read_cb, (pfnGATTWriteAttrCB_t)write_cb, NULL};
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback) {
-    app_rx = rx_callback; tx_cccd.connHandle = INVALID_CONNHANDLE; tx_cccd.value = 0;
+    app_rx = rx_callback;
+    GATTServApp_InitCharCfg(INVALID_CONNHANDLE, tx_cccd);
     linkDB_Register(connection_cb);
     return GATTServApp_RegisterService(attrs, GATT_NUM_ATTRS(attrs), &callbacks);
 }
@@ -66,22 +70,27 @@ static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint
 static void connection_cb(uint16 conn, uint8 change) {
     if (conn != LOOPBACK_CONNHANDLE && (change == LINKDB_STATUS_UPDATE_REMOVED ||
         (change == LINKDB_STATUS_UPDATE_STATEFLAGS && !linkDB_Up(conn)))) {
-        tx_cccd.connHandle = INVALID_CONNHANDLE; tx_cccd.value = 0;
+        GATTServApp_InitCharCfg(conn, tx_cccd);
     }
 }
 
-bool dpls_gatt_subscribed(void) { return tx_cccd.value != GATT_CFG_NO_OPERATION; }
+bool dpls_gatt_subscribed(void) {
+    uint8 i;
+    for (i = 0; i < GATT_MAX_NUM_CONN; ++i)
+        if (tx_cccd[i].connHandle != INVALID_CONNHANDLE && tx_cccd[i].value != GATT_CFG_NO_OPERATION) return true;
+    return false;
+}
 
 bool dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     attHandleValueInd_t ind;
-    if (!(tx_cccd.value & GATT_CLIENT_CFG_INDICATE) || length > ATT_MTU_SIZE - 3) return false;
+    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_INDICATE) || length > ATT_MTU_SIZE - 3) return false;
     ind.handle = attrs[DPLS_TX_VALUE_INDEX].handle; ind.len = length; osal_memcpy(ind.value, data, length);
     return GATT_Indication(conn, &ind, FALSE, task_id) == SUCCESS;
 }
 
 bool dpls_gatt_send_notification(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     attHandleValueNoti_t noti;
-    if (!(tx_cccd.value & GATT_CLIENT_CFG_NOTIFY) || length > ATT_MTU_SIZE - 3) return false;
+    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_NOTIFY) || length > ATT_MTU_SIZE - 3) return false;
     noti.handle = attrs[DPLS_TX_VALUE_INDEX].handle; noti.len = length; osal_memcpy(noti.value, data, length);
     return GATT_Notification(conn, &noti, FALSE) == SUCCESS;
 }

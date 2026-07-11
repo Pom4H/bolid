@@ -9,6 +9,7 @@
 #include "ll.h"
 #include "ll_common.h"
 #include "linkdb.h"
+#include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
 #include "simpleBLEPeripheral.h"
 
@@ -40,6 +41,7 @@ static void state_changed(gaprole_States_t state)
     switch (state) {
     case GAPROLE_STARTED: {
         uint8 enabled = TRUE;
+        dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
         break;
@@ -65,6 +67,10 @@ static void state_changed(gaprole_States_t state)
 static void rssi_changed(int8 rssi) { (void)rssi; }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
+/* The board has no display or confirmation key. Advertising DISPLAY_YES_NO
+ * selects an interactive legacy pairing path that this hardware cannot
+ * represent. Just Works still gives DPLS an encrypted bonded link; the DPLS
+ * password remains the authorization boundary for control commands. */
 static gapBondCBs_t bond_callbacks = { NULL, NULL };
 
 void SimpleBLEPeripheral_Init(uint8 task_id)
@@ -84,8 +90,17 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 mitm = FALSE;
     uint8 io_capability = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
     uint8 bonding = TRUE;
+    /* PHY62xx 3.1.1 advertises CSRK distribution but does not complete the
+     * signing-key PDU sequence with current Android.  The link uses encrypted
+     * GATT writes and never signed, unencrypted writes, so exchange only the
+     * encryption and identity keys required for bonding/reconnection. */
+    uint8 key_distribution = GAPBOND_KEYDIST_SENCKEY |
+                             GAPBOND_KEYDIST_SIDKEY |
+                             GAPBOND_KEYDIST_MENCKEY |
+                             GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
+    dpls_ble_identity_prepare();
     (void)LL_EXT_SetSCA(500);
     GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, 2);
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
@@ -107,6 +122,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPBondMgr_SetParameter(GAPBOND_MITM_PROTECTION, sizeof(mitm), &mitm);
     GAPBondMgr_SetParameter(GAPBOND_IO_CAPABILITIES, sizeof(io_capability), &io_capability);
     GAPBondMgr_SetParameter(GAPBOND_BONDING_ENABLED, sizeof(bonding), &bonding);
+    GAPBondMgr_SetParameter(GAPBOND_KEY_DIST_LIST, sizeof(key_distribution), &key_distribution);
 
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GGS_AddService(GATT_ALL_SERVICES);

@@ -57,7 +57,7 @@ project:
         - DEF_GAPBOND_MGR_ENABLE: "1"
         - USE_FS: "1"
         - MAX_NUM_LL_CONN: "1"
-        - DPLS_EVENT_CAPACITY: "64"
+        - DPLS_EVENT_CAPACITY: "200"
         - __MICROLIB
       define-asm:
         - __MICROLIB
@@ -148,6 +148,7 @@ project:
         - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_server.c
         - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_gatt_service.c
         - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_phy6252_app.c
+        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_ble_identity.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/hmac.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/sha256.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/utils.c

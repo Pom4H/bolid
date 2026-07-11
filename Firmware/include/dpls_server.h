@@ -15,6 +15,7 @@
 #define DPLS_SESSION_TIMEOUT_MS 10000u
 #define DPLS_AUTH_BLOCK_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
+#define DPLS_IDENTIFY_BLINK_MS 500u
 
 typedef enum {
     DPLS_MODE_NORMAL = 0,
@@ -26,6 +27,11 @@ typedef enum {
 } dpls_mode_t;
 
 typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
+typedef enum {
+    DPLS_SETTINGS_EMPTY = 0,
+    DPLS_SETTINGS_VALID = 1,
+    DPLS_SETTINGS_CORRUPT = 2,
+} dpls_settings_state_t;
 typedef enum {
     DPLS_RETURN_OPERATOR = 0,
     DPLS_RETURN_MODE_TIMEOUT = 1,
@@ -51,8 +57,8 @@ typedef struct {
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
     void (*identify_led)(void *context, bool enabled);
-    void (*random_bytes)(void *context, uint8_t *out, size_t length);
-    bool (*settings_initialized)(void *context);
+    bool (*random_bytes)(void *context, uint8_t *out, size_t length);
+    dpls_settings_state_t (*settings_state)(void *context);
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
@@ -61,6 +67,7 @@ typedef struct {
     bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
     void *context;
     void (*diagnostic_error)(void *context, bool critical);
+    void (*disconnect_after_setup)(void *context);
 } dpls_hal_t;
 
 typedef struct {
@@ -77,6 +84,9 @@ typedef struct {
     bool connected;
     bool authenticated;
     bool identify_active;
+    bool identify_led_on;
+    bool hello_received;
+    bool critical_fault;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
     uint32_t now_ms;
@@ -84,6 +94,8 @@ typedef struct {
     uint32_t last_authenticated_activity_ms;
     uint32_t mode_deadline_ms;
     uint32_t identify_deadline_ms;
+    uint32_t identify_blink_last_ms;
+    uint32_t setup_disconnect_deadline_ms;
     uint32_t state_revision;
     uint16_t tx_sequence;
     uint8_t device_nonce[16];

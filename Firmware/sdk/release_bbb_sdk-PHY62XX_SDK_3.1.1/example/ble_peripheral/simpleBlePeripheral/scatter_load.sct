@@ -47,6 +47,7 @@ LR_ROM_XIP  0x11020000 0x020000 {
    dpls_server.o(+RO)
    dpls_gatt_service.o(+RO)
    dpls_phy6252_app.o(+RO)
+   dpls_ble_identity.o(+RO)
    dplsBLEPeripheral.o(+RO)
    hmac.o(+RO)
    sha256.o(+RO)

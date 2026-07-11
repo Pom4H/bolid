@@ -33,11 +33,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startConnectionService()
         client.identify(address)
     }
+
+    fun stopIdentify() = client.stopIdentify()
+    fun confirmIdentifiedDevice() = client.confirmIdentifiedDevice()
+    fun fillLoginFormForE2e(password: String) = client.fillLoginFormForE2e(password)
+    fun fillSetupFormForE2e(name: String, password: String) = client.fillSetupFormForE2e(name, password)
+    fun updateSetupName(name: String) = client.updateSetupName(name)
+    fun updateSetupPassword(password: String) = client.updateSetupPassword(password)
+    fun updateSetupRepeatPassword(password: String) = client.updateSetupRepeatPassword(password)
     fun requestMode(mode: DplsMode) = client.requestMode(mode)
     fun cancelMode() = client.cancelMode()
     fun confirmMode() = client.confirmMode()
     fun returnToNormal() = client.returnToNormal()
     fun loadEventLog() = client.loadEventLog()
+    fun refreshState() = client.refreshState()
     fun disconnect() {
         client.disconnect()
         app.stopService(Intent(app, BleConnectionService::class.java))
@@ -48,8 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         uiState.value.eventLog.forEach { appendLine("${it.sequence};${it.timestampSeconds};${it.type};${it.parameter}") }
     }
 
-    fun eventLogJson(): String = uiState.value.eventLog.joinToString(prefix = "[\n", postfix = "\n]", separator = ",\n") {
-        "  {\"sequence\":${it.sequence},\"timestampSeconds\":${it.timestampSeconds},\"eventType\":${it.type},\"parameter\":${it.parameter}}"
+    fun eventLogTxt(): String = buildString {
+        appendLine("Журнал событий Тест-ДПЛС")
+        uiState.value.eventLog.forEach {
+            appendLine("#${it.sequence}  t=${it.timestampSeconds} с  событие ${it.type}  параметр ${it.parameter}")
+        }
     }
 
     private fun startConnectionService() {

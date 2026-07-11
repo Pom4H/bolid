@@ -34,6 +34,8 @@ data class DeviceState(
     val automaticReturnSeconds: Int,
     val uptimeSeconds: Long,
     val revision: Long,
+    /** Wall-clock millis when this snapshot was received from the device. */
+    val receivedAtMillis: Long = 0L,
 )
 
 data class EventRecord(
@@ -57,9 +59,23 @@ data class DplsUiState(
     val staleState: Boolean = false,
     val lastAckMillis: Long? = null,
     val eventLog: List<EventRecord> = emptyList(),
+    /** Phone wall-clock epoch (s) when device uptime was 0; used to show journal time on phone. */
+    val deviceBootEpochSeconds: Long? = null,
     val logProgress: Float? = null,
+    val identifyActive: Boolean = false,
+    val identifyLedLive: Boolean = false,
+    val setupName: String = "",
+    val setupPassword: String = "",
+    val setupRepeatPassword: String = "",
+    /** True when UI should collect password/setup; false during auto-reauth after setup or cached login. */
+    val awaitingUserPassword: Boolean = false,
     val error: String? = null,
 ) {
     val controlsEnabled: Boolean
         get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
+
+    val setupFormReady: Boolean
+        get() = credentialsReady &&
+            setupPassword.length >= 8 &&
+            (initialized || (setupRepeatPassword == setupPassword && setupName.isNotBlank()))
 }
