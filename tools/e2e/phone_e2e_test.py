@@ -71,6 +71,7 @@ START_ONLY = "--start-only" in sys.argv
 MAIN_ONLY = "--main-only" in sys.argv
 FILL_JOURNAL = "--fill-journal" in sys.argv
 JOURNAL_ONLY = "--journal-only" in sys.argv
+NO_JOURNAL = "--no-journal" in sys.argv
 KEEP_BOND = "--keep-bond" in sys.argv or JOURNAL_ONLY
 if JOURNAL_ONLY:
     FILL_JOURNAL = True
@@ -654,6 +655,15 @@ def phase_main(results: list[tuple[str, str]]) -> None:
             step(f"  режим {mode}")
             run_test_mode(mode)
             results.append((f"mode_{mode}", "OK"))
+
+    if NO_JOURNAL:
+        # Журнал и экспорт (он читает журнал из состояния) пропущены —
+        # это самая долгая фаза (~95 с на полную выгрузку 200 записей).
+        step("Основной: журнал/экспорт пропущены (--no-journal)")
+        results.append(("journal", "SKIP"))
+        results.append(("export", "SKIP"))
+        change_device_name_and_password(results)
+        return
 
     verify_journal_and_rotation(results)
 

@@ -356,16 +356,41 @@ class BleClient(context: Context) {
         e2eModeTarget = mode
         e2eModePhase = E2eModePhase.APPLY
         e2eModeDeadlineMs = System.currentTimeMillis() + E2E_MODE_TIMEOUT_MS
-        handler.post {
-            if (!_uiState.value.controlsEnabled) {
-                Log.e(TAG, "E2E mode blocked: controls disabled")
-                e2eModeTarget = null
-                return@post
+        // After the lockout restart the reconnect can leave the phase parked in
+        // ERROR even though the link is authenticated and up, so controls stay
+        // disabled. Poll for readiness up to the deadline and, while waiting,
+        // nudge a STATE_GET once per second: a fresh STATE_REPORT drives the
+        // phase back to READY deterministically instead of relying on luck.
+        var lastNudgeMs = 0L
+        val starter = object : Runnable {
+            override fun run() {
+                if (System.currentTimeMillis() > e2eModeDeadlineMs) {
+                    val s = _uiState.value
+                    Log.e(
+                        TAG,
+                        "E2E mode blocked: controls disabled " +
+                            "phase=${s.phase} auth=${s.authenticated} " +
+                            "cmdInProgress=${s.commandInProgress} hasState=${s.state != null}",
+                    )
+                    e2eModeTarget = null
+                    return
+                }
+                val s = _uiState.value
+                if (!s.controlsEnabled) {
+                    val now = System.currentTimeMillis()
+                    if (s.authenticated && now - lastNudgeMs >= 1_000L) {
+                        lastNudgeMs = now
+                        send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+                    }
+                    handler.postDelayed(this, E2E_MODE_POLL_MS)
+                    return
+                }
+                requestMode(mode)
+                confirmMode()
+                handler.post(e2eModeRunner)
             }
-            requestMode(mode)
-            confirmMode()
-            handler.post(e2eModeRunner)
         }
+        handler.post(starter)
     }
 
     fun exportLogCsvForE2e() {
