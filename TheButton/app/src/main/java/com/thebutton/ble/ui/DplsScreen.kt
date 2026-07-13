@@ -98,6 +98,20 @@ private fun App(
         if (state.authenticated) identifying = null
     }
 
+    // Self-heal a stuck authenticated session: if the link drifts to a
+    // non-READY phase (e.g. ERROR after a reconnect) the controls grey out with
+    // no way back through the UI. Nudge a STATE_GET each second — a fresh
+    // STATE_REPORT drives the phase back to READY. Cancels the moment controls
+    // come back (the key flips).
+    LaunchedEffect(state.authenticated, state.controlsEnabled) {
+        if (state.authenticated && !state.controlsEnabled && state.state != null) {
+            while (true) {
+                delay(1500)
+                refreshState()
+            }
+        }
+    }
+
     Scaffold(modifier = modifier.background(Bg), containerColor = Bg, bottomBar = {
         if (showTabs) BottomNav(page) { page = it; pickingTest = false }
     }) { insets ->
@@ -122,7 +136,7 @@ private fun App(
                 page == Page.MAIN -> OperationScreen(state, { pickingTest = true }, normal)
                 page == Page.LOG -> LogScreen(state, loadLog) { page = Page.EXPORT }
                 page == Page.EXPORT -> ExportScreen({ page = Page.LOG }, exportCsv, exportTxt)
-                page == Page.SETTINGS -> SettingsScreen(state, { page = Page.NAME }, { page = Page.PASSWORD }, { page = Page.ABOUT })
+                page == Page.SETTINGS -> SettingsScreen(state, { page = Page.NAME }, { page = Page.PASSWORD }, { page = Page.ABOUT }, disconnect)
                 page == Page.NAME -> NameScreen(state) { page = Page.SETTINGS }
                 page == Page.PASSWORD -> PasswordScreen { page = Page.SETTINGS }
                 page == Page.ABOUT -> AboutScreen { page = Page.SETTINGS }
@@ -354,6 +368,7 @@ private fun RowScope.NavTab(
             if (!state.initialized) DarkField("Имя устройства", state.setupName, onChange = onName)
             DarkField("Пароль", state.setupPassword, true, onPassword)
             if (!state.initialized) DarkField("Повторите пароль", state.setupRepeatPassword, true, onRepeat)
+            state.error?.let { Text(it, color = Orange, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) }
         }
         PrimaryButton(if (state.initialized) "Подключиться" else "Сохранить", {
             if (state.initialized) auth(state.setupPassword.toCharArray()) else setup(state.setupName, state.setupPassword.toCharArray())
@@ -579,7 +594,7 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
 
 @Composable private fun FormatRow(title: String, selected: Boolean, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 92.dp).border(1.dp, Line, RoundedCornerShape(5.dp)).clickable(onClick = click).padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text("▤", fontSize = 38.sp); Text(title, Modifier.weight(1f).padding(start = 22.dp), fontSize = 17.sp, maxLines = 1); RadioButton(selected, click, colors = RadioButtonDefaults.colors(selectedColor = Blue)) } }
 
-@Composable private fun SettingsScreen(state: DplsUiState, name: () -> Unit, password: () -> Unit, about: () -> Unit) {
+@Composable private fun SettingsScreen(state: DplsUiState, name: () -> Unit, password: () -> Unit, about: () -> Unit, disconnect: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Настройки")
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -587,6 +602,7 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
             SettingRow("Пароль", "••••••••", Muted, password)
             SettingRow("Автовозврат в Норма", "5 минут", Green) {}
             SettingRow("Информация об устройстве", "", Muted, about)
+            SettingRow("Отключиться", "", Orange, disconnect)
         }
     }
 }
