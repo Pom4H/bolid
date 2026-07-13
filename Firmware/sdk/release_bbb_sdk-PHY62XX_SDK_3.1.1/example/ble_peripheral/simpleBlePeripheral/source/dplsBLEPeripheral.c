@@ -44,6 +44,7 @@ static void state_changed(gaprole_States_t state)
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
+        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, 50);
         break;
     }
     case GAPROLE_CONNECTED: {
@@ -160,6 +161,11 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         dpls_phy6252_tick();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
         return events ^ SBP_DPLS_TICK_EVT;
+    }
+    if (events & SBP_DPLS_LED_EVT) {
+        uint32 next_ms = dpls_phy6252_led_tick();
+        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+        return events ^ SBP_DPLS_LED_EVT;
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();

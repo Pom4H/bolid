@@ -1,10 +1,15 @@
 #include "dpls_phy6252_app.h"
 
 #include "dpls_ble_identity.h"
+#include "dpls_board.h"
+#include "dpls_calib.h"
 #include "dpls_gatt_service.h"
+#include "dpls_led.h"
 #include "dpls_server.h"
 #include "OSAL.h"
 #include "OSAL_Timers.h"
+#include "adc.h"
+#include "error.h"
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
@@ -18,8 +23,10 @@
 #include <string.h>
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
+#define DPLS_CALIB_MAGIC 0x434C5044u
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
+#define DPLS_CALIB_SNV_ID 0x82u
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
 #define DPLS_JOURNAL_RECORD_SIZE 12u
@@ -28,18 +35,41 @@
 #define DPLS_NAME_SIZE 32u
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
-#define DPLS_FACTORY_RESET_PIN GPIO_P14
+#define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
+/* Bound the LED re-arming interval: fine enough for a 150 ms flash edge, but
+ * still cheap during the long inter-series pauses. */
+#define DPLS_LED_TICK_MIN_MS 10u
+#define DPLS_LED_TICK_MAX_MS 250u
+/* Line-voltage ADC: sample about once a second (every Nth 200 ms tick) and
+ * average over a short window against noise, keeping the pulsed draw within the
+ * ≤0.5 mA budget. */
+#define DPLS_ADC_DECIMATE 5u
+#define DPLS_ADC_WINDOW 8u
+/* Power-source detection from the line voltage, with hysteresis so a value near
+ * the threshold does not flap. Below the 5 V line minimum the device is running
+ * from its reserve (also true while it is shorting the line in a KZ mode). */
+#define DPLS_LINE_PRESENT_MV 4000u
+#define DPLS_LINE_ABSENT_MV 3000u
+/* Reserve super-capacitor low/clear thresholds (usable window ~5.0→3.6 V).
+ * These depend on the VCAP divider, which is not in the supplied schematic —
+ * confirm and calibrate on hardware. */
+#define DPLS_RESERVE_LOW_MV 3700u
+#define DPLS_RESERVE_OK_MV 4000u
+/* Placeholder VCAP divider until the schematic value is known; calibratable via
+ * the same NVM block as the line channel. */
+#define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
+/* Real short-circuit (BRIZ-T auto-isolation): the RE gives a 2.9–3.4 V trip
+ * band. Firmware only observes, indicates and logs — the actual ≤200 ms current
+ * interruption is done in hardware. Detection is armed only after the line has
+ * been seen healthy, so powering up with no line does not look like a short. */
+#define DPLS_AUTOISO_TRIP_MV 3000u
+#define DPLS_AUTOISO_CLEAR_MV 4500u
 /* Drop stale NV bonds after repeated encrypted links that never reach DPLS auth. */
 #define DPLS_BOND_DESYNC_LIMIT 3u
 #define DPLS_BOND_DESYNC_WINDOW_MS 120000u
 /* Plaintext link timeout — pairing never completed. */
 #define DPLS_LINK_ENCRYPT_TIMEOUT_MS 15000u
-
-/* PB-03F-Kit schematic: P11 is the green RGB LED and P7 is red. Relays are
- * deliberately not assigned on the bare evaluation board. */
-#define DPLS_IDENTIFY_LED GPIO_P11
-#define DPLS_MODE_LED GPIO_P07
 
 typedef struct {
     uint32_t magic;
@@ -49,8 +79,21 @@ typedef struct {
     uint16_t crc;
 } dpls_settings_t;
 
+/* Persisted two-point calibration. The reserve (VCAP) fields are reserved for
+ * the reserve-monitoring stage and stored now so the layout stays fixed. */
+typedef struct {
+    uint32_t magic;
+    uint32_t line_gain_milli;
+    int32_t line_offset_mv;
+    uint32_t vcap_gain_milli;
+    int32_t vcap_offset_mv;
+    uint16_t crc;
+} dpls_calib_nv_t;
+
 static dpls_server_t server;
 static dpls_settings_t settings;
+static dpls_led_t status_led;
+static bool identify_led_active;
 static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
 static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
@@ -67,6 +110,21 @@ static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
+
+static dpls_calib_t line_calib;
+static dpls_calib_t vcap_calib;
+static uint16_t line_window[DPLS_ADC_WINDOW];
+static uint16_t vcap_window[DPLS_ADC_WINDOW];
+static uint8_t line_window_count, line_window_pos;
+static uint8_t vcap_window_count, vcap_window_pos;
+static volatile uint16_t cached_line_mv;
+static volatile uint16_t cached_vcap_mv;
+static volatile bool adc_busy;
+static uint8_t adc_decimate;
+static dpls_power_t power_state = DPLS_POWER_LINE;
+static bool reserve_low_state;
+static bool auto_isolation_active;
+static bool line_established;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -106,7 +164,7 @@ static bool journal_decode_record(const uint8_t record[DPLS_JOURNAL_RECORD_SIZE]
     event->timestamp_seconds = journal_rd32(record + 4);
     event->event_type = record[8];
     event->parameter = record[9];
-    return event->sequence != 0u && event->event_type >= 1u && event->event_type <= 11u;
+    return event->sequence != 0u && event->event_type >= 1u && event->event_type <= 14u;
 }
 
 static void journal_encode_record(uint8_t record[DPLS_JOURNAL_RECORD_SIZE], const dpls_event_t *event)
@@ -214,46 +272,194 @@ static bool link_encrypted(void *context)
     return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
 }
 
+/* Drop every mode output to its safe (de-energized) level. Isolation switches
+ * conduct and short shunts open, which is the "Norma" state. */
+static void mode_outputs_off(void)
+{
+    hal_gpio_write(DPLS_PIN_ISO_1, 0);
+    hal_gpio_write(DPLS_PIN_ISO_2, 0);
+    hal_gpio_write(DPLS_PIN_ISO_T, 0);
+    hal_gpio_write(DPLS_PIN_KZ_1, 0);
+    hal_gpio_write(DPLS_PIN_KZ_2, 0);
+    hal_gpio_write(DPLS_PIN_KZ_T, 0);
+}
+
 static void safe_normal(void *context)
 {
     (void)context;
+    mode_outputs_off();
     hardware_mode = DPLS_MODE_NORMAL;
-    hal_gpio_write(DPLS_MODE_LED, 0);
 }
 
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;
     if (mode > DPLS_MODE_SHORT_T) return false;
-    /* Evaluation-board build: expose and exercise the complete BLE state
-     * machine, but never energize an unassigned relay output. */
+    /* Break-before-make: return to the all-safe state first so no two outputs
+     * are ever driven together, then assert the single line for this mode. */
+    mode_outputs_off();
+    switch (mode) {
+    case DPLS_MODE_NORMAL: break;
+    case DPLS_MODE_OPEN_T: hal_gpio_write(DPLS_PIN_ISO_T, 1); break;
+    case DPLS_MODE_OPEN_MAIN: hal_gpio_write(DPLS_PIN_ISO_2, 1); break;
+    case DPLS_MODE_SHORT_1: hal_gpio_write(DPLS_PIN_KZ_1, 1); break;
+    case DPLS_MODE_SHORT_2: hal_gpio_write(DPLS_PIN_KZ_2, 1); break;
+    case DPLS_MODE_SHORT_T: hal_gpio_write(DPLS_PIN_KZ_T, 1); break;
+    default: return false;
+    }
     hardware_mode = mode;
-    hal_gpio_write(DPLS_MODE_LED, mode == DPLS_MODE_NORMAL ? 0 : 1);
     return true;
+}
+
+static dpls_led_scene_t led_scene_for_mode(dpls_mode_t mode)
+{
+    switch (mode) {
+    case DPLS_MODE_OPEN_T: return DPLS_LED_SCENE_OPEN_T;
+    case DPLS_MODE_OPEN_MAIN: return DPLS_LED_SCENE_OPEN_MAIN;
+    case DPLS_MODE_SHORT_1: return DPLS_LED_SCENE_SHORT_1;
+    case DPLS_MODE_SHORT_2: return DPLS_LED_SCENE_SHORT_2;
+    case DPLS_MODE_SHORT_T: return DPLS_LED_SCENE_SHORT_T;
+    default: return DPLS_LED_SCENE_NORMAL;
+    }
+}
+
+static void status_led_output(void *context, bool on)
+{
+    (void)context;
+    hal_gpio_write(DPLS_PIN_STATUS_LED, on ? 1 : 0);
+}
+
+static void load_calibration(void)
+{
+    dpls_calib_nv_t nv;
+    dpls_calib_default(&line_calib);
+    dpls_calib_default(&vcap_calib);
+    vcap_calib.gain_milli = DPLS_VCAP_NOMINAL_GAIN_MILLI;
+    if (osal_snv_read(DPLS_CALIB_SNV_ID, sizeof(nv), &nv) == SUCCESS &&
+        nv.magic == DPLS_CALIB_MAGIC &&
+        nv.crc == dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_t, crc))) {
+        dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
+        dpls_calib_t vcap = {nv.vcap_gain_milli, nv.vcap_offset_mv};
+        if (dpls_calib_valid(&line)) line_calib = line;
+        if (dpls_calib_valid(&vcap)) vcap_calib = vcap;
+    }
+}
+
+/* Fold one sample into a moving-average window and return the current average. */
+static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
+{
+    uint32_t sum = 0u;
+    uint8_t i;
+    window[*pos] = value;
+    *pos = (uint8_t)((*pos + 1u) % DPLS_ADC_WINDOW);
+    if (*count < DPLS_ADC_WINDOW) ++*count;
+    for (i = 0u; i < *count; ++i) sum += window[i];
+    return (uint16_t)(sum / *count);
+}
+
+/* ADC completion runs in interrupt context: fold the freshly measured pin
+ * voltage into the per-channel window and publish the calibrated value. Both
+ * the line (P20/CH9) and reserve (P23/CH1) channels arrive here. */
+static void adc_evt(adc_Evt_t *event)
+{
+    float pin_volts;
+    uint32_t pin_mv;
+    if (event->type != HAL_ADC_EVT_DATA) {
+        adc_busy = false;
+        return;
+    }
+    if (event->ch == ADC_CH9) {
+        pin_volts = hal_adc_value_cal(ADC_CH9, event->data, event->size, FALSE, FALSE);
+        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
+        cached_line_mv = fold_window(line_window, &line_window_count, &line_window_pos,
+                                     dpls_calib_apply(&line_calib, pin_mv));
+    } else if (event->ch == ADC_CH1) {
+        pin_volts = hal_adc_value_cal(ADC_CH1, event->data, event->size, FALSE, FALSE);
+        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
+        cached_vcap_mv = fold_window(vcap_window, &vcap_window_count, &vcap_window_pos,
+                                     dpls_calib_apply(&vcap_calib, pin_mv));
+    }
+    /* One-shot mode: the ADC IRQ handler stops the converter after the last
+     * channel callback returns, so we only clear our own re-entrancy guard. */
+    adc_busy = false;
+}
+
+static void adc_kick(void)
+{
+    adc_Cfg_t cfg;
+    if (adc_busy) return;
+    memset(&cfg, 0, sizeof(cfg));
+    /* Single-ended P20 (line) and P23 (reserve), standard resolution: the
+     * high-resolution path tops out near 0.8 V, but the dividers keep both pins
+     * near or below ~1 V at full scale. */
+    cfg.channel = ADC_BIT(ADC_CH3P_P20) | ADC_BIT(ADC_CH1P_P23);
+    cfg.is_continue_mode = FALSE;
+    cfg.is_differential_mode = 0u;
+    cfg.is_high_resolution = 0u;
+    adc_busy = true;
+    if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
+        adc_busy = false;
+        return;
+    }
+    hal_adc_start();
+}
+
+/* Derive the power-source and reserve-low flags with hysteresis. Skipped until
+ * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
+ * reserve/low-battery state at boot. */
+static void update_power_state(void)
+{
+    if (line_window_count != 0u) {
+        uint16_t line = cached_line_mv;
+        if (power_state == DPLS_POWER_LINE && line < DPLS_LINE_ABSENT_MV)
+            power_state = DPLS_POWER_RESERVE;
+        else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV)
+            power_state = DPLS_POWER_LINE;
+        /* A real downstream short is a healthy line collapsing; ignore sags in
+         * the KZ test modes (we cause those ourselves). */
+        if (line > DPLS_LINE_PRESENT_MV) line_established = true;
+        if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
+            if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
+            else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
+        }
+    }
+    if (vcap_window_count != 0u) {
+        uint16_t vcap = cached_vcap_mv;
+        if (!reserve_low_state && vcap < DPLS_RESERVE_LOW_MV) reserve_low_state = true;
+        else if (reserve_low_state && vcap > DPLS_RESERVE_OK_MV) reserve_low_state = false;
+    }
 }
 
 static uint16_t voltage_mv(void *context)
 {
     (void)context;
-    return 0;
+    return cached_line_mv;
 }
 
 static dpls_power_t power_source(void *context)
 {
     (void)context;
-    return DPLS_POWER_LINE;
+    return power_state;
 }
 
 static bool reserve_low(void *context)
 {
     (void)context;
-    return false;
+    return reserve_low_state;
+}
+
+static bool real_short_active(void *context)
+{
+    (void)context;
+    return auto_isolation_active;
 }
 
 static void identify_led(void *context, bool enabled)
 {
     (void)context;
-    hal_gpio_write(DPLS_IDENTIFY_LED, enabled ? 1 : 0);
+    /* The LED driver renders the 1 Hz identify blink; here we only latch that
+     * identify is the active scene so the next LED tick picks it up. */
+    identify_led_active = enabled;
 }
 
 static bool random_bytes(void *context, uint8_t *out, size_t length)
@@ -374,7 +580,7 @@ static void clear_settings_and_bonds(void)
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
-    hal_gpio_write(DPLS_IDENTIFY_LED, 1);
+    hal_gpio_write(DPLS_PIN_STATUS_LED, 1);
     NVIC_SystemReset();
 }
 
@@ -415,12 +621,32 @@ void dpls_phy6252_init(uint8 new_task_id)
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
     rx_head = rx_tail = rx_count = 0;
-    hal_gpio_pin_init(DPLS_IDENTIFY_LED, OEN);
-    hal_gpio_pin_init(DPLS_MODE_LED, OEN);
+    identify_led_active = false;
+    /* Drive every mode output to the safe "Norma" level before the radio or
+     * the state machine can touch them. */
+    hal_gpio_pin_init(DPLS_PIN_ISO_1, OEN);
+    hal_gpio_pin_init(DPLS_PIN_ISO_2, OEN);
+    hal_gpio_pin_init(DPLS_PIN_ISO_T, OEN);
+    hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
+    hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
+    hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
+    hal_gpio_pin_init(DPLS_PIN_STATUS_LED, OEN);
+    mode_outputs_off();
+    hal_gpio_write(DPLS_PIN_STATUS_LED, 0);
+    hardware_mode = DPLS_MODE_NORMAL;
+    dpls_led_init(&status_led, status_led_output, NULL, now_ms());
+    line_window_count = line_window_pos = 0;
+    vcap_window_count = vcap_window_pos = adc_decimate = 0;
+    cached_line_mv = cached_vcap_mv = 0;
+    power_state = DPLS_POWER_LINE;
+    reserve_low_state = false;
+    auto_isolation_active = false;
+    line_established = false;
+    adc_busy = false;
+    load_calibration();
+    hal_adc_init();
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
     hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
-    hal_gpio_write(DPLS_IDENTIFY_LED, 0);
-    hal_gpio_write(DPLS_MODE_LED, 0);
     classify_settings();
     factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
     factory_reset_started_ms = now_ms();
@@ -436,6 +662,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.voltage_mv = voltage_mv;
     hal.power_source = power_source;
     hal.reserve_low = reserve_low;
+    hal.real_short_active = real_short_active;
     hal.identify_led = identify_led;
     hal.random_bytes = random_bytes;
     hal.settings_state = get_settings_state;
@@ -537,5 +764,26 @@ void dpls_phy6252_tick(void)
             clear_settings_and_bonds();
         }
     }
+    if (++adc_decimate >= DPLS_ADC_DECIMATE) {
+        adc_decimate = 0;
+        adc_kick();
+    }
+    update_power_state();
     dpls_server_tick(&server, now_ms());
+}
+
+uint32 dpls_phy6252_led_tick(void)
+{
+    uint32_t now = now_ms();
+    uint32_t delay;
+    dpls_led_scene_t scene;
+    bool reserve = power_source(NULL) == DPLS_POWER_RESERVE;
+    if (identify_led_active) scene = DPLS_LED_SCENE_IDENTIFY;
+    else if (auto_isolation_active) scene = DPLS_LED_SCENE_AUTO_ISOLATION;
+    else scene = led_scene_for_mode(hardware_mode);
+    dpls_led_set(&status_led, scene, reserve, now);
+    delay = dpls_led_tick(&status_led, now);
+    if (delay < DPLS_LED_TICK_MIN_MS) delay = DPLS_LED_TICK_MIN_MS;
+    if (delay > DPLS_LED_TICK_MAX_MS) delay = DPLS_LED_TICK_MAX_MS;
+    return delay;
 }

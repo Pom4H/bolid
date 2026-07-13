@@ -5,6 +5,9 @@
 
 typedef struct {
     bool encrypted, initialized, normal, identify;
+    dpls_power_t power_src;
+    bool low_reserve;
+    bool short_active;
     dpls_mode_t mode;
     uint8_t tx[DPLS_MAX_FRAME];
     size_t tx_len;
@@ -19,8 +22,9 @@ static bool encrypted(void *c) { return ((fake_t *)c)->encrypted; }
 static bool apply(void *c, dpls_mode_t m) { fake_t *f = c; f->normal = m == DPLS_MODE_NORMAL; f->mode = m; ++f->apply_count; return true; }
 static void normal(void *c) { fake_t *f = c; f->normal = true; f->mode = DPLS_MODE_NORMAL; }
 static uint16_t voltage(void *c) { (void)c; return 24100; }
-static dpls_power_t power(void *c) { (void)c; return DPLS_POWER_LINE; }
-static bool low(void *c) { (void)c; return false; }
+static dpls_power_t power(void *c) { return ((fake_t *)c)->power_src; }
+static bool low(void *c) { return ((fake_t *)c)->low_reserve; }
+static bool real_short(void *c) { return ((fake_t *)c)->short_active; }
 static void identify(void *c, bool on) { ((fake_t *)c)->identify = on; }
 static bool random_bytes(void *c, uint8_t *p, size_t n) { (void)c; memset(p, 0x55, n); return true; }
 static dpls_settings_state_t settings_state(void *c) { return ((fake_t *)c)->initialized ? DPLS_SETTINGS_VALID : DPLS_SETTINGS_EMPTY; }
@@ -72,7 +76,8 @@ int main(void) {
     fake_t fake = {.encrypted = true, .initialized = true};
     dpls_hal_t hal = {
         .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
-        .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
+        .voltage_mv = voltage, .power_source = power, .reserve_low = low,
+        .real_short_active = real_short, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
         .event_storage_init = storage_init, .event_storage_append = storage_append,
@@ -113,8 +118,55 @@ int main(void) {
     n = request(DPLS_MSG_IDENTIFY_START, NULL, 0, buf); dpls_server_receive(&server, buf, n, 80);
     assert(server.identify_active); assert(fake.identify);
     assert(fake.indication_count == indications_before);
+    /* The core no longer toggles the LED for blinking: identify stays active
+     * (and reported) until the deadline; the LED driver owns the blink. */
     dpls_server_tick(&server, 80 + DPLS_IDENTIFY_BLINK_MS);
-    assert(!fake.identify);
+    assert(server.identify_active); assert(fake.identify);
+    dpls_server_tick(&server, 80 + DPLS_IDENTIFY_MAX_MS);
+    assert(!server.identify_active); assert(!fake.identify);
     assert(fake.indication_count == indications_before);
+
+    /* Power-source and reserve-low transitions are journaled once per edge. */
+    dpls_event_t ev;
+    uint32_t base = 80 + DPLS_IDENTIFY_MAX_MS;
+    uint32_t seq = server.next_event_sequence;
+    fake.power_src = DPLS_POWER_RESERVE;
+    dpls_server_tick(&server, base + 10);
+    assert(server.next_event_sequence == seq + 1);
+    assert(storage_read(&fake, server.next_event_sequence - 1, &ev));
+    assert(ev.event_type == 12 && ev.parameter == DPLS_POWER_RESERVE);
+    seq = server.next_event_sequence;
+    fake.low_reserve = true;
+    dpls_server_tick(&server, base + 20);
+    assert(server.next_event_sequence == seq + 1);
+    assert(storage_read(&fake, server.next_event_sequence - 1, &ev));
+    assert(ev.event_type == 13 && ev.parameter == 1);
+    seq = server.next_event_sequence;      /* steady state logs nothing new */
+    dpls_server_tick(&server, base + 30);
+    assert(server.next_event_sequence == seq);
+    fake.power_src = DPLS_POWER_LINE;
+    fake.low_reserve = false;
+    dpls_server_tick(&server, base + 40);  /* both clear -> two more events */
+    assert(server.next_event_sequence == seq + 2);
+
+    /* Auto-isolation of a real short: logged, and it forces an active test mode
+     * back to Norma (priority over test modes). */
+    seq = server.next_event_sequence;
+    server.mode = DPLS_MODE_SHORT_2;       /* pretend a test mode is running */
+    fake.short_active = true;
+    dpls_server_tick(&server, base + 50);
+    assert(server.real_short);
+    assert(server.mode == DPLS_MODE_NORMAL);
+    assert(server.next_event_sequence == seq + 2);
+    assert(storage_read(&fake, seq, &ev) && ev.event_type == 14 && ev.parameter == 1);
+    assert(storage_read(&fake, seq + 1, &ev) && ev.event_type == 8 &&
+           ev.parameter == DPLS_RETURN_AUTO_ISOLATION);
+    seq = server.next_event_sequence;
+    fake.short_active = false;             /* short cleared -> one event, param 0 */
+    dpls_server_tick(&server, base + 60);
+    assert(!server.real_short);
+    assert(server.next_event_sequence == seq + 1);
+    assert(storage_read(&fake, seq, &ev) && ev.event_type == 14 && ev.parameter == 0);
+
     puts("test_dpls_server: OK"); return 0;
 }

@@ -5,7 +5,8 @@ void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter);
 
 enum { EVT_BOOT = 1, EVT_BLE_CONNECTED = 2, EVT_BLE_DISCONNECTED = 3, EVT_AUTH_SUCCESS = 4,
        EVT_AUTH_FAILURE = 5, EVT_AUTH_BLOCKED = 6, EVT_MODE_CHANGED = 7, EVT_MODE_AUTO_RETURN = 8,
-       EVT_IDENTIFY_START = 9, EVT_IDENTIFY_STOP = 10, EVT_PASSWORD_SET = 11, EVT_LAST = 11 };
+       EVT_IDENTIFY_START = 9, EVT_IDENTIFY_STOP = 10, EVT_PASSWORD_SET = 11,
+       EVT_POWER_CHANGED = 12, EVT_RESERVE_LOW = 13, EVT_AUTO_ISOLATION = 14, EVT_LAST = 14 };
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
@@ -134,21 +135,50 @@ void dpls_server_disconnected(dpls_server_t *s, uint32_t now_ms) {
     dpls_server_log(s, EVT_BLE_DISCONNECTED, 0);
 }
 
+static void poll_power_state(dpls_server_t *s) {
+    dpls_power_t source = s->hal.power_source(s->hal.context);
+    bool low = s->hal.reserve_low(s->hal.context);
+    if (!s->power_state_known) {
+        s->power_state_known = true;
+        s->last_power_source = source;
+        s->last_reserve_low = low;
+        return;
+    }
+    if (source != s->last_power_source) {
+        s->last_power_source = source;
+        dpls_server_log(s, EVT_POWER_CHANGED, (uint8_t)source);
+    }
+    if (low != s->last_reserve_low) {
+        s->last_reserve_low = low;
+        dpls_server_log(s, EVT_RESERVE_LOW, low ? 1u : 0u);
+    }
+}
+
+static void poll_real_short(dpls_server_t *s) {
+    bool active = s->hal.real_short_active ? s->hal.real_short_active(s->hal.context) : false;
+    if (active != s->real_short) {
+        s->real_short = active;
+        dpls_server_log(s, EVT_AUTO_ISOLATION, active ? 1u : 0u);
+    }
+    /* Auto-isolation of a real short outranks any test mode: revert to Norma so
+     * the tester's own outputs never fight the hardware isolation. */
+    if (active && s->mode != DPLS_MODE_NORMAL) force_normal(s, DPLS_RETURN_AUTO_ISOLATION);
+}
+
 void dpls_server_tick(dpls_server_t *s, uint32_t now_ms) {
     s->now_ms = now_ms;
+    poll_power_state(s);
+    poll_real_short(s);
     if (s->mode != DPLS_MODE_NORMAL && s->mode_deadline_ms && elapsed(now_ms, s->mode_deadline_ms))
         force_normal(s, DPLS_RETURN_MODE_TIMEOUT);
     else if (s->mode != DPLS_MODE_NORMAL && (!s->authenticated || elapsed(now_ms, s->last_authenticated_activity_ms + DPLS_SESSION_TIMEOUT_MS)))
         force_normal(s, DPLS_RETURN_SESSION_TIMEOUT);
     else if (s->mode != DPLS_MODE_NORMAL && s->hal.reserve_low(s->hal.context))
         force_normal(s, DPLS_RETURN_LOW_RESERVE);
+    /* The LED driver owns the 1 Hz identify blink; the core only reports
+     * identify start/stop through hal.identify_led and enforces the deadline. */
     if (s->identify_active && elapsed(now_ms, s->identify_deadline_ms)) {
         stop_identify_logged(s);
-    } else if (s->identify_active &&
-               elapsed(now_ms, s->identify_blink_last_ms + DPLS_IDENTIFY_BLINK_MS)) {
-        s->identify_blink_last_ms = now_ms;
-        s->identify_led_on = !s->identify_led_on;
-        s->hal.identify_led(s->hal.context, s->identify_led_on);
     }
     if (s->setup_disconnect_deadline_ms && elapsed(now_ms, s->setup_disconnect_deadline_ms)) {
         s->setup_disconnect_deadline_ms = 0;
@@ -235,6 +265,7 @@ static void handle_mode(dpls_server_t *s, const dpls_frame_t *f) {
     if ((old = cached(s, id)) != 0) return send_command_result(s, old);
     memset(&result, 0, sizeof(result)); result.valid = true; result.session_id = s->session_id; result.command_id = id;
     if (requested > DPLS_MODE_SHORT_T) result.status = 3;
+    else if (requested != DPLS_MODE_NORMAL && s->real_short) result.status = 5; /* blocked: auto-isolation active */
     else {
         s->hal.hardware_safe_normal(s->hal.context);
         if (!s->hal.hardware_apply_mode(s->hal.context, requested)) { s->hal.hardware_safe_normal(s->hal.context); requested = DPLS_MODE_NORMAL; result.status = 4; }

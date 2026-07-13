@@ -4,6 +4,8 @@ set(CMAKE_C_STANDARD 99)
 add_library(test_dpls_server
     src/dpls_protocol.c
     src/dpls_server.c
+    src/dpls_led.c
+    src/dpls_calib.c
 )
 target_include_directories(test_dpls_server PUBLIC include)
 target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
@@ -13,6 +15,14 @@ target_compile_options(test_dpls_server_tests PRIVATE -Wall -Wextra -Werror)
 add_executable(test_log_journal tests/test_log_journal.c)
 target_link_libraries(test_log_journal PRIVATE test_dpls_server)
 target_compile_options(test_log_journal PRIVATE -Wall -Wextra -Werror)
+add_executable(test_led tests/test_led.c)
+target_link_libraries(test_led PRIVATE test_dpls_server)
+target_compile_options(test_led PRIVATE -Wall -Wextra -Werror)
+add_executable(test_calib tests/test_calib.c)
+target_link_libraries(test_calib PRIVATE test_dpls_server)
+target_compile_options(test_calib PRIVATE -Wall -Wextra -Werror)
 enable_testing()
 add_test(NAME server COMMAND test_dpls_server_tests)
 add_test(NAME log_journal COMMAND test_log_journal)
+add_test(NAME led COMMAND test_led)
+add_test(NAME calib COMMAND test_calib)

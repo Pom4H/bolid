@@ -27,6 +27,7 @@ project:
         - ../../../components/driver/pwrmgr
         - ../../../components/driver/uart
         - ../../../components/driver/gpio
+        - ../../../components/driver/adc
         - ../../../components/driver/timer
         - ../../../misc
         - ../../../components/driver/log
@@ -113,6 +114,7 @@ project:
         - file: ../../../components/driver/uart/uart.c
         - file: ../../../components/driver/clock/clock.c
         - file: ../../../components/driver/gpio/gpio.c
+        - file: ../../../components/driver/adc/adc.c
         - file: ../../../components/driver/timer/timer.c
         - file: ../../../components/driver/watchdog/watchdog.c
         - file: ../../../components/driver/pwrmgr/pwrmgr.c
@@ -146,6 +148,8 @@ project:
       files:
         - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_protocol.c
         - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_server.c
+        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_led.c
+        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_calib.c
         - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_gatt_service.c
         - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_phy6252_app.c
         - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_ble_identity.c

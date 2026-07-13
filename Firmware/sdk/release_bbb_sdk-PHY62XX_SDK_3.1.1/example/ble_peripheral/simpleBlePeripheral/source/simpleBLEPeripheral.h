@@ -70,6 +70,7 @@ extern "C"
 //#define SBP_CONN_NOTIFY_EVT                            0x0080
 #define SBP_RTC_TEST_EVT                               0x0100
 #define SBP_DPLS_TICK_EVT                              0x0080
+#define SBP_DPLS_LED_EVT                               0x0200
 
 /*********************************************************************
     MACROS

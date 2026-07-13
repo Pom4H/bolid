@@ -39,7 +39,8 @@ typedef enum {
     DPLS_RETURN_DISCONNECT = 3,
     DPLS_RETURN_LOW_RESERVE = 4,
     DPLS_RETURN_INTERNAL_ERROR = 5,
-    DPLS_RETURN_BOOT = 6
+    DPLS_RETURN_BOOT = 6,
+    DPLS_RETURN_AUTO_ISOLATION = 7
 } dpls_return_reason_t;
 
 typedef struct {
@@ -56,8 +57,14 @@ typedef struct {
     uint16_t (*voltage_mv)(void *context);
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
+    /* Reports identify mode entering/leaving. The blink shape is owned by the
+     * LED driver, so this is called once on start (true) and once on stop
+     * (false), not toggled per blink. */
     void (*identify_led)(void *context, bool enabled);
     bool (*random_bytes)(void *context, uint8_t *out, size_t length);
+    /* Optional: true while the hardware is isolating a real downstream short
+     * circuit (BRIZ-T function). NULL is treated as "never". */
+    bool (*real_short_active)(void *context);
     dpls_settings_state_t (*settings_state)(void *context);
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
@@ -91,6 +98,10 @@ typedef struct {
     bool identify_led_on;
     bool hello_received;
     bool critical_fault;
+    bool power_state_known;
+    dpls_power_t last_power_source;
+    bool last_reserve_low;
+    bool real_short;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
     uint32_t now_ms;
