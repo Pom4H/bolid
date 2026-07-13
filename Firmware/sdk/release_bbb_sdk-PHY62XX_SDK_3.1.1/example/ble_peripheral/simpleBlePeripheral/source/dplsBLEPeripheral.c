@@ -66,12 +66,20 @@ static void state_changed(gaprole_States_t state)
 
 static void rssi_changed(int8 rssi) { (void)rssi; }
 
+static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
+{
+    (void)conn_handle;
+    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS) {
+        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+    }
+}
+
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
 /* The board has no display or confirmation key. Advertising DISPLAY_YES_NO
  * selects an interactive legacy pairing path that this hardware cannot
  * represent. Just Works still gives DPLS an encrypted bonded link; the DPLS
  * password remains the authorization boundary for control commands. */
-static gapBondCBs_t bond_callbacks = { NULL, NULL };
+static gapBondCBs_t bond_callbacks = { NULL, bond_pair_state_cb };
 
 void SimpleBLEPeripheral_Init(uint8 task_id)
 {
@@ -90,6 +98,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 mitm = FALSE;
     uint8 io_capability = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
     uint8 bonding = TRUE;
+    uint8 bond_fail = GAPBOND_FAIL_TERMINATE_ERASE_BONDS;
     /* PHY62xx 3.1.1 advertises CSRK distribution but does not complete the
      * signing-key PDU sequence with current Android.  The link uses encrypted
      * GATT writes and never signed, unencrypted writes, so exchange only the
@@ -123,6 +132,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPBondMgr_SetParameter(GAPBOND_IO_CAPABILITIES, sizeof(io_capability), &io_capability);
     GAPBondMgr_SetParameter(GAPBOND_BONDING_ENABLED, sizeof(bonding), &bonding);
     GAPBondMgr_SetParameter(GAPBOND_KEY_DIST_LIST, sizeof(key_distribution), &key_distribution);
+    GAPBondMgr_SetParameter(GAPBOND_BOND_FAIL_ACTION, sizeof(bond_fail), &bond_fail);
 
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GGS_AddService(GATT_ALL_SERVICES);

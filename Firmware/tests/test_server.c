@@ -11,6 +11,9 @@ typedef struct {
     uint8_t notif[64][DPLS_MAX_FRAME];
     size_t notif_len[64];
     unsigned apply_count, indication_count, notification_count;
+    dpls_event_t stored[DPLS_EVENT_CAPACITY];
+    uint16_t stored_count;
+    uint32_t stored_next;
 } fake_t;
 static bool encrypted(void *c) { return ((fake_t *)c)->encrypted; }
 static bool apply(void *c, dpls_mode_t m) { fake_t *f = c; f->normal = m == DPLS_MODE_NORMAL; f->mode = m; ++f->apply_count; return true; }
@@ -47,6 +50,18 @@ static bool notify(void *c, const uint8_t *p, size_t n) {
     ++f->notification_count;
     return true;
 }
+static bool storage_init(void *c, uint16_t *count, uint32_t *next) {
+    fake_t *f = c; *count = f->stored_count; *next = f->stored_next ? f->stored_next : 1u; return true;
+}
+static bool storage_append(void *c, const dpls_event_t *event) {
+    fake_t *f = c; f->stored[(event->sequence - 1u) % DPLS_EVENT_CAPACITY] = *event;
+    if (f->stored_count < DPLS_EVENT_CAPACITY) ++f->stored_count;
+    f->stored_next = event->sequence + 1u; return true;
+}
+static bool storage_read(void *c, uint32_t sequence, dpls_event_t *event) {
+    fake_t *f = c; *event = f->stored[(sequence - 1u) % DPLS_EVENT_CAPACITY];
+    return event->sequence == sequence;
+}
 
 static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) {
     dpls_frame_t f; memset(&f, 0, sizeof(f)); f.type = type; f.sequence = 1; f.payload_length = n; if (n) memcpy(f.payload, p, n);
@@ -60,6 +75,8 @@ int main(void) {
         .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
         .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
     };
     dpls_server_t server; uint8_t buf[DPLS_MAX_FRAME], payload[64]; size_t n; dpls_frame_t response;

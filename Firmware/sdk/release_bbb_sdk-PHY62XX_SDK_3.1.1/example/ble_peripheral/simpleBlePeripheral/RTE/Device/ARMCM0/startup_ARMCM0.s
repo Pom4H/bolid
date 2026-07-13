@@ -32,7 +32,10 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 
-Stack_Size      EQU     0x00000400
+; 0x400 overflowed on the deepest RX path (SETUP: decoded frame + settings
+; write-verify + osal_snv internals + BLE IRQs) and smashed the statics right
+; below the stack (serviceCBsList, tasksEvents, trap_c_callback, server tail).
+Stack_Size      EQU     0x00000800
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size

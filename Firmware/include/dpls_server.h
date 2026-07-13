@@ -62,7 +62,11 @@ typedef struct {
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
-    void (*event_persist)(void *context, const dpls_event_t *event);
+    /* Journal storage is persistent and sequence-addressed. The server keeps
+     * only metadata and streams one record at a time during BLE export. */
+    bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
+    bool (*event_storage_append)(void *context, const dpls_event_t *event);
+    bool (*event_storage_read)(void *context, uint32_t sequence, dpls_event_t *event);
     bool (*tx_indicate)(void *context, const uint8_t *frame, size_t length);
     bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
     void *context;
@@ -104,10 +108,15 @@ typedef struct {
     dpls_mode_t mode;
     dpls_cached_command_t command_cache[DPLS_COMMAND_CACHE_SIZE];
     uint8_t command_cache_cursor;
-    dpls_event_t events[DPLS_EVENT_CAPACITY];
+    /* Outgoing frames used to be allocated on the 1 KiB Cortex-M0 stack.
+     * A journal response then nested this buffer with the decoded request and
+     * the SDK ATT indication buffer, overflowing into events[]. */
+    uint8_t tx_encoded[DPLS_MAX_FRAME];
     uint16_t event_count;
-    uint16_t event_cursor;
     uint32_t next_event_sequence;
+    bool log_export_active;
+    uint16_t log_export_count;
+    uint32_t log_export_first_sequence;
 } dpls_server_t;
 
 void dpls_server_init(dpls_server_t *server, const dpls_hal_t *hal, uint32_t now_ms);

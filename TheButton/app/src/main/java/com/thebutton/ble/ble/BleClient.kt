@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.io.File
 import java.security.SecureRandom
 import java.util.UUID
 import javax.crypto.Mac
@@ -82,10 +83,52 @@ class BleClient(context: Context) {
     private var pendingWrite: ByteArray? = null
     private var writeRetryCount = 0
     private var reachedReady = false
+    private var bondRecoveryCount = 0
+    private var preAuthGatt133Count = 0
     private var lastKnownBondState = BluetoothDevice.BOND_NONE
     private var reconnectRunnable: Runnable? = null
     private var pairingTimeoutRunnable: Runnable? = null
     private var pairingPollRunnable: Runnable? = null
+    private var e2eModeTarget: DplsMode? = null
+    private var e2eModePhase = E2eModePhase.DONE
+    private var e2eModeDeadlineMs = 0L
+
+    private enum class E2eModePhase { APPLY, RETURN, DONE }
+
+    private val e2eModeRunner = object : Runnable {
+        override fun run() {
+            val target = e2eModeTarget ?: return
+            if (System.currentTimeMillis() > e2eModeDeadlineMs) {
+                Log.e(TAG, "E2E mode timeout: ${target.title}")
+                e2eModeTarget = null
+                e2eModePhase = E2eModePhase.DONE
+                return
+            }
+            val state = _uiState.value
+            when (e2eModePhase) {
+                E2eModePhase.APPLY -> {
+                    if (state.commandInProgress || state.state?.mode != target) {
+                        handler.postDelayed(this, E2E_MODE_POLL_MS)
+                        return
+                    }
+                    Log.i(TAG, "E2E mode applied: ${target.title}")
+                    e2eModePhase = E2eModePhase.RETURN
+                    returnToNormal()
+                    handler.postDelayed(this, E2E_MODE_POLL_MS)
+                }
+                E2eModePhase.RETURN -> {
+                    if (state.commandInProgress || state.state?.mode != DplsMode.NORMAL) {
+                        handler.postDelayed(this, E2E_MODE_POLL_MS)
+                        return
+                    }
+                    Log.i(TAG, "E2E mode done: ${target.title}")
+                    e2eModeTarget = null
+                    e2eModePhase = E2eModePhase.DONE
+                }
+                E2eModePhase.DONE -> Unit
+            }
+        }
+    }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = acceptScan(result)
@@ -195,6 +238,12 @@ class BleClient(context: Context) {
     }
 
     fun identify(address: String) {
+        if (_uiState.value.error?.contains("связк", ignoreCase = true) == true ||
+            _uiState.value.error?.contains("сопряж", ignoreCase = true) == true
+        ) {
+            clearStalePhoneBond(address)
+        }
+        resetBondRecoveryState()
         identifyAfterConnect = true
         pendingIdentifyAck = false
         _uiState.update { it.copy(identifyActive = true, identifyLedLive = false) }
@@ -295,6 +344,135 @@ class BleClient(context: Context) {
     fun returnToNormal() {
         _uiState.update { it.copy(pendingMode = DplsMode.NORMAL) }
         confirmMode()
+    }
+
+    fun runTestModeForE2e(wire: Int) {
+        val mode = DplsMode.fromWire(wire)
+        if (mode == null || !mode.dangerous) {
+            Log.e(TAG, "E2E mode invalid wire=$wire")
+            return
+        }
+        handler.removeCallbacks(e2eModeRunner)
+        e2eModeTarget = mode
+        e2eModePhase = E2eModePhase.APPLY
+        e2eModeDeadlineMs = System.currentTimeMillis() + E2E_MODE_TIMEOUT_MS
+        handler.post {
+            if (!_uiState.value.controlsEnabled) {
+                Log.e(TAG, "E2E mode blocked: controls disabled")
+                e2eModeTarget = null
+                return@post
+            }
+            requestMode(mode)
+            confirmMode()
+            handler.post(e2eModeRunner)
+        }
+    }
+
+    fun exportLogCsvForE2e() {
+        val records = _uiState.value.eventLog
+        if (records.isEmpty()) {
+            Log.e(TAG, "E2E export empty log")
+            return
+        }
+        val content = buildString {
+            appendLine("sequence;timestamp_seconds;event_type;parameter")
+            records.forEach { appendLine("${it.sequence};${it.timestampSeconds};${it.type};${it.parameter}") }
+        }
+        File(appContext.cacheDir, "e2e-export.csv").writeText(content, Charsets.UTF_8)
+        Log.i(TAG, "E2E export done records=${records.size}")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun clearStalePhoneBond(address: String): Boolean {
+        val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return false
+        if (device.bondState != BluetoothDevice.BOND_BONDED) return false
+        Log.w(TAG, "Clearing stale phone bond before reconnect address=$address")
+        return removeBond(device)
+    }
+
+    private fun resetBondRecoveryState() {
+        bondRecoveryCount = 0
+        preAuthGatt133Count = 0
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun tryRecoverBond(address: String): Boolean {
+        if (bondRecoveryCount >= MAX_BOND_RECOVERY) return false
+        bondRecoveryCount++
+        preAuthGatt133Count = 0
+        cancelReconnect()
+        closeCurrentGatt()
+        reconnectAttempt = 0
+        reachedReady = false
+        _uiState.update {
+            it.copy(
+                phase = ConnectionPhase.RECONNECTING,
+                statusText = "Повторное сопряжение…",
+                error = null,
+            )
+        }
+        Log.w(TAG, "Bond recovery attempt $bondRecoveryCount/$MAX_BOND_RECOVERY address=$address")
+        scheduleBondClearedReconnect(address)
+        return true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun scheduleBondClearedReconnect(address: String) {
+        val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull() ?: return
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            clearStalePhoneBond(address)
+        }
+        val deadline = System.currentTimeMillis() + BOND_CLEAR_WAIT_MS
+        val poller = object : Runnable {
+            override fun run() {
+                if (selectedAddress != address) return
+                val bonded = runCatching {
+                    adapter.getRemoteDevice(address).bondState == BluetoothDevice.BOND_BONDED
+                }.getOrDefault(false)
+                if (!bonded || System.currentTimeMillis() >= deadline) {
+                    connect(address)
+                    return
+                }
+                handler.postDelayed(this, BOND_CLEAR_POLL_MS)
+            }
+        }
+        handler.postDelayed(poller, BOND_CLEAR_POLL_MS)
+    }
+
+    private fun removeBond(device: BluetoothDevice): Boolean = try {
+        device.javaClass.getMethod("removeBond").invoke(device) as Boolean
+    } catch (_: ReflectiveOperationException) {
+        false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun unpairDplsBondsForE2e() {
+        handler.removeCallbacks(e2eUnpairCheck)
+        val targets = adapter.bondedDevices.orEmpty().filter { device ->
+            val name = device.name.orEmpty()
+            name.contains("DPLS", ignoreCase = true) || name.contains("Test-DPLS", ignoreCase = true)
+        }
+        if (targets.isEmpty()) {
+            Log.i(TAG, "E2E unpair done: none")
+            return
+        }
+        for (device in targets) {
+            val ok = removeBond(device)
+            Log.i(TAG, "E2E unpair requested address=${device.address} ok=$ok")
+        }
+        handler.postDelayed(e2eUnpairCheck, E2E_UNPAIR_CHECK_MS)
+    }
+
+    private val e2eUnpairCheck = Runnable {
+        val remaining = adapter.bondedDevices.orEmpty().count { device ->
+            val name = device.name.orEmpty()
+            name.contains("DPLS", ignoreCase = true) || name.contains("Test-DPLS", ignoreCase = true)
+        }
+        if (remaining == 0) {
+            Log.i(TAG, "E2E unpair done")
+        } else {
+            Log.e(TAG, "E2E unpair incomplete remaining=$remaining")
+        }
     }
 
     fun loadEventLog() {
@@ -488,6 +666,7 @@ class BleClient(context: Context) {
             if (pendingIdentifyAck) {
                 pendingIdentifyAck = false
                 _uiState.update { it.copy(identifyLedLive = true) }
+                Log.i(TAG, "E2E identify led live")
             }
             writeRetryCount = 0
             pendingWrite = null
@@ -542,6 +721,7 @@ class BleClient(context: Context) {
         when (frame.type) {
             DplsProtocol.Type.AUTH_CHALLENGE -> {
                 if (frame.payload.size < 37) return fail("Повреждённый AUTH_CHALLENGE")
+                preAuthGatt133Count = 0
                 sessionId = payload.u32()
                 payload.get(deviceNonce)
                 payload.get(authSalt)
@@ -562,6 +742,9 @@ class BleClient(context: Context) {
                 }
                 schedulePreAuthKeepAlive()
                 cachedVerifier?.takeIf { initialized }?.let(::sendAuthProof)
+                if (!autoAuth) {
+                    Log.i(TAG, if (initialized) "E2E login ready" else "E2E setup ready")
+                }
             }
             DplsProtocol.Type.AUTH_RESULT -> {
                 handler.removeCallbacks(preAuthKeepAlive)
@@ -584,6 +767,11 @@ class BleClient(context: Context) {
                 }
                 if (!ok) {
                     _uiState.update { it.copy(awaitingUserPassword = true) }
+                    if (retryAfter > 0) {
+                        Log.i(TAG, "E2E auth blocked seconds=$retryAfter")
+                    } else {
+                        Log.i(TAG, "E2E auth wrong")
+                    }
                     return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
                 }
                 if (payload.remaining() >= 8) payload.get(sessionToken)
@@ -591,6 +779,8 @@ class BleClient(context: Context) {
                     it.copy(
                         authenticated = true,
                         awaitingUserPassword = false,
+                        identifyActive = false,
+                        identifyLedLive = false,
                         phase = ConnectionPhase.SYNCHRONIZING,
                         statusText = "Чтение состояния…",
                         error = null,
@@ -598,6 +788,7 @@ class BleClient(context: Context) {
                 }
                 send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
                 scheduleKeepAlive()
+                Log.i(TAG, "E2E auth done")
             }
             DplsProtocol.Type.COMMAND_RESULT -> {
                 if (frame.payload.size < 8) return fail("Повреждённый COMMAND_RESULT")
@@ -678,6 +869,8 @@ class BleClient(context: Context) {
                 state = state,
                 deviceBootEpochSeconds = bootEpoch,
                 authenticated = true,
+                identifyActive = false,
+                identifyLedLive = false,
                 commandInProgress = false,
                 staleState = false,
                 lastAckMillis = System.currentTimeMillis(),
@@ -686,6 +879,7 @@ class BleClient(context: Context) {
         }
         reachedReady = true
         reconnectAttempt = 0
+        resetBondRecoveryState()
         if (_uiState.value.logProgress == null) updateStateRefreshSchedule()
         if (logLoadPending) {
             handler.post { loadEventLog() }
@@ -754,9 +948,6 @@ class BleClient(context: Context) {
         drainWriteQueue()
     }
 
-    private fun isValidEventRecord(record: EventRecord): Boolean =
-        record.type in 1..11 && record.sequence != 0L
-
     private fun finishLog() {
         handler.removeCallbacks(logLoadTimeout)
         handler.removeCallbacks(flushLogAckRunnable)
@@ -765,13 +956,17 @@ class BleClient(context: Context) {
             if (raw.size != 10) null else ByteBuffer.wrap(raw.toByteArray()).order(ByteOrder.LITTLE_ENDIAN).let {
                 EventRecord(it.u32(), it.u32(), it.u8(), it.u8())
             }
-        }.filter(::isValidEventRecord)
-            .sortedWith(
+        }.sortedWith(
                 compareByDescending<EventRecord> { it.timestampSeconds }
                     .thenByDescending { it.sequence },
             )
         val rawCount = if (logExpectedBytes == 0) 0 else logBytes.size / 10
         Log.i(TAG, "LOG_DONE raw=$rawCount records=${records.size}")
+        if (records.isNotEmpty()) {
+            val seqMin = records.minOf { it.sequence }
+            val seqMax = records.maxOf { it.sequence }
+            Log.i(TAG, "E2E journal ready records=${records.size} seq_min=$seqMin seq_max=$seqMax")
+        }
         logLoadPending = false
         _uiState.update { it.copy(eventLog = records, logProgress = null, statusText = "Журнал загружен: ${records.size} записей", error = null) }
         scheduleKeepAlive()
@@ -865,6 +1060,14 @@ class BleClient(context: Context) {
         writeRetryCount = 0
 
         if (preAuth || identifying || state.phase == ConnectionPhase.RECONNECTING) {
+            if (status == 133 && !reachedReady) {
+                preAuthGatt133Count++
+                Log.w(TAG, "TX write status=133 during pre-auth count=$preAuthGatt133Count")
+                if (preAuthGatt133Count >= PRE_AUTH_GATT133_RECOVERY_THRESHOLD) {
+                    selectedAddress?.let { tryRecoverBond(it) }
+                    return
+                }
+            }
             Log.w(TAG, "TX write status=$status ignored during pre-auth/identify/reconnect")
             if (bytes != null) writeQueue.addLast(bytes)
             return
@@ -987,9 +1190,15 @@ class BleClient(context: Context) {
         sessionToken.fill(0)
         val lastState = _uiState.value.state
         if (!reachedReady && reconnectAttempt >= MAX_INITIAL_RECONNECT_ATTEMPTS) {
+            val address = selectedAddress
+            if (address != null && tryRecoverBond(address)) {
+                return
+            }
             fail(
-                if (lastKnownBondState == BluetoothDevice.BOND_BONDED)
-                    "Ключи BLE устарели. Удалите сопряжение Test-DPLS в настройках Bluetooth и подключитесь снова."
+                if (bondRecoveryCount >= MAX_BOND_RECOVERY)
+                    "Не удалось восстановить BLE-связку. Удерживайте кнопку сброса на устройстве 5 с и подключитесь снова."
+                else if (lastKnownBondState == BluetoothDevice.BOND_BONDED)
+                    "Связка Bluetooth рассинхронизирована. Нажмите «Повторить сопряжение»."
                 else
                     "Не удалось установить устойчивое BLE-соединение",
             )
@@ -1032,6 +1241,7 @@ class BleClient(context: Context) {
         resetWriteState()
         reachedReady = false
         reconnectAttempt = 0
+        if (clearSelection) resetBondRecoveryState()
         if (clearSelection) selectedAddress = null
     }
 
@@ -1107,14 +1317,23 @@ class BleClient(context: Context) {
         private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val PAIRING_POLL_MS = 250L
         private const val COMMAND_TIMEOUT_MS = 3_000L
+        private const val E2E_MODE_TIMEOUT_MS = 30_000L
+        private const val E2E_MODE_POLL_MS = 40L
+        private const val E2E_UNPAIR_CHECK_MS = 1_500L
         private const val PRE_AUTH_KEEP_ALIVE_MS = 3_000L
         private const val KEEP_ALIVE_MS = 3_000L
         private const val STATE_REFRESH_MS = 1_000L
-        private const val LOG_LOAD_TIMEOUT_MS = 90_000L
-        private const val LOG_ACK_DELAY_MS = 50L
+        /* One indication per LOG_ACK ≈ 0.45 s/record on the stock connection
+         * interval, so a full 200-record journal takes ~95 s end to end. */
+        private const val LOG_LOAD_TIMEOUT_MS = 240_000L
+        private const val LOG_ACK_DELAY_MS = 20L
         private const val MAX_LOG_EVENTS = 200
         private const val MAX_WRITE_RETRIES = 3
         private const val MAX_INITIAL_RECONNECT_ATTEMPTS = 3
+        private const val MAX_BOND_RECOVERY = 3
+        private const val PRE_AUTH_GATT133_RECOVERY_THRESHOLD = 2
+        private const val BOND_CLEAR_WAIT_MS = 6_000L
+        private const val BOND_CLEAR_POLL_MS = 200L
         private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 143, 201)
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247

@@ -9,6 +9,7 @@
 #include "linkdb.h"
 #include "ll_enc.h"
 #include "osal_snv.h"
+#include "watchdog.h"
 #include "gapbondmgr.h"
 #include "peripheral.h"
 #include <core_cm0.h>
@@ -19,11 +20,21 @@
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
+#define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
+#define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
+#define DPLS_JOURNAL_RECORD_SIZE 12u
+#define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
+#define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN GPIO_P14
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
+/* Drop stale NV bonds after repeated encrypted links that never reach DPLS auth. */
+#define DPLS_BOND_DESYNC_LIMIT 3u
+#define DPLS_BOND_DESYNC_WINDOW_MS 120000u
+/* Plaintext link timeout — pairing never completed. */
+#define DPLS_LINK_ENCRYPT_TIMEOUT_MS 15000u
 
 /* PB-03F-Kit schematic: P11 is the green RGB LED and P7 is red. Relays are
  * deliberately not assigned on the bare evaluation board. */
@@ -46,12 +57,156 @@ static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
 static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
 static uint32_t factory_reset_started_ms;
+static uint32_t connected_at_ms;
+static bool connection_had_encryption;
+static uint8_t pre_auth_disconnect_count;
+static uint32_t pre_auth_disconnect_window_ms;
 #define DPLS_RX_QUEUE_DEPTH 4u
 typedef struct { uint8 data[DPLS_MAX_FRAME]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
+static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
+static uint8_t journal_cached_block = 0xffu;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
+
+#if DPLS_EVENT_CAPACITY != 200u
+#error "PHY6252 journal layout is defined for exactly 200 events"
+#endif
+
+static uint32_t journal_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void journal_wr32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16);
+    p[3] = (uint8_t)(value >> 24);
+}
+
+static uint8_t *journal_load_block(uint8_t block_index)
+{
+    if (journal_cached_block == block_index) return journal_block_cache;
+    memset(journal_block_cache, 0, sizeof(journal_block_cache));
+    (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
+                        (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
+    journal_cached_block = block_index;
+    return journal_block_cache;
+}
+
+static bool journal_decode_record(const uint8_t record[DPLS_JOURNAL_RECORD_SIZE], dpls_event_t *event)
+{
+    uint16_t stored_crc = (uint16_t)(record[10] | ((uint16_t)record[11] << 8));
+    if (stored_crc != dpls_crc16(record, 10u)) return false;
+    event->sequence = journal_rd32(record);
+    event->timestamp_seconds = journal_rd32(record + 4);
+    event->event_type = record[8];
+    event->parameter = record[9];
+    return event->sequence != 0u && event->event_type >= 1u && event->event_type <= 11u;
+}
+
+static void journal_encode_record(uint8_t record[DPLS_JOURNAL_RECORD_SIZE], const dpls_event_t *event)
+{
+    uint16_t crc;
+    journal_wr32(record, event->sequence);
+    journal_wr32(record + 4, event->timestamp_seconds);
+    record[8] = event->event_type;
+    record[9] = event->parameter;
+    crc = dpls_crc16(record, 10u);
+    record[10] = (uint8_t)crc;
+    record[11] = (uint8_t)(crc >> 8);
+}
+
+static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_sequence)
+{
+    uint8_t *block;
+    uint8_t present[(DPLS_EVENT_CAPACITY + 7u) / 8u];
+    dpls_event_t event;
+    uint32_t max_sequence = 0;
+    uint16_t block_index, record_index, suffix_count = 0;
+    (void)context;
+    memset(present, 0, sizeof(present));
+    journal_cached_block = 0xffu;
+
+    /* First pass finds the newest individually checksummed record. */
+    for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
+        /* Boot-time scan of 20 populated SNV blocks (plus the SDK's verbose
+         * SNV UART tracing) takes longer than the 2 s watchdog window, and
+         * init runs before the OSAL feed task exists. Feed per block or a
+         * full journal makes the device unbootable. */
+        hal_watchdog_feed();
+        block = journal_load_block((uint8_t)block_index);
+        for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
+            uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
+            if (journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &event) &&
+                (uint16_t)((event.sequence - 1u) % DPLS_EVENT_CAPACITY) == slot &&
+                event.sequence > max_sequence) max_sequence = event.sequence;
+        }
+    }
+    if (max_sequence == 0u || max_sequence == UINT32_MAX) {
+        *count = 0;
+        *next_sequence = 1;
+        return true;
+    }
+
+    /* Second pass builds only a 25-byte validity bitmap. No event array is
+     * retained in RAM. A torn/corrupt record truncates the recovered history
+     * at that point instead of exporting stale bytes. */
+    for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
+        hal_watchdog_feed();
+        block = journal_load_block((uint8_t)block_index);
+        for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
+            uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
+            uint32_t age;
+            if (!journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &event) ||
+                (uint16_t)((event.sequence - 1u) % DPLS_EVENT_CAPACITY) != slot ||
+                event.sequence > max_sequence) continue;
+            age = max_sequence - event.sequence;
+            if (age < DPLS_EVENT_CAPACITY)
+                present[age / 8u] |= (uint8_t)(1u << (age % 8u));
+        }
+    }
+    while (suffix_count < DPLS_EVENT_CAPACITY &&
+           (present[suffix_count / 8u] & (uint8_t)(1u << (suffix_count % 8u)))) ++suffix_count;
+    *count = suffix_count;
+    *next_sequence = max_sequence + 1u;
+    return true;
+}
+
+static bool journal_storage_append(void *context, const dpls_event_t *event)
+{
+    uint8_t *block;
+    uint16_t slot;
+    uint8_t block_index, record_index;
+    (void)context;
+    if (!event || event->sequence == 0u) return false;
+    slot = (uint16_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY);
+    block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    block = journal_load_block(block_index);
+    journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event);
+    return osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
+                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, block) == SUCCESS;
+}
+
+static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t *event)
+{
+    uint8_t *block;
+    uint16_t slot;
+    uint8_t block_index, record_index;
+    (void)context;
+    if (!event || sequence == 0u) return false;
+    slot = (uint16_t)((sequence - 1u) % DPLS_EVENT_CAPACITY);
+    block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    block = journal_load_block(block_index);
+    return journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event) &&
+           event->sequence == sequence;
+}
 
 static bool link_encrypted(void *context)
 {
@@ -287,6 +442,9 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.settings_salt = settings_salt;
     hal.settings_write = write_settings;
     hal.verify_auth_proof = verify_proof;
+    hal.event_storage_init = journal_storage_init;
+    hal.event_storage_append = journal_storage_append;
+    hal.event_storage_read = journal_storage_read;
     hal.tx_indicate = tx_indicate;
     hal.tx_notify = tx_notify;
     hal.disconnect_after_setup = disconnect_after_setup;
@@ -294,16 +452,53 @@ void dpls_phy6252_init(uint8 new_task_id)
     (void)dpls_gatt_add_service(receive_frame);
 }
 
+static void erase_stored_bonds(void)
+{
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+}
+
+static void erase_bonds_and_drop_link(void)
+{
+    erase_stored_bonds();
+    if (connection_handle != INVALID_CONNHANDLE) {
+        (void)GAPRole_TerminateConnection();
+    }
+}
+
+static void note_pre_auth_disconnect(void)
+{
+    uint32_t now = now_ms();
+    if (server.authenticated || !connection_had_encryption) {
+        return;
+    }
+    if (pre_auth_disconnect_window_ms == 0u ||
+        (uint32_t)(now - pre_auth_disconnect_window_ms) > DPLS_BOND_DESYNC_WINDOW_MS) {
+        pre_auth_disconnect_count = 0;
+        pre_auth_disconnect_window_ms = now;
+    }
+    if (++pre_auth_disconnect_count < DPLS_BOND_DESYNC_LIMIT) {
+        return;
+    }
+    pre_auth_disconnect_count = 0;
+    pre_auth_disconnect_window_ms = 0;
+    erase_stored_bonds();
+}
+
 void dpls_phy6252_connected(uint16 conn_handle)
 {
     connection_handle = conn_handle;
+    connected_at_ms = now_ms();
+    connection_had_encryption = false;
     dpls_server_connected(&server, now_ms());
 }
 
 void dpls_phy6252_disconnected(void)
 {
+    note_pre_auth_disconnect();
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
+    connected_at_ms = 0;
+    connection_had_encryption = false;
     rx_head = rx_tail = rx_count = 0;
 }
 
@@ -321,6 +516,20 @@ void dpls_phy6252_process_rx(void)
 
 void dpls_phy6252_tick(void)
 {
+    if (connection_handle != INVALID_CONNHANDLE) {
+        if (link_encrypted(NULL)) {
+            connection_had_encryption = true;
+        }
+        if (server.authenticated) {
+            pre_auth_disconnect_count = 0;
+            pre_auth_disconnect_window_ms = 0;
+        }
+    }
+    if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) && connected_at_ms != 0u &&
+        (uint32_t)(now_ms() - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
+        connected_at_ms = 0;
+        erase_bonds_and_drop_link();
+    }
     if (factory_reset_armed) {
         if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
         else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {

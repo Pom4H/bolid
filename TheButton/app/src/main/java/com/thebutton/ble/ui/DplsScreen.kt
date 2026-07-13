@@ -94,12 +94,16 @@ private fun App(
         }
     }
 
+    LaunchedEffect(state.authenticated) {
+        if (state.authenticated) identifying = null
+    }
+
     Scaffold(modifier = modifier.background(Bg), containerColor = Bg, bottomBar = {
         if (showTabs) BottomNav(page) { page = it; pickingTest = false }
     }) { insets ->
         Box(Modifier.fillMaxSize().padding(insets).background(Bg)) {
             when {
-                identifying != null -> IdentifyScreen(
+                identifying != null && !state.authenticated -> IdentifyScreen(
                     identifying!!,
                     state,
                     back = { stopIdentify(); disconnect(); identifying = null },

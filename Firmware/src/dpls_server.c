@@ -19,40 +19,13 @@ static uint16_t log_event_count(const dpls_server_t *s);
 
 static bool event_type_valid(uint8_t type) { return type >= EVT_BOOT && type <= EVT_LAST; }
 
-static bool event_exportable(const dpls_server_t *s, const dpls_event_t *e) {
-    uint32_t now_s = s->now_ms / 1000u;
-    if (!event_type_valid(e->event_type) || e->sequence == 0) return false;
-    return e->timestamp_seconds <= now_s + 5u;
-}
-
-static uint16_t export_event_count(const dpls_server_t *s) {
-    uint16_t total = log_event_count(s);
-    uint16_t oldest = total == DPLS_EVENT_CAPACITY ? s->event_cursor : 0;
-    uint16_t valid = 0;
-    uint16_t i;
-    for (i = 0; i < total; ++i) {
-        uint16_t index = (uint16_t)((oldest + i) % DPLS_EVENT_CAPACITY);
-        if (event_exportable(s, &s->events[index])) ++valid;
-    }
-    return valid;
-}
-
 static bool event_at_export_index(const dpls_server_t *s, uint16_t export_index, dpls_event_t *out) {
-    uint16_t total = log_event_count(s);
-    uint16_t oldest = total == DPLS_EVENT_CAPACITY ? s->event_cursor : 0;
-    uint16_t seen = 0;
-    uint16_t i;
-    for (i = 0; i < total; ++i) {
-        uint16_t index = (uint16_t)((oldest + i) % DPLS_EVENT_CAPACITY);
-        const dpls_event_t *e = &s->events[index];
-        if (!event_exportable(s, e)) continue;
-        if (seen == export_index) {
-            *out = *e;
-            return true;
-        }
-        ++seen;
-    }
-    return false;
+    uint32_t sequence;
+    if (!s->log_export_active || export_index >= s->log_export_count ||
+        !s->hal.event_storage_read) return false;
+    sequence = s->log_export_first_sequence + export_index;
+    if (!s->hal.event_storage_read(s->hal.context, sequence, out)) return false;
+    return out->sequence == sequence && event_type_valid(out->event_type);
 }
 
 static void stop_identify(dpls_server_t *s) {
@@ -79,29 +52,36 @@ static void start_identify(dpls_server_t *s, uint32_t now_ms) {
 }
 
 static bool send_frame(dpls_server_t *s, uint8_t type, const uint8_t *payload, uint16_t length, bool stream) {
-    dpls_frame_t frame;
-    uint8_t encoded[DPLS_MAX_FRAME];
     size_t encoded_length;
-    memset(&frame, 0, sizeof(frame));
-    frame.type = type; frame.sequence = ++s->tx_sequence; frame.payload_length = length;
-    if (length) memcpy(frame.payload, payload, length);
-    encoded_length = dpls_frame_encode(&frame, encoded, sizeof(encoded));
-    if (!encoded_length) return false;
-    return stream ? s->hal.tx_notify(s->hal.context, encoded, encoded_length)
-                  : s->hal.tx_indicate(s->hal.context, encoded, encoded_length);
+    uint16_t crc;
+    if (length > DPLS_MAX_PAYLOAD) return false;
+    encoded_length = DPLS_PROTOCOL_OVERHEAD + length;
+    s->tx_encoded[0] = DPLS_PROTOCOL_VERSION;
+    s->tx_encoded[1] = type;
+    s->tx_encoded[2] = 0;
+    wr16(s->tx_encoded + 3, ++s->tx_sequence);
+    wr16(s->tx_encoded + 5, length);
+    if (length) memcpy(s->tx_encoded + 7, payload, length);
+    crc = dpls_crc16(s->tx_encoded, encoded_length - 2u);
+    wr16(s->tx_encoded + encoded_length - 2u, crc);
+    return stream ? s->hal.tx_notify(s->hal.context, s->tx_encoded, encoded_length)
+                  : s->hal.tx_indicate(s->hal.context, s->tx_encoded, encoded_length);
 }
 
 void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter) {
     dpls_event_t event;
-    if (!event_type_valid(type)) return;
-    event.sequence = s->next_event_sequence++;
+    if (!event_type_valid(type) || !s->hal.event_storage_append) return;
+    memset(&event, 0, sizeof(event));
+    event.sequence = s->next_event_sequence;
     event.timestamp_seconds = s->now_ms / 1000u;
     event.event_type = type;
     event.parameter = parameter;
-    s->events[s->event_cursor] = event;
-    s->event_cursor = (uint16_t)((s->event_cursor + 1u) % DPLS_EVENT_CAPACITY);
+    if (!s->hal.event_storage_append(s->hal.context, &event)) {
+        if (s->hal.diagnostic_error) s->hal.diagnostic_error(s->hal.context, false);
+        return;
+    }
+    ++s->next_event_sequence;
     if (s->event_count < DPLS_EVENT_CAPACITY) ++s->event_count;
-    if (s->hal.event_persist) s->hal.event_persist(s->hal.context, &event);
 }
 
 static void force_normal(dpls_server_t *s, dpls_return_reason_t reason) {
@@ -119,7 +99,18 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
     s->next_event_sequence = 1;
     s->state_revision = 1;
     s->event_count = 0;
-    s->event_cursor = 0;
+    if (s->hal.event_storage_init) {
+        uint16_t stored_count = 0;
+        uint32_t next_sequence = 1;
+        if (s->hal.event_storage_init(s->hal.context, &stored_count, &next_sequence)) {
+            s->event_count = stored_count > DPLS_EVENT_CAPACITY ? DPLS_EVENT_CAPACITY : stored_count;
+            s->next_event_sequence = next_sequence == 0 ? 1 : next_sequence;
+            if (s->event_count >= s->next_event_sequence)
+                s->event_count = (uint16_t)(s->next_event_sequence - 1u);
+        } else if (s->hal.diagnostic_error) {
+            s->hal.diagnostic_error(s->hal.context, false);
+        }
+    }
     s->hal.hardware_safe_normal(s->hal.context);
     dpls_server_log(s, EVT_BOOT, DPLS_RETURN_BOOT);
 }
@@ -282,16 +273,20 @@ static void send_log_chunk_at(dpls_server_t *s, uint16_t export_index) {
         encode_event(&event, p + 2);
         /* Log stream uses indications only — one chunk per LOG_ACK, no notify flood. */
         send_frame(s, DPLS_MSG_LOG_CHUNK, p, sizeof(p), false);
+    } else {
+        s->log_export_active = false;
+        send_error(s, 6);
     }
 }
 
 static void send_log_result(dpls_server_t *s) {
     uint8_t ok = 0;
+    s->log_export_active = false;
     send_frame(s, DPLS_MSG_LOG_RESULT, &ok, 1, false);
 }
 
 static void send_log_from(dpls_server_t *s, uint16_t first) {
-    uint16_t count = export_event_count(s);
+    uint16_t count = s->log_export_count;
     if (first < count) send_log_chunk_at(s, first);
     else send_log_result(s);
 }
@@ -354,7 +349,10 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
         uint16_t count;
         if (!session_matches(s, &f, 14)) { send_error(s, 2); break; }
         clamp_event_count(s);
-        count = export_event_count(s);
+        count = log_event_count(s);
+        s->log_export_count = count;
+        s->log_export_first_sequence = s->next_event_sequence - count;
+        s->log_export_active = true;
         wr32(p, s->session_id); wr32(p + 4, (uint32_t)count * 10u); wr16(p + 8, count);
         send_frame(s, DPLS_MSG_LOG_INFO, p, sizeof(p), false);
         break;

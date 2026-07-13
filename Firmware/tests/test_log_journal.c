@@ -13,6 +13,10 @@ typedef struct {
     uint8_t notif[256][DPLS_MAX_FRAME];
     size_t notif_len[256];
     unsigned notification_count;
+    dpls_event_t stored[DPLS_EVENT_CAPACITY];
+    uint16_t stored_count;
+    uint32_t stored_next;
+    unsigned storage_read_count;
 } fake_t;
 
 static bool encrypted(void *c) { return ((fake_t *)c)->encrypted; }
@@ -39,6 +43,22 @@ static bool notify(void *c, const uint8_t *p, size_t n) {
     return true;
 }
 static bool indicate(void *c, const uint8_t *p, size_t n) { return notify(c, p, n); }
+static bool storage_init(void *c, uint16_t *count, uint32_t *next) {
+    fake_t *f = c; *count = f->stored_count; *next = f->stored_next ? f->stored_next : 1u; return true;
+}
+static bool storage_append(void *c, const dpls_event_t *event) {
+    fake_t *f = c;
+    f->stored[(event->sequence - 1u) % DPLS_EVENT_CAPACITY] = *event;
+    if (f->stored_count < DPLS_EVENT_CAPACITY) ++f->stored_count;
+    f->stored_next = event->sequence + 1u;
+    return true;
+}
+static bool storage_read(void *c, uint32_t sequence, dpls_event_t *event) {
+    fake_t *f = c;
+    ++f->storage_read_count;
+    *event = f->stored[(sequence - 1u) % DPLS_EVENT_CAPACITY];
+    return event->sequence == sequence;
+}
 
 static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) {
     dpls_frame_t f;
@@ -113,6 +133,8 @@ static void test_invalid_type_not_stored(void) {
         .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
         .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
     };
     dpls_server_t server;
@@ -132,6 +154,8 @@ static void test_ring_overflow(void) {
         .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
         .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
     };
     dpls_server_t server;
@@ -163,9 +187,84 @@ static void test_ring_overflow(void) {
     }
 }
 
+static void test_all_spec_event_types_round_trip(void) {
+    fake_t fake = {.encrypted = true, .initialized = true};
+    dpls_hal_t hal = {
+        .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
+        .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
+        .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
+        .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
+        .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
+    };
+    dpls_server_t server;
+    uint8_t buf[DPLS_MAX_FRAME];
+    dpls_event_t exported[16];
+    uint16_t count, type;
+
+    dpls_server_init(&server, &hal, 0);
+    auth_session(&server, &fake, buf);
+    /* init/connect/auth already exercise 1, 2 and 4. Add a deterministic
+     * record for every event code from the specification and verify the wire
+     * representation preserves both type and parameter. */
+    for (type = 1; type <= 11; ++type) {
+        server.now_ms = (uint32_t)type * 1000u;
+        dpls_server_log(&server, (uint8_t)type, (uint8_t)(0xa0u + type));
+    }
+    count = export_events(&server, &fake, buf, exported, 16);
+    assert(count == 14u);
+    for (type = 1; type <= 11; ++type) {
+        const dpls_event_t *event = &exported[type + 2u];
+        assert(event->event_type == type);
+        assert(event->parameter == (uint8_t)(0xa0u + type));
+        assert(event->timestamp_seconds == type);
+    }
+}
+
+static void test_flash_style_storage_survives_reboot_and_streams(void) {
+    fake_t fake = {.encrypted = true, .initialized = true};
+    dpls_hal_t hal = {
+        .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
+        .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
+        .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
+        .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
+        .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
+    };
+    dpls_server_t first, rebooted;
+    dpls_event_t exported[DPLS_EVENT_CAPACITY];
+    uint8_t buf[DPLS_MAX_FRAME];
+    uint16_t i, count;
+
+    dpls_server_init(&first, &hal, 0);
+    for (i = 0; i < 220u; ++i) {
+        first.now_ms = (uint32_t)i * 1000u;
+        dpls_server_log(&first, TST_EVT_BLE_CONNECTED, (uint8_t)i);
+    }
+    assert(first.event_count == DPLS_EVENT_CAPACITY);
+
+    /* A fresh server object contains no event array. It reconstructs only
+     * count/next-sequence from the same persistent backend. */
+    dpls_server_init(&rebooted, &hal, 500000u);
+    assert(rebooted.event_count == DPLS_EVENT_CAPACITY);
+    assert(rebooted.next_event_sequence == 223u);
+    auth_session(&rebooted, &fake, buf);
+    fake.storage_read_count = 0;
+    count = export_events(&rebooted, &fake, buf, exported, DPLS_EVENT_CAPACITY);
+    assert(count == DPLS_EVENT_CAPACITY);
+    assert(fake.storage_read_count == DPLS_EVENT_CAPACITY);
+    assert(exported[0].sequence == 25u);
+    assert(exported[count - 1u].sequence == 224u);
+    assert(sizeof(dpls_server_t) < 1024u);
+}
+
 int main(void) {
     test_invalid_type_not_stored();
+    test_all_spec_event_types_round_trip();
     test_ring_overflow();
+    test_flash_style_storage_survives_reboot_and_streams();
     printf("test_log_journal: OK (capacity=%u)\n", (unsigned)DPLS_EVENT_CAPACITY);
     return 0;
 }
