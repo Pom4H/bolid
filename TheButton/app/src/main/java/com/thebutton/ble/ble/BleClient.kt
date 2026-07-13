@@ -1107,6 +1107,18 @@ class BleClient(context: Context) {
             return
         }
 
+        // A post-auth write can fail with a hard status while the link is still
+        // settling right after a reconnect (the churny re-pairing path makes
+        // this intermittent). Terminal fail() dead-ended an otherwise
+        // recoverable session in ERROR — controls greyed out with no way back.
+        // Drop the link instead and let the normal reconnect + cached-verifier
+        // re-auth restore the session.
+        if (reachedReady) {
+            Log.w(TAG, "Post-auth write failed status=$status; reconnecting")
+            gatt?.disconnect()
+            return
+        }
+
         fail("Ошибка передачи BLE: $status")
     }
 
