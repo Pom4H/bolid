@@ -772,6 +772,16 @@ class BleClient(context: Context) {
                 }
             }
             DplsProtocol.Type.AUTH_RESULT -> {
+                // The lockout flow (and a user who retypes fast) sends several
+                // AUTH_PROOFs; the device answers each. A delayed "wrong
+                // password" AUTH_RESULT from an earlier attempt can land AFTER a
+                // later one succeeded — dropping the live authenticated session
+                // into ERROR ("Неверный пароль" on the test screen). Once
+                // authenticated, any further AUTH_RESULT is stale: ignore it.
+                if (_uiState.value.authenticated) {
+                    Log.w(TAG, "Ignoring stale AUTH_RESULT while authenticated")
+                    return
+                }
                 handler.removeCallbacks(preAuthKeepAlive)
                 val ok = payload.u8() == 0
                 val retryAfter = payload.u16()
