@@ -16,3 +16,5 @@ Firmware/sdk/**/ac6/tmp/
 TheButton/**/build/
 TheButton/.gradle/
 TheButton/local.properties
+
+**/__pycache__/
