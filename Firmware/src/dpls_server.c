@@ -241,7 +241,9 @@ static void send_state(dpls_server_t *s) {
     wr16(p + 2, s->hal.voltage_mv(s->hal.context));
     if (s->mode != DPLS_MODE_NORMAL && !elapsed(s->now_ms, s->mode_deadline_ms))
         wr16(p + 4, (uint16_t)((s->mode_deadline_ms - s->now_ms + 999u) / 1000u));
-    p[6] = s->hal.reserve_low(s->hal.context) ? 1u : 0u; p[7] = s->connected ? 1u : 0u;
+    p[6] = s->hal.reserve_low(s->hal.context) ? 1u : 0u;
+    /* p[7] is a flag byte: bit0 = connected, bit1 = real-short auto-isolation. */
+    p[7] = (uint8_t)((s->connected ? 0x01u : 0u) | (s->real_short ? 0x02u : 0u));
     wr32(p + 8, s->now_ms / 1000u); wr32(p + 12, s->state_revision);
     send_frame(s, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
 }

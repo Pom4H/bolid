@@ -31,6 +31,8 @@ data class DeviceState(
     val voltageMv: Int,
     val powerSource: PowerSource,
     val reserveLow: Boolean,
+    /** Hardware is isolating a real downstream short circuit (BRIZ-T function). */
+    val realShort: Boolean,
     val automaticReturnSeconds: Int,
     val uptimeSeconds: Long,
     val revision: Long,

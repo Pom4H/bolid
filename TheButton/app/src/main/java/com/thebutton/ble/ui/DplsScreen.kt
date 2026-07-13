@@ -403,6 +403,21 @@ private fun RowScope.NavTab(
             HorizontalDivider(color = Line)
             CompactInfoRow("Напряжение ДПЛС", s?.voltageMv?.let { "%.1f В".format(it / 1000f) } ?: "—", Green)
             CompactInfoRow("Источник питания", s?.powerSource?.let { "От ${it.title}" } ?: "—", Green)
+            if (s?.reserveLow == true) {
+                CompactInfoRow("Заряд резерва", "Низкий", Orange)
+            }
+            if (s?.realShort == true) {
+                HorizontalDivider(color = Line)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚠", color = Orange, fontSize = 20.sp)
+                    Text(
+                        " Автоизоляция реального КЗ",
+                        color = Orange,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
             if (testActive) {
                 HorizontalDivider(color = Line)
                 Row(
@@ -566,6 +581,9 @@ private fun eventTitle(type: Int, parameter: Int): String = when (type) {
     9 -> "Идентификация начата"
     10 -> "Идентификация остановлена"
     11 -> "Пароль установлен"
+    12 -> "Питание: ${if (parameter == 0) "от ДПЛС" else "от резерва"}"
+    13 -> "Резерв: ${if (parameter == 0) "норма" else "низкий заряд"}"
+    14 -> "Автоизоляция КЗ: ${if (parameter == 0) "снята" else "активна"}"
     else -> "Событие $type · $parameter"
 }
 
@@ -577,6 +595,7 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     4 -> "Автовозврат в Норма (низкий резерв)"
     5 -> "Автовозврат в Норма (ошибка)"
     6 -> "Автовозврат в Норма (перезапуск)"
+    7 -> "Автовозврат в Норма (автоизоляция КЗ)"
     else -> "Автовозврат в Норма"
 }
 

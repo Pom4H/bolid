@@ -831,7 +831,7 @@ class BleClient(context: Context) {
                 val result = payload.u8()
                 val mode = DplsMode.fromWire(payload.u8()) ?: DplsMode.NORMAL
                 val remaining = payload.u16()
-                if (result != 0) return fail("Команда отклонена устройством: $result")
+                if (result != 0) return fail(commandRejectReason(result))
                 _uiState.update { it.copy(commandInProgress = false, statusText = "Команда выполнена, проверка состояния…", lastAckMillis = System.currentTimeMillis()) }
                 if (_uiState.value.logProgress == null) send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
             }
@@ -876,6 +876,13 @@ class BleClient(context: Context) {
         }
     }
 
+    private fun commandRejectReason(status: Int): String = when (status) {
+        3 -> "Команда отклонена: недопустимый режим"
+        4 -> "Команда отклонена: аппаратное переключение не удалось"
+        5 -> "Команда отклонена: активна автоизоляция реального КЗ"
+        else -> "Команда отклонена устройством: $status"
+    }
+
     private fun parseState(payload: ByteBuffer) {
         if (payload.remaining() < 16) return fail("Повреждённый STATE_REPORT")
         val mode = DplsMode.fromWire(payload.u8()) ?: DplsMode.NORMAL
@@ -883,7 +890,8 @@ class BleClient(context: Context) {
         val voltage = payload.u16()
         val automaticReturn = payload.u16()
         val reserveLow = payload.u8() != 0
-        payload.u8() // state flags; reserved for hardware-confirmation bits
+        val flags = payload.u8() // bit0 = connected, bit1 = real-short auto-isolation
+        val realShort = (flags and 0x02) != 0
         val uptimeSeconds = payload.u32()
         val revision = payload.u32()
         val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
@@ -893,6 +901,7 @@ class BleClient(context: Context) {
             voltageMv = voltage,
             automaticReturnSeconds = automaticReturn,
             reserveLow = reserveLow,
+            realShort = realShort,
             uptimeSeconds = uptimeSeconds,
             revision = revision,
             receivedAtMillis = System.currentTimeMillis(),
