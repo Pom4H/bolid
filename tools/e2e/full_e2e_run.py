@@ -120,7 +120,7 @@ def main() -> int:
             "am",
             "broadcast",
             "-a",
-            "com.thebutton.ble.E2E_FILL_LOGIN",
+            "ru.bolid.testdpls.E2E_FILL_LOGIN",
             "--es",
             "password",
             new_pw,

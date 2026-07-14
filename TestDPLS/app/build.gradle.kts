@@ -14,11 +14,11 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.thebutton.ble"
+    namespace = "ru.bolid.testdpls"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.thebutton.ble"
+        applicationId = "ru.bolid.testdpls"
         minSdk = 33
         targetSdk = 35
         versionCode = 1

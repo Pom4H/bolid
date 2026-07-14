@@ -1,4 +1,4 @@
-package com.thebutton.ble
+package ru.bolid.testdpls
 
 import android.app.Application
 import android.content.BroadcastReceiver
@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
-import com.thebutton.ble.ble.BleClient
+import ru.bolid.testdpls.ble.BleClient
 
 class DplsApplication : Application() {
     val bleClient: BleClient by lazy { BleClient(this) }
@@ -67,16 +67,16 @@ class DplsApplication : Application() {
     }
 
     companion object {
-        const val ACTION_E2E_FILL_SETUP = "com.thebutton.ble.E2E_FILL_SETUP"
-        const val ACTION_E2E_FILL_LOGIN = "com.thebutton.ble.E2E_FILL_LOGIN"
-        const val ACTION_E2E_RUN_MODE = "com.thebutton.ble.E2E_RUN_MODE"
-        const val ACTION_E2E_IDENTIFY = "com.thebutton.ble.E2E_IDENTIFY"
-        const val ACTION_E2E_CONFIRM = "com.thebutton.ble.E2E_CONFIRM"
-        const val ACTION_E2E_EXPORT_CSV = "com.thebutton.ble.E2E_EXPORT_CSV"
-        const val ACTION_E2E_UNPAIR_ALL = "com.thebutton.ble.E2E_UNPAIR_ALL"
-        const val ACTION_E2E_LOAD_JOURNAL = "com.thebutton.ble.E2E_LOAD_JOURNAL"
-        const val ACTION_E2E_SET_NAME = "com.thebutton.ble.E2E_SET_NAME"
-        const val ACTION_E2E_SET_PASSWORD = "com.thebutton.ble.E2E_SET_PASSWORD"
+        const val ACTION_E2E_FILL_SETUP = "ru.bolid.testdpls.E2E_FILL_SETUP"
+        const val ACTION_E2E_FILL_LOGIN = "ru.bolid.testdpls.E2E_FILL_LOGIN"
+        const val ACTION_E2E_RUN_MODE = "ru.bolid.testdpls.E2E_RUN_MODE"
+        const val ACTION_E2E_IDENTIFY = "ru.bolid.testdpls.E2E_IDENTIFY"
+        const val ACTION_E2E_CONFIRM = "ru.bolid.testdpls.E2E_CONFIRM"
+        const val ACTION_E2E_EXPORT_CSV = "ru.bolid.testdpls.E2E_EXPORT_CSV"
+        const val ACTION_E2E_UNPAIR_ALL = "ru.bolid.testdpls.E2E_UNPAIR_ALL"
+        const val ACTION_E2E_LOAD_JOURNAL = "ru.bolid.testdpls.E2E_LOAD_JOURNAL"
+        const val ACTION_E2E_SET_NAME = "ru.bolid.testdpls.E2E_SET_NAME"
+        const val ACTION_E2E_SET_PASSWORD = "ru.bolid.testdpls.E2E_SET_PASSWORD"
         const val EXTRA_E2E_NAME = "name"
         const val EXTRA_E2E_PASSWORD = "password"
         const val EXTRA_E2E_NEW_PASSWORD = "new_password"

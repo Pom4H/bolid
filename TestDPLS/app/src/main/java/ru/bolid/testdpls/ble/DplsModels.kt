@@ -1,4 +1,4 @@
-package com.thebutton.ble.ble
+package ru.bolid.testdpls.ble
 
 enum class DplsMode(val wire: Int, val title: String, val dangerous: Boolean) {
     NORMAL(0, "Норма", false),

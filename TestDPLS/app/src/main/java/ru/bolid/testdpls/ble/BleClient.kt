@@ -1,4 +1,4 @@
-package com.thebutton.ble.ble
+package ru.bolid.testdpls.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -22,10 +22,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
-import com.thebutton.ble.protocol.DplsProtocol
-import com.thebutton.ble.protocol.u16
-import com.thebutton.ble.protocol.u32
-import com.thebutton.ble.protocol.u8
+import ru.bolid.testdpls.protocol.DplsProtocol
+import ru.bolid.testdpls.protocol.u16
+import ru.bolid.testdpls.protocol.u32
+import ru.bolid.testdpls.protocol.u8
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

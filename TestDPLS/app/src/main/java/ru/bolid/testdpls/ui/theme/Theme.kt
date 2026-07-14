@@ -1,4 +1,4 @@
-package com.thebutton.ble.ui.theme
+package ru.bolid.testdpls.ui.theme
 
 import android.app.Activity
 import androidx.compose.material3.MaterialTheme
@@ -17,7 +17,7 @@ private val Colors = darkColorScheme(
     outline = Color(0xFF263B46), error = Color(0xFFFF6A2A),
 )
 
-@Composable fun TheButtonTheme(content: @Composable () -> Unit) {
+@Composable fun TestDplsTheme(content: @Composable () -> Unit) {
     val view = LocalView.current
     if (!view.isInEditMode) SideEffect {
         val window = (view.context as Activity).window

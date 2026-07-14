@@ -20,7 +20,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.TheButton">
+        android:theme="@style/Theme.TestDPLS">
 
         <activity
             android:name=".MainActivity"

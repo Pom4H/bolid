@@ -1,4 +1,4 @@
-package com.thebutton.ble.ui
+package ru.bolid.testdpls.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -29,7 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.thebutton.ble.ble.*
+import ru.bolid.testdpls.ble.*
 import kotlinx.coroutines.delay
 
 private val Bg = Color(0xFF071923)

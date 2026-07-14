@@ -35,7 +35,7 @@ def _adb_device() -> str:
 
 
 DEV = _adb_device()
-PKG = "com.thebutton.ble"
+PKG = "ru.bolid.testdpls"
 ACTIVITY = f"{PKG}/.MainActivity"
 ACTION_E2E_SET_NAME = f"{PKG}.E2E_SET_NAME"
 ACTION_E2E_SET_PASSWORD = f"{PKG}.E2E_SET_PASSWORD"
@@ -309,11 +309,11 @@ def phase_banner(title: str) -> None:
 
 
 def submit_password(password: str) -> None:
-    e2e_broadcast("com.thebutton.ble.E2E_FILL_LOGIN", password=password)
+    e2e_broadcast("ru.bolid.testdpls.E2E_FILL_LOGIN", password=password)
 
 
 def confirm_identified_device() -> None:
-    e2e_broadcast("com.thebutton.ble.E2E_CONFIRM")
+    e2e_broadcast("ru.bolid.testdpls.E2E_CONFIRM")
     tap_text("Это устройство", clickable=None)
 
 
@@ -514,7 +514,7 @@ def wait_journal_idle(timeout: float = 15.0) -> None:
 
 def probe_log_events(timeout: float = 300.0) -> int:
     clear_logcat()
-    e2e_broadcast("com.thebutton.ble.E2E_LOAD_JOURNAL")
+    e2e_broadcast("ru.bolid.testdpls.E2E_LOAD_JOURNAL")
     deadline = time.time() + timeout
     while time.time() < deadline:
         logcat = logcat_full()
@@ -699,7 +699,7 @@ def phase_main(results: list[tuple[str, str]]) -> None:
     records, _, _ = journal_stats_from_logcat()
     if records == 0:
         reload_journal()
-    e2e_broadcast("com.thebutton.ble.E2E_EXPORT_CSV")
+    e2e_broadcast("ru.bolid.testdpls.E2E_EXPORT_CSV")
     wait_logcat("E2E export done", timeout=12)
     results.append(("export", "OK"))
 
@@ -893,7 +893,7 @@ def run_test_mode(mode_title: str) -> None:
     t0 = time.perf_counter()
     wire = MODE_WIRE[mode_title]
     clear_logcat()
-    e2e_broadcast("com.thebutton.ble.E2E_RUN_MODE", wire=wire)
+    e2e_broadcast("ru.bolid.testdpls.E2E_RUN_MODE", wire=wire)
     wait_logcat(f"E2E mode done: {mode_title}", timeout=35.0)
     log(f"  mode {mode_title}: {time.perf_counter() - t0:.1f}s")
 
@@ -1021,7 +1021,7 @@ def wait_button_enabled(text: str, timeout: float = 20.0) -> Node:
 
 def fill_setup_form() -> None:
     adb(
-        "shell", "am", "broadcast", "-a", "com.thebutton.ble.E2E_FILL_SETUP",
+        "shell", "am", "broadcast", "-a", "ru.bolid.testdpls.E2E_FILL_SETUP",
         "--es", "name", DEVICE_NAME, "--es", "password", PASSWORD,
         PKG,
     )
@@ -1030,7 +1030,7 @@ def fill_setup_form() -> None:
 
 def fill_login_form() -> None:
     adb(
-        "shell", "am", "broadcast", "-a", "com.thebutton.ble.E2E_FILL_LOGIN",
+        "shell", "am", "broadcast", "-a", "ru.bolid.testdpls.E2E_FILL_LOGIN",
         "--es", "password", PASSWORD,
         PKG,
     )
@@ -1203,7 +1203,7 @@ def remove_all_dpls_bonds(max_attempts: int = 12) -> list[str]:
     adb("shell", "am", "start", "-n", ACTIVITY, check=False)
     time.sleep(0.35)
     clear_logcat()
-    e2e_broadcast("com.thebutton.ble.E2E_UNPAIR_ALL")
+    e2e_broadcast("ru.bolid.testdpls.E2E_UNPAIR_ALL")
     deadline = time.time() + 12.0
     while time.time() < deadline:
         if "E2E unpair done" in logcat_full():

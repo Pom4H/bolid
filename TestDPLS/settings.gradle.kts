@@ -17,5 +17,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "TheButton"
+rootProject.name = "TestDPLS"
 include(":app")

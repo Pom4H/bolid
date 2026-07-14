@@ -3,14 +3,14 @@
 Стек безопасного BLE-управления испытательным устройством ДПЛС: прошивка для
 PHY6252 (плата PB-03F-Kit) и Android-клиент. Протокол, аутентификация и
 хранение журнала описаны в [Firmware/README.md](Firmware/README.md), клиент —
-в [TheButton/README.md](TheButton/README.md).
+в [TestDPLS/README.md](TestDPLS/README.md).
 
 ## Структура
 
 | Каталог | Содержимое |
 |---|---|
 | `Firmware/` | Переносимое ядро сервера (C99, хостовые тесты) + адаптер PHY62XX SDK 3.1.1 |
-| `TheButton/` | Android-клиент (Kotlin, Jetpack Compose, minSdk 33) |
+| `TestDPLS/` | Android-клиент (Kotlin, Jetpack Compose, minSdk 33) |
 | `tools/` | Сборка/прошивка/UART-отладка |
 | `tools/e2e/` | E2E-харнесс: телефон + плата через adb |
 | `docs/hardware/` | Схема PB-03F-Kit |
@@ -38,7 +38,7 @@ python3 tools/serial_capture.py 20 --no-reset
 ## Android
 
 ```sh
-cd TheButton && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+cd TestDPLS && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
     ./gradlew installDebug
 ```
 

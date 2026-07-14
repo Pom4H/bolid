@@ -1,4 +1,4 @@
-package com.thebutton.ble.protocol
+package ru.bolid.testdpls.protocol
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

@@ -15,8 +15,8 @@ Firmware/sdk/**/ac6/*.cbuild-idx.yml
 Firmware/sdk/**/ac6/*.cbuild-pack.yml
 **/.ninja_log
 
-TheButton/**/build/
-TheButton/.gradle/
-TheButton/local.properties
+TestDPLS/**/build/
+TestDPLS/.gradle/
+TestDPLS/local.properties
 
 **/__pycache__/

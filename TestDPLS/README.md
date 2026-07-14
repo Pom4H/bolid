@@ -12,7 +12,7 @@
 
 ```bash
 ./gradlew installDebug
-~/Library/Android/sdk/platform-tools/adb shell am start -n com.thebutton.ble/.MainActivity
+~/Library/Android/sdk/platform-tools/adb shell am start -n ru.bolid.testdpls/.MainActivity
 ```
 
 Логи — в Logcat по тегу `TestDplsBle`.

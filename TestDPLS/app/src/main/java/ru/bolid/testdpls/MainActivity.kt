@@ -1,4 +1,4 @@
-package com.thebutton.ble
+package ru.bolid.testdpls
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
@@ -15,9 +15,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import android.content.pm.ApplicationInfo
-import com.thebutton.ble.ui.DplsScreen
-import com.thebutton.ble.ui.MainViewModel
-import com.thebutton.ble.ui.theme.TheButtonTheme
+import ru.bolid.testdpls.ui.DplsScreen
+import ru.bolid.testdpls.ui.MainViewModel
+import ru.bolid.testdpls.ui.theme.TestDplsTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -59,7 +59,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            TheButtonTheme {
+            TestDplsTheme {
                 DplsScreen(
                     viewModel = viewModel,
                     onExportCsv = {

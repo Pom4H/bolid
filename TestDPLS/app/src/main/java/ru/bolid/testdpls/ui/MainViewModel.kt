@@ -1,14 +1,14 @@
-package com.thebutton.ble.ui
+package ru.bolid.testdpls.ui
 
 import android.app.Application
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.core.content.ContextCompat
-import com.thebutton.ble.BleConnectionService
-import com.thebutton.ble.DplsApplication
-import com.thebutton.ble.ble.BleClient
-import com.thebutton.ble.ble.DplsMode
-import com.thebutton.ble.ble.DplsUiState
+import ru.bolid.testdpls.BleConnectionService
+import ru.bolid.testdpls.DplsApplication
+import ru.bolid.testdpls.ble.BleClient
+import ru.bolid.testdpls.ble.DplsMode
+import ru.bolid.testdpls.ble.DplsUiState
 import kotlinx.coroutines.flow.StateFlow
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {

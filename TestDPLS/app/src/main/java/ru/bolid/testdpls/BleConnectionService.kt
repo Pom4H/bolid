@@ -1,4 +1,4 @@
-package com.thebutton.ble
+package ru.bolid.testdpls
 
 import android.Manifest
 import android.app.NotificationChannel
@@ -13,9 +13,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import com.thebutton.ble.ble.ConnectionPhase
-import com.thebutton.ble.ble.DplsMode
-import com.thebutton.ble.ble.DplsUiState
+import ru.bolid.testdpls.ble.ConnectionPhase
+import ru.bolid.testdpls.ble.DplsMode
+import ru.bolid.testdpls.ble.DplsUiState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
