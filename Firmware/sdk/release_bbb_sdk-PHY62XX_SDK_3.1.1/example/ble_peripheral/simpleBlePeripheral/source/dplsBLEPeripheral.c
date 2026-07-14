@@ -149,7 +149,16 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     (void)task_id;
     if (events & SYS_EVENT_MSG) {
         uint8 *message = osal_msg_receive(app_task_id);
-        if (message) osal_msg_deallocate(message);
+        if (message) {
+            osal_event_hdr_t *hdr = (osal_event_hdr_t *)message;
+            /* An ATT Handle Value Confirmation releases the in-flight indication
+             * so the TX queue can send the next frame. */
+            if (hdr->event == GATT_MSG_EVENT &&
+                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
+                dpls_phy6252_tx_confirmed();
+            }
+            osal_msg_deallocate(message);
+        }
         return events ^ SYS_EVENT_MSG;
     }
     if (events & SBP_START_DEVICE_EVT) {
@@ -170,6 +179,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
         return events ^ DPLS_PHY6252_RX_EVT;
+    }
+    if (events & DPLS_PHY6252_TX_EVT) {
+        dpls_phy6252_process_tx();
+        return events ^ DPLS_PHY6252_TX_EVT;
     }
     return 0;
 }

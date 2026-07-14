@@ -1549,7 +1549,9 @@ class BleClient(context: Context) {
         private const val PRE_AUTH_GATT133_RECOVERY_THRESHOLD = 2
         private const val BOND_CLEAR_WAIT_MS = 6_000L
         private const val BOND_CLEAR_POLL_MS = 200L
-        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 143, 201)
+        // 17 = ATT_ERR_INSUFFICIENT_RESOURCES: the device's RX queue is full and
+        // NAK'd the write on purpose — retry rather than fail the frame.
+        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 17, 143, 201)
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
         private const val MANUFACTURER_ID = 0x0B01

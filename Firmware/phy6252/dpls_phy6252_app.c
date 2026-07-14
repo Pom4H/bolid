@@ -119,10 +119,22 @@ static uint32_t connected_at_ms;
 static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
-#define DPLS_RX_QUEUE_DEPTH 4u
-typedef struct { uint8 data[DPLS_MAX_FRAME]; uint16 length; } dpls_rx_slot_t;
+/* Largest client→device frame is SETUP (9 overhead + 5 + 31 name + 16 salt + 32
+ * verifier = 93), so 96-byte RX slots cover every request. A deeper (8) but
+ * narrower queue costs less RAM than the old 4×244 and holds more backlog. */
+#define DPLS_RX_QUEUE_DEPTH 8u
+#define DPLS_RX_SLOT_SIZE 96u
+typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
+
+/* Outgoing indications are paced one-in-flight against the ATT confirmation, so
+ * a busy stack or a back-to-back pair no longer drops the response. */
+#define DPLS_TX_QUEUE_DEPTH 4u
+typedef struct { uint16 length; uint8 data[DPLS_MAX_FRAME]; } dpls_tx_slot_t;
+static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
+static uint8 tx_head, tx_tail, tx_count;
+static bool tx_in_flight;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
 
@@ -663,10 +675,63 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
     return difference == 0;
 }
 
+/* Send the head of the TX queue if nothing is in flight. Runs from the OSAL
+ * task (via DPLS_PHY6252_TX_EVT or the tick), never nested under the RX handler,
+ * so the ATT indication buffer stays off the receive path's stack. */
+static void tx_pump(void)
+{
+    bStatus_t rc;
+    if (tx_in_flight || tx_count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+    rc = dpls_gatt_send_indication(connection_handle, tx_queue[tx_head].data,
+                                   tx_queue[tx_head].length, task_id);
+    if (rc == SUCCESS) {
+        tx_in_flight = true; /* wait for the ATT confirmation before the next */
+    } else if (rc == bleMemAllocError || rc == blePending) {
+        /* Transient: keep the head and retry from the next tick. */
+    } else {
+        /* Permanent (not subscribed / too big for MTU / not connected): drop
+         * this frame so the queue cannot deadlock behind an unsendable head. */
+        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx_count) --tx_count;
+        if (tx_count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    }
+}
+
 static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
 {
     (void)context;
-    return dpls_gatt_send_indication(connection_handle, frame, (uint16)length, task_id);
+    if (length > DPLS_MAX_FRAME) return false;
+    if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
+        /* Queue full: the client has stopped confirming. Fail safe rather than
+         * lose a control response — drop to Norma, reset the queue and drop the
+         * link so the reconnect starts clean. */
+        safe_normal(NULL);
+        tx_head = tx_tail = tx_count = 0;
+        tx_in_flight = false;
+        if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
+        return false;
+    }
+    memcpy(tx_queue[tx_tail].data, frame, length);
+    tx_queue[tx_tail].length = (uint16)length;
+    tx_tail = (uint8)((tx_tail + 1u) % DPLS_TX_QUEUE_DEPTH);
+    ++tx_count;
+    osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    return true;
+}
+
+void dpls_phy6252_process_tx(void)
+{
+    tx_pump();
+}
+
+void dpls_phy6252_tx_confirmed(void)
+{
+    if (tx_in_flight) {
+        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx_count) --tx_count;
+        tx_in_flight = false;
+    }
+    tx_pump();
 }
 
 static bool tx_notify(void *context, const uint8_t *frame, size_t length)
@@ -675,16 +740,20 @@ static bool tx_notify(void *context, const uint8_t *frame, size_t length)
     return dpls_gatt_send_notification(connection_handle, frame, (uint16)length, task_id);
 }
 
-static void receive_frame(const uint8 *data, uint16 length)
+static uint8 receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
-    if (length > DPLS_MAX_FRAME || rx_count >= DPLS_RX_QUEUE_DEPTH) return;
+    if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
+    /* Full queue: NAK the write so the client retries instead of losing the
+     * frame silently. */
+    if (rx_count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
     slot = &rx_queue[rx_tail];
     memcpy(slot->data, data, length);
     slot->length = length;
     rx_tail = (uint8)((rx_tail + 1u) % DPLS_RX_QUEUE_DEPTH);
     ++rx_count;
     osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    return SUCCESS;
 }
 
 static void clear_settings_and_bonds(void)
@@ -741,6 +810,8 @@ void dpls_phy6252_init(uint8 new_task_id)
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
     rx_head = rx_tail = rx_count = 0;
+    tx_head = tx_tail = tx_count = 0;
+    tx_in_flight = false;
     identify_led_active = false;
     /* Drive every mode output to the safe "Norma" level before the radio or
      * the state machine can touch them. */
@@ -856,6 +927,8 @@ void dpls_phy6252_disconnected(void)
     connected_at_ms = 0;
     connection_had_encryption = false;
     rx_head = rx_tail = rx_count = 0;
+    tx_head = tx_tail = tx_count = 0;
+    tx_in_flight = false;
 }
 
 void dpls_phy6252_process_rx(void)
@@ -901,6 +974,8 @@ void dpls_phy6252_tick(void)
 #endif
     update_power_state();
     dpls_server_tick(&server, now_ms());
+    /* Retry a TX head that hit a transient stack-busy error on a prior attempt. */
+    tx_pump();
 }
 
 uint32 dpls_phy6252_led_tick(void)

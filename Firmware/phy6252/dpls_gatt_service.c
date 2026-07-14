@@ -61,8 +61,10 @@ static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint
         return GATTServApp_ProcessCCCWriteReq(conn, attr, value, len, offset, GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE);
     if (attr->handle == attrs[DPLS_RX_VALUE_INDEX].handle && osal_memcmp(attr->type.uuid, dpls_rx_uuid, ATT_UUID_SIZE)) {
         if (offset != 0) return ATT_ERR_ATTR_NOT_LONG;
-        if (app_rx) app_rx(value, len);
-        return SUCCESS;
+        /* Propagate the application's backpressure: a full RX queue returns
+         * ATT_ERR_INSUFFICIENT_RESOURCES so the client retries the write rather
+         * than the frame being silently dropped. */
+        return app_rx ? app_rx(value, len) : SUCCESS;
     }
     return ATT_ERR_ATTR_NOT_FOUND;
 }
@@ -81,11 +83,15 @@ bool dpls_gatt_subscribed(void) {
     return false;
 }
 
-bool dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
+bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     attHandleValueInd_t ind;
-    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_INDICATE) || length > ATT_MTU_SIZE - 3) return false;
+    /* Gate on the CCCD and the NEGOTIATED MTU (not the compile-time maximum), so
+     * a frame that would not fit the current link is rejected here instead of
+     * being truncated on the air. */
+    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_INDICATE)) return bleNotConnected;
+    if (length + 3u > ATT_GetCurrentMTUSize(conn)) return ATT_ERR_INVALID_VALUE_SIZE;
     ind.handle = attrs[DPLS_TX_VALUE_INDEX].handle; ind.len = length; osal_memcpy(ind.value, data, length);
-    return GATT_Indication(conn, &ind, FALSE, task_id) == SUCCESS;
+    return GATT_Indication(conn, &ind, FALSE, task_id);
 }
 
 bool dpls_gatt_send_notification(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
