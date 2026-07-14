@@ -109,8 +109,12 @@ static void start_sample(void)
         return;
     }
 
+    /* ADCC_IRQn may fire before hal_adc_start() returns, so publish the active
+     * state before enabling the interrupt. Roll it back on a start failure. */
+    s_conversion_active = true;
     rc = hal_adc_start();
     if (rc != PPlus_SUCCESS) {
+        s_conversion_active = false;
         ++s_start_errors;
         (void)hal_adc_stop();
         LOG("[ADC SOAK] start rc=%d starts=%lu done=%lu timeout=%lu err=%lu\n",
@@ -119,7 +123,6 @@ static void start_sample(void)
         return;
     }
 
-    s_conversion_active = true;
     ++s_started;
     osal_start_timerEx(s_task_id, ADC_SOAK_TIMEOUT_EVT, ADC_SOAK_TIMEOUT_MS);
 }
