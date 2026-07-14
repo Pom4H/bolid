@@ -970,7 +970,7 @@ class BleClient(context: Context) {
                     applyLogChunk(chunk, data)
                 }
                 logPendingChunks.clear()
-                if (logReceivedEvents < logExpectedEvents) scheduleLogAck()
+                afterChunkBatch()
             }
             DplsProtocol.Type.LOG_CHUNK -> parseLogChunk(payload)
             DplsProtocol.Type.LOG_RESULT -> finishLog()
@@ -1090,38 +1090,43 @@ class BleClient(context: Context) {
     }
 
     private fun parseLogChunk(payload: ByteBuffer) {
-        if (payload.remaining() < 12) return
-        val chunk = payload.u16()
-        val data = ByteArray(10)
-        payload.get(data)
+        // Batched chunk: first_index (u16), count (u8), count × 10-byte events.
+        if (payload.remaining() < 3) return
+        val first = payload.u16()
+        val count = payload.u8()
+        if (count == 0 || payload.remaining() < count * 10) return
         if (!logInfoReceived) {
-            logPendingChunks.removeAll { it.first == chunk }
-            logPendingChunks.add(chunk to data)
+            for (i in 0 until count) {
+                val data = ByteArray(10); payload.get(data)
+                val idx = first + i
+                logPendingChunks.removeAll { it.first == idx }
+                logPendingChunks.add(idx to data)
+            }
             return
         }
-        applyLogChunk(chunk, data)
+        for (i in 0 until count) {
+            val data = ByteArray(10); payload.get(data)
+            applyLogChunk(first + i, data)
+        }
+        Log.i(TAG, "LOG_CHUNK first=$first count=$count received=$logReceivedEvents/$logExpectedEvents")
+        afterChunkBatch()
     }
 
+    /** Marks a single event received; batch-level progress/ack is handled by
+     * [afterChunkBatch] so we ack once per chunk, not once per event. */
     private fun applyLogChunk(chunk: Int, data: ByteArray) {
+        if (logExpectedEvents == 0 || chunk < 0 || chunk >= logExpectedEvents) return
+        if (logChunkReceived[chunk]) return
+        System.arraycopy(data, 0, logBytes, chunk * 10, 10)
+        logChunkReceived[chunk] = true
+        logReceivedEvents++
+    }
+
+    private fun afterChunkBatch() {
         if (logExpectedEvents == 0) return
-        if (chunk >= logExpectedEvents) {
-            Log.w(TAG, "LOG_CHUNK out of range chunk=$chunk expected=$logExpectedEvents")
-            if (logReceivedEvents >= logExpectedEvents) finishLog()
-            return
-        }
-        if (!logChunkReceived[chunk]) {
-            System.arraycopy(data, 0, logBytes, chunk * 10, 10)
-            logChunkReceived[chunk] = true
-            logReceivedEvents++
-            val progress = logReceivedEvents.toFloat() / logExpectedEvents.toFloat()
-            _uiState.update { it.copy(logProgress = progress.coerceIn(0.05f, 1f)) }
-            Log.i(TAG, "LOG_CHUNK $chunk ok received=$logReceivedEvents/$logExpectedEvents")
-        }
-        if (logReceivedEvents >= logExpectedEvents) {
-            finishLog()
-            return
-        }
-        scheduleLogAck()
+        val progress = logReceivedEvents.toFloat() / logExpectedEvents.toFloat()
+        _uiState.update { it.copy(logProgress = progress.coerceIn(0.05f, 1f)) }
+        if (logReceivedEvents >= logExpectedEvents) finishLog() else scheduleLogAck()
     }
 
     private fun scheduleLogAck() {
@@ -1155,14 +1160,14 @@ class BleClient(context: Context) {
         handler.removeCallbacks(logLoadTimeout)
         handler.removeCallbacks(flushLogAckRunnable)
         logInfoReceived = false
+        // Sort by sequence only. The record timestamp is uptime-since-boot and
+        // resets every reboot, so sorting by it would interleave separate runs.
+        // Sequence is monotonic across reboots and is the true chronological key.
         val records = logBytes.asList().chunked(10).mapNotNull { raw ->
             if (raw.size != 10) null else ByteBuffer.wrap(raw.toByteArray()).order(ByteOrder.LITTLE_ENDIAN).let {
                 EventRecord(it.u32(), it.u32(), it.u8(), it.u8())
             }
-        }.sortedWith(
-                compareByDescending<EventRecord> { it.timestampSeconds }
-                    .thenByDescending { it.sequence },
-            )
+        }.sortedByDescending { it.sequence }
         val rawCount = if (logExpectedBytes == 0) 0 else logBytes.size / 10
         Log.i(TAG, "LOG_DONE raw=$rawCount records=${records.size}")
         if (records.isNotEmpty()) {

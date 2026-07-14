@@ -24,6 +24,9 @@ enum {
 #ifndef DPLS_EVENT_CAPACITY
 #define DPLS_EVENT_CAPACITY 200u
 #endif
+/* Events packed into one LOG_CHUNK indication. 15 × 10 B + 3 B header = 153 B,
+ * well within a 247-MTU payload; a 200-record journal exports in ~14 chunks. */
+#define DPLS_LOG_CHUNK_EVENTS 15u
 #define DPLS_MODE_MAX_MS 300000u
 #define DPLS_SESSION_TIMEOUT_MS 10000u
 #define DPLS_AUTH_BLOCK_MS 300000u

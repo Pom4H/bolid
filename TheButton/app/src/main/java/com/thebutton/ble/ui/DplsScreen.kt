@@ -531,6 +531,12 @@ private fun RowScope.NavTab(
 }
 
 @Composable private fun LogScreen(state: DplsUiState, load: () -> Unit, export: () -> Unit) {
+    // The most recent "Запуск устройства" (type 1) marks the start of the
+    // current run. Only its events map to phone-synced calendar time; earlier
+    // runs had their own boot moment we cannot know, so they show relative uptime.
+    val currentRunFirstSeq = remember(state.eventLog) {
+        state.eventLog.filter { it.type == 1 }.maxOfOrNull { it.sequence } ?: 0L
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Журнал")
         LazyColumn(Modifier.weight(1f).padding(horizontal = 18.dp)) {
@@ -561,7 +567,7 @@ private fun RowScope.NavTab(
                 }
             } else {
                 itemsIndexed(state.eventLog, key = { index, _ -> index }) { _, e ->
-                    LogRow(formatEventTime(e.timestampSeconds, state.deviceBootEpochSeconds), eventTitle(e.type, e.parameter))
+                    LogRow(formatEventTime(e, currentRunFirstSeq, state.deviceBootEpochSeconds), eventTitle(e.type, e.parameter))
                 }
             }
         }
@@ -571,15 +577,23 @@ private fun RowScope.NavTab(
 
 @Composable private fun LogRow(time: String, title: String) { Row(Modifier.fillMaxWidth().heightIn(min = 50.dp).border(.5.dp, Line).padding(9.dp), verticalAlignment = Alignment.CenterVertically) { Text(time, color = Muted, fontSize = 12.sp, maxLines = 1); Text(title, Modifier.weight(1f).padding(start = 16.dp), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Box(Modifier.size(9.dp).background(if (title.contains("КЗ")) Orange else if (title.contains("BLE")) Blue else Green, CircleShape)) } }
 
-/** Device uptime mapped to phone local time (ТЗ 7.5.2 + sync with phone). */
-private fun formatEventTime(uptimeSec: Long, bootEpochSec: Long?): String {
-    val epochSec = (bootEpochSec ?: 0L) + uptimeSec
-    val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochSec * 1000L }
-    return "%02d:%02d:%02d".format(
-        cal.get(java.util.Calendar.HOUR_OF_DAY),
-        cal.get(java.util.Calendar.MINUTE),
-        cal.get(java.util.Calendar.SECOND),
-    )
+/**
+ * ТЗ 7.5.2: relative time is allowed. Events of the current run (sequence at or
+ * after the last boot) are shown in phone-local calendar time via the synced
+ * boot epoch; events from earlier runs show relative uptime "+чч:мм:сс" with no
+ * fabricated calendar date, since their boot moment is unknown.
+ */
+private fun formatEventTime(e: EventRecord, currentRunFirstSeq: Long, bootEpochSec: Long?): String {
+    if (e.sequence >= currentRunFirstSeq && bootEpochSec != null) {
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = (bootEpochSec + e.timestampSeconds) * 1000L }
+        return "%02d:%02d:%02d".format(
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+            cal.get(java.util.Calendar.SECOND),
+        )
+    }
+    val t = e.timestampSeconds
+    return "+%02d:%02d:%02d".format(t / 3600, (t % 3600) / 60, t % 60)
 }
 
 private fun eventTitle(type: Int, parameter: Int): String = when (type) {

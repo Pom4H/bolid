@@ -338,14 +338,24 @@ static void clamp_event_count(dpls_server_t *s) {
     if (s->event_count > DPLS_EVENT_CAPACITY) s->event_count = DPLS_EVENT_CAPACITY;
 }
 
-static void send_log_chunk_at(dpls_server_t *s, uint16_t export_index) {
+static void send_log_chunk_at(dpls_server_t *s, uint16_t first_index) {
+    /* Batch: first_index (u16) + count (u8) + count × 10-byte events. At ~15
+     * events per indication a full 200-record journal exports in ~14 chunks
+     * instead of 200. The block cache makes the consecutive reads cheap. */
+    uint8_t p[3u + DPLS_LOG_CHUNK_EVENTS * 10u];
     dpls_event_t event;
-    if (event_at_export_index(s, export_index, &event)) {
-        uint8_t p[12];
-        wr16(p, export_index);
-        encode_event(&event, p + 2);
-        /* Log stream uses indications only — one chunk per LOG_ACK, no notify flood. */
-        send_frame(s, DPLS_MSG_LOG_CHUNK, p, sizeof(p), false);
+    uint8_t n = 0;
+    while (n < DPLS_LOG_CHUNK_EVENTS &&
+           (uint16_t)(first_index + n) < s->log_export_count &&
+           event_at_export_index(s, (uint16_t)(first_index + n), &event)) {
+        encode_event(&event, p + 3u + (uint16_t)n * 10u);
+        ++n;
+    }
+    if (n != 0u) {
+        wr16(p, first_index);
+        p[2] = n;
+        /* Log stream uses indications only — one batch per LOG_ACK. */
+        send_frame(s, DPLS_MSG_LOG_CHUNK, p, (uint16_t)(3u + (uint16_t)n * 10u), false);
     } else {
         s->log_export_active = false;
         send_error(s, 6);
