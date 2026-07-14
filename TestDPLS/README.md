@@ -19,6 +19,6 @@
 
 ## Структура
 
-- `protocol/DplsProtocol.kt` — бинарный codec и CRC16-CCITT
-- `ble/BleClient.kt` — scan, bonding, GATT, аутентификация, ACK/state и reconnect
+- `protocol/DplsProtocol.kt` — бинарный кодек и CRC16-CCITT
+- `ble/BleClient.kt` — сканирование, сопряжение, GATT, аутентификация, подтверждение команд/состояния и переподключение
 - `ui/DplsScreen.kt` — поиск, настройка/вход, управление и журнал
