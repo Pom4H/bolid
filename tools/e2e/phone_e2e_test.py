@@ -403,7 +403,7 @@ def quick_submit_login_after_confirm(timeout: float = 8.0) -> None:
         time.sleep(0.05)
 
 
-def connect_and_pair() -> None:
+def connect_and_pair(auto_login: bool = True) -> None:
     step("Подключение: scan")
     wait_text("Устройства рядом", timeout=15)
     texts = wait_for_device("Test-DPLS")
@@ -416,12 +416,20 @@ def connect_and_pair() -> None:
 
     step("Подключение: confirm device")
     confirm_identified_device()
-    quick_submit_login_after_confirm()
+    # The lockout phase needs a live login screen to type wrong passwords into.
+    # Auto-submitting the correct password here would authenticate the device
+    # first, so the wrong-password test never sees a login prompt and times out
+    # waiting for "E2E auth wrong". Skip the auto-login on that path.
+    if auto_login:
+        quick_submit_login_after_confirm()
 
 
 def phase_start(results: list[tuple[str, str]], timer: Timer) -> None:
     phase_banner("СТАРТ: настройка / вход / блокировка")
-    connect_and_pair()
+    # A fresh (uninitialised) device still needs the auto-login helper to drive
+    # the setup form; an already-initialised device that will run the lockout
+    # test must stay on the login screen instead.
+    connect_and_pair(auto_login=JOURNAL_ONLY)
     timer.mark("connect_tap")
 
     step("Старт: первичная настройка или вход")
