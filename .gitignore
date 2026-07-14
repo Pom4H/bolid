@@ -9,10 +9,15 @@ wch-driver/
 pvvx-PHY62x2/.venv/
 
 Firmware/build/
+Firmware/sdk/PHY62XX_SDK_3.1.2/
 Firmware/sdk/**/ac6/out/
 Firmware/sdk/**/ac6/tmp/
 Firmware/sdk/**/ac6/*.cbuild-idx.yml
 Firmware/sdk/**/ac6/*.cbuild-pack.yml
+Firmware/targets/phy6252/out/
+Firmware/targets/phy6252/tmp/
+Firmware/targets/phy6252/*.cbuild-idx.yml
+Firmware/targets/phy6252/*.cbuild-pack.yml
 **/.ninja_log
 
 TestDPLS/**/build/
