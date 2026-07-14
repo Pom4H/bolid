@@ -268,6 +268,17 @@ def wait_logcat(substring: str, timeout: float = 30.0) -> None:
     raise TimeoutError(f"Logcat timeout waiting for {substring!r}")
 
 
+def wait_logcat_count(substring: str, count: int, timeout: float = 30.0) -> None:
+    """Ждать НОВОЕ вхождение: logcat кумулятивный, поиск подстроки видит и
+    старые строки — для повторяющихся событий (auth wrong) ждём рост счётчика."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if logcat_full().count(substring) >= count:
+            return
+        time.sleep(0.06)
+    raise TimeoutError(f"Logcat timeout waiting for {count}x {substring!r}")
+
+
 def wait_logcat_any(substrings: tuple[str, ...], timeout: float = 30.0) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -362,9 +373,14 @@ def test_lockout_wrong_passwords(attempts: int = LOCKOUT_ATTEMPTS) -> None:
         restart_app_for_fresh_login()
     wait_logcat("E2E login ready", timeout=30)
     for attempt in range(1, attempts + 1):
+        seen = logcat_full().count("E2E auth wrong")
         submit_password(WRONG_PASSWORD)
-        wait_logcat("E2E auth wrong", timeout=12)
+        wait_logcat_count("E2E auth wrong", seen + 1, timeout=12)
         log(f"  wrong password {attempt}/{attempts}: rejected")
+        # Прошивка отбрасывает proof чаще одного в DPLS_AUTH_MIN_INTERVAL_MS
+        # (1 c) с тем же кодом «неверный пароль» — выдерживаем интервал, иначе
+        # следующая (в т.ч. корректная) попытка срезается лимитером.
+        time.sleep(1.2)
     if "E2E auth blocked" in logcat_full():
         raise AssertionError(
             f"Blocked after {attempts} wrong passwords; firmware threshold is {AUTH_BLOCK_ATTEMPTS_FW}",
@@ -375,6 +391,8 @@ def test_lockout_wrong_passwords(attempts: int = LOCKOUT_ATTEMPTS) -> None:
 def complete_login(timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     auth_challenges = 0
+    wrongs_before = logcat_full().count("E2E auth wrong")
+    last_submit = 0.0
     while time.time() < deadline:
         poll_pairing_dialog(duration=0)
         log = logcat_full()
@@ -382,10 +400,21 @@ def complete_login(timeout: float = 60.0) -> None:
             return
         if "связк" in log.lower() or "Ключи BLE устарели" in log:
             raise RuntimeError("BLE bond desync; retry pairing or factory-reset device")
+        wrongs = log.count("E2E auth wrong")
         challenges = log.count("RX indication bytes=46")
-        if challenges > auth_challenges:
+        resubmit_after_ratelimit = (
+            last_submit and wrongs > wrongs_before and time.time() - last_submit >= 1.3
+        )
+        if challenges > auth_challenges or resubmit_after_ratelimit:
             auth_challenges = challenges
+            wrongs_before = wrongs
+            # ≥1.2 c от предыдущего proof — иначе прошивочный rate-limit
+            # (DPLS_AUTH_MIN_INTERVAL_MS) отбросит и корректный пароль.
+            since = time.time() - last_submit
+            if since < 1.3:
+                time.sleep(1.3 - since)
             submit_password(PASSWORD)
+            last_submit = time.time()
         time.sleep(0.05)
     raise TimeoutError("Login timeout waiting for E2E auth done")
 

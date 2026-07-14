@@ -4,6 +4,16 @@
 #
 #   tools/build_firmware.sh [output.hex]
 #
+# ADC line/reserve voltage sampling is selected by the DPLS_ADC environment
+# variable (default 1 = enabled):
+#
+#   DPLS_ADC=1 tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex   # with ADC
+#   DPLS_ADC=0 tools/build_firmware.sh tmp/test-dpls-adcoff.hex      # without ADC
+#
+# The committed adapter keeps ADC sampling off (DPLS_ADC_SAMPLING 0). DPLS_ADC=1
+# applies the two checked SDK 3.1.2 ADC changes to the working-tree copy for the
+# build and restores the source afterwards; DPLS_ADC=0 builds the source as-is.
+#
 # Activate Firmware/targets/phy6252/vcpkg-configuration.json first, or run the
 # GitHub Actions target workflow which does that automatically.
 set -euo pipefail
@@ -11,6 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/Firmware/targets/phy6252"
 OUT="${1:-$ROOT/tmp/test-dpls-sdk-3.1.2.hex}"
+DPLS_ADC="${DPLS_ADC:-1}"
 APP_SOURCE="$ROOT/Firmware/phy6252/dpls_phy6252_app.c"
 APP_BACKUP=""
 REGION_ROOT=""
@@ -36,12 +47,17 @@ for tool in cbuild fromelf python3; do
     fi
 done
 
-# The shared adapter still supports the stable 3.1.1 target on main. Apply the
-# two checked 3.1.2 API changes only for this build, and restore the source even
-# when compilation fails.
-APP_BACKUP="$(mktemp)"
-cp "$APP_SOURCE" "$APP_BACKUP"
-python3 "$ROOT/tools/prepare_phy6252_sdk312_app.py" "$APP_SOURCE"
+# DPLS_ADC=1: enable ADC sampling by applying the two checked 3.1.2 API changes
+# to the working-tree copy only, restoring the source even when compilation
+# fails. DPLS_ADC=0: build the committed source unchanged (ADC off).
+if [ "$DPLS_ADC" = "1" ]; then
+    echo "ADC sampling: ENABLED"
+    APP_BACKUP="$(mktemp)"
+    cp "$APP_SOURCE" "$APP_BACKUP"
+    python3 "$ROOT/tools/prepare_phy6252_sdk312_app.py" "$APP_SOURCE"
+else
+    echo "ADC sampling: DISABLED"
+fi
 
 rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
 # CMSIS Toolbox resolves free-form linker input paths relative to the generated
