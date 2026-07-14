@@ -1,4 +1,4 @@
-package com.thebutton.ble.ble
+package ru.bolid.testdpls.ble
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
