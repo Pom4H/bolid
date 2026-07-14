@@ -1,40 +1,54 @@
-#!/bin/bash
-# Сборка прошивки Test-DPLS (cbuild + ARM Compiler 6) и склейка прошивочного hex.
+#!/usr/bin/env bash
+# Build Test-DPLS with the full pinned PHY62XX SDK 3.1.2 and Arm Compiler 6,
+# then combine the load regions into a flashable Intel HEX file.
 #
-#   tools/build_firmware.sh [выходной.hex]      (по умолчанию tmp/test-dpls.hex)
+#   tools/build_firmware.sh [output.hex]
 #
-# Toolchain ставится через `vcpkg activate` в каталоге ac6 (vcpkg-configuration.json).
+# Activate Firmware/targets/phy6252/vcpkg-configuration.json first, or run the
+# GitHub Actions target workflow which does that automatically.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ART="$HOME/.vcpkg/artifacts/2139c4c6"
+TARGET="$ROOT/Firmware/targets/phy6252"
+OUT="${1:-$ROOT/tmp/test-dpls-sdk-3.1.2.hex}"
 
-# У части артефактов бинарники лежат в <версия>/bin, у ninja — прямо в <версия>/.
-first_bin() { { ls -d "$1"/*/bin "$1"/*/ 2>/dev/null || true; } | sort -V | tail -1; }
-TOOLBOX="$(first_bin "$ART/tools.open.cmsis.pack.cmsis.toolbox")"
-CMAKE="$(first_bin "$ART/tools.kitware.cmake")"
-NINJA="$(first_bin "$ART/tools.ninja.build.ninja")"
-AC6="$(first_bin "$ART/compilers.arm.armclang")"
-[ -n "$TOOLBOX" ] && [ -n "$AC6" ] || { echo "toolchain не найден в $ART — выполните vcpkg activate в ac6/" >&2; exit 1; }
-export PATH="$TOOLBOX:$CMAKE:$NINJA:$AC6:$PATH"
-AC6_VER="$(basename "$(dirname "$AC6")" | tr . _)"
-export "AC6_TOOLCHAIN_${AC6_VER}=$AC6"
+"$ROOT/tools/fetch_phy6252_sdk.sh"
 
-SOL="$ROOT/Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/example/ble_peripheral/simpleBlePeripheral/ac6"
-cbuild "$SOL/simpleBlePeripheral.csolution.yml" 2>&1 | grep -vE "warning csolution: absolute path"
+for tool in cbuild fromelf; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool not found. Activate the Arm vcpkg environment from:" >&2
+        echo "  $TARGET/vcpkg-configuration.json" >&2
+        exit 1
+    fi
+done
 
-TGT="$SOL/out/simpleBlePeripheral/Target_1"
-OUT="${1:-$ROOT/tmp/test-dpls.hex}"
-REGIONS="$(mktemp -d)/regions"
-fromelf --i32 --output "$REGIONS" "$TGT/simpleBlePeripheral.axf"
+rm -rf "$TARGET/out" "$TARGET/tmp"
+cbuild "$TARGET/test-dpls.csolution.yml" --packs
 
-# fromelf кладёт запись начального адреса (:04000005) в конец КАЖДОГО
-# регионального hex, а парсер pvvx-флешера обрывает разбор на первой же
-# такой записи: сегменты после неё теряются и плата не загружается.
-# Оставляем только финальную (в ER_IROM1).
+AXF="$(find "$TARGET/out" -type f -name '*.axf' | head -n 1)"
+if [ -z "$AXF" ] || [ ! -f "$AXF" ]; then
+    echo "Target build completed without an AXF output" >&2
+    exit 1
+fi
+
+REGION_ROOT="$(mktemp -d)"
+REGIONS="$REGION_ROOT/regions"
+trap 'rm -rf "$REGION_ROOT"' EXIT
+fromelf --i32 --output "$REGIONS" "$AXF"
+
+for region in ER_ROM_XIP JUMP_TABLE ER_IROM1; do
+    if [ ! -f "$REGIONS/$region" ]; then
+        echo "Missing fromelf region: $region" >&2
+        exit 1
+    fi
+done
+
 mkdir -p "$(dirname "$OUT")"
-grep -v "^:00000001FF" "$REGIONS/ER_ROM_XIP" | grep -v "^:04000005" > "$OUT"
-grep -v "^:00000001FF" "$REGIONS/JUMP_TABLE" | grep -v "^:04000005" >> "$OUT"
+# fromelf emits an entry-point record in every region. The PHY62x2 flasher stops
+# parsing at the first such record, so retain it only in the final ER_IROM1 part.
+grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
+grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
 cat "$REGIONS/ER_IROM1" >> "$OUT"
-rm -rf "$(dirname "$REGIONS")"
+
+echo "axf: $AXF"
 echo "hex: $OUT"
