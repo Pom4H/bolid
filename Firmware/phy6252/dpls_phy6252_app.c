@@ -49,8 +49,18 @@
  * ≤0.5 mA budget. */
 #define DPLS_ADC_DECIMATE 5u
 #define DPLS_ADC_WINDOW 8u
-/* DIAGNOSTIC: ADC sampling on the kit triggers a watchdog reset loop (radio/
- * clock coexistence). Disabled to isolate; re-enable once ADC↔BLE is sorted. */
+/* ADC sampling. The ISR was reworked to be minimal (raw copy + task wake) with
+ * all scaling/calibration moved to the OSAL task — the correct structure and a
+ * prerequisite for enabling this. BUT a hardware soak (2026-07-14) showed the
+ * watchdog reset loop persists even with the minimal ISR: ~9 resets in 45 s the
+ * moment sampling is enabled. That rules out the heavy-ISR hypothesis and points
+ * at ADC↔radio/clock coexistence in adc_kick (hal_adc_config_channel/
+ * hal_adc_start re-touching CLKHF/DLL each kick), which needs PHY62xx-specific
+ * investigation (init the ADC clock once, gate sampling to BLE-idle windows, or
+ * an alternate clock source). Kept DISABLED so the device stays stable; the
+ * STATE_REPORT validity mask (stage 1) then honestly reports "not measured".
+ * The improved ISR/task split above is retained for when the clock issue is
+ * fixed. See docs/bring-up-checklist.md §3. */
 #define DPLS_ADC_SAMPLING 0
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
@@ -120,18 +130,21 @@ static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
 /* Largest client→device frame is SETUP (9 overhead + 5 + 31 name + 16 salt + 32
- * verifier = 93), so 96-byte RX slots cover every request. A deeper (8) but
- * narrower queue costs less RAM than the old 4×244 and holds more backlog. */
-#define DPLS_RX_QUEUE_DEPTH 8u
+ * verifier = 93), so 96-byte RX slots cover every request. */
+#define DPLS_RX_QUEUE_DEPTH 6u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
 
 /* Outgoing indications are paced one-in-flight against the ATT confirmation, so
- * a busy stack or a back-to-back pair no longer drops the response. */
+ * a busy stack or a back-to-back pair no longer drops the response. The largest
+ * device→client frame is a batched LOG_CHUNK (9 overhead + 3 + 15×10 = 162), so
+ * 168-byte slots cover every response without paying for the full 244-byte
+ * frame maximum. */
 #define DPLS_TX_QUEUE_DEPTH 4u
-typedef struct { uint16 length; uint8 data[DPLS_MAX_FRAME]; } dpls_tx_slot_t;
+#define DPLS_TX_SLOT_SIZE 168u
+typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
 static uint8 tx_head, tx_tail, tx_count;
 static bool tx_in_flight;
@@ -387,31 +400,48 @@ static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint
     return (uint16_t)(sum / *count);
 }
 
-/* ADC completion runs in interrupt context: fold the freshly measured pin
- * voltage into the per-channel window and publish the calibrated value. Both
- * the line (P20/CH9) and reserve (P23/CH1) channels arrive here. */
+/* Raw samples captured by the ISR, drained by the OSAL task. */
+static volatile uint16_t line_raw[MAX_ADC_SAMPLE_SIZE];
+static volatile uint16_t vcap_raw[MAX_ADC_SAMPLE_SIZE];
+static volatile uint8_t line_raw_size, vcap_raw_size;
+static volatile bool line_raw_ready, vcap_raw_ready;
+
+/* ADC completion ISR: copy the raw samples, flag the channel and wake the task.
+ * No float, no averaging loop, no flash, no BLE here — the previous version did
+ * hal_adc_value_cal + window folding in interrupt context, which is the leading
+ * suspect for the ADC↔radio watchdog reset loop. */
 static void adc_evt(adc_Evt_t *event)
 {
-    float pin_volts;
-    uint32_t pin_mv;
+    uint8_t i, n;
     if (event->type != HAL_ADC_EVT_DATA) {
         adc_busy = false;
         return;
     }
+    n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
     if (event->ch == ADC_CH9) {
-        pin_volts = hal_adc_value_cal(ADC_CH9, event->data, event->size, FALSE, FALSE);
-        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
-        cached_line_mv = fold_window(line_window, &line_window_count, &line_window_pos,
-                                     dpls_calib_apply(&line_calib, pin_mv));
+        for (i = 0; i < n; ++i) line_raw[i] = event->data[i];
+        line_raw_size = n;
+        line_raw_ready = true;
     } else if (event->ch == ADC_CH1) {
-        pin_volts = hal_adc_value_cal(ADC_CH1, event->data, event->size, FALSE, FALSE);
-        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
-        cached_vcap_mv = fold_window(vcap_window, &vcap_window_count, &vcap_window_pos,
-                                     dpls_calib_apply(&vcap_calib, pin_mv));
+        for (i = 0; i < n; ++i) vcap_raw[i] = event->data[i];
+        vcap_raw_size = n;
+        vcap_raw_ready = true;
     }
     /* One-shot mode: the ADC IRQ handler stops the converter after the last
-     * channel callback returns, so we only clear our own re-entrancy guard. */
+     * channel callback returns, so we only clear our re-entrancy guard. */
     adc_busy = false;
+    osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
+}
+
+/* Task context: raw samples → pin volts (soft-float scaling lives here now) →
+ * two-point calibration → moving-average window. */
+static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t size,
+                                const dpls_calib_t *calib, uint16_t *window,
+                                uint8_t *wcount, uint8_t *wpos, volatile uint16_t *cached)
+{
+    float pin_volts = hal_adc_value_cal(ch, (uint16_t *)raw, size, FALSE, FALSE);
+    uint32_t pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
+    *cached = fold_window(window, wcount, wpos, dpls_calib_apply(calib, pin_mv));
 }
 
 static void adc_kick(void)
@@ -434,6 +464,22 @@ static void adc_kick(void)
     hal_adc_start();
 }
 #endif /* DPLS_ADC_SAMPLING */
+
+void dpls_phy6252_process_adc(void)
+{
+#if DPLS_ADC_SAMPLING
+    if (line_raw_ready) {
+        line_raw_ready = false;
+        process_adc_channel(ADC_CH9, line_raw, line_raw_size, &line_calib,
+                            line_window, &line_window_count, &line_window_pos, &cached_line_mv);
+    }
+    if (vcap_raw_ready) {
+        vcap_raw_ready = false;
+        process_adc_channel(ADC_CH1, vcap_raw, vcap_raw_size, &vcap_calib,
+                            vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
+    }
+#endif
+}
 
 /* Derive the power-source and reserve-low flags with hysteresis. Skipped until
  * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
@@ -700,7 +746,7 @@ static void tx_pump(void)
 static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
 {
     (void)context;
-    if (length > DPLS_MAX_FRAME) return false;
+    if (length > DPLS_TX_SLOT_SIZE) return false;
     if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
         /* Queue full: the client has stopped confirming. Fail safe rather than
          * lose a control response — drop to Norma, reset the queue and drop the
