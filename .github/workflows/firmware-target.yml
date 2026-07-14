@@ -49,18 +49,26 @@ jobs:
           config: Firmware/targets/phy6252/vcpkg-configuration.json
           cache: phy6252-ac6-${{ hashFiles('Firmware/targets/phy6252/vcpkg-configuration.json') }}
 
-      - name: Require commercial Arm license
+      - name: Block release builds without commercial Arm license
+        if: github.event_name == 'push' && env.ARM_LICENSE_CODE == ''
         run: |
-          if [ -z "$ARM_LICENSE_CODE" ]; then
-            echo "Repository secret ARM_LICENSE_CODE is required for the commercial AC6 build." >&2
-            echo "The no-input KEMDK-COM0 license is evaluation/non-commercial and is intentionally not used." >&2
-            exit 1
-          fi
+          echo "Repository secret ARM_LICENSE_CODE is required for main/release builds." >&2
+          exit 1
 
-      - name: Activate Arm license
+      - name: Activate commercial Arm license
+        if: env.ARM_LICENSE_CODE != ''
         uses: ARM-software/cmsis-actions/armlm@v1
         with:
           code: ${{ secrets.ARM_LICENSE_CODE }}
+
+      - name: Activate evaluation Arm license for draft validation
+        if: env.ARM_LICENSE_CODE == '' && github.event_name != 'push'
+        uses: ARM-software/cmsis-actions/armlm@v1
+
+      - name: Mark evaluation build
+        if: env.ARM_LICENSE_CODE == '' && github.event_name != 'push'
+        run: |
+          echo "::warning::AC6 is using KEMDK-COM0 evaluation/non-commercial licensing. Do not use this artifact for release."
 
       - name: Build and package firmware
         run: bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
