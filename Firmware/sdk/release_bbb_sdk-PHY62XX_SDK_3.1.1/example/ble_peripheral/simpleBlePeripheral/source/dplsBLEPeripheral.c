@@ -34,7 +34,8 @@ static uint8 advertising_data[] = {
     0x01,0x00,0xf0,0xd5,0xb7,0x14,0x4c,0x9a,
     0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b,
     0x07, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01,0x0b, 0x00,0x00,0x00,0x00  /* [24..27] device id (LE), filled at init */
+    0x01,0x0b,                      /* [23..24] company id 0x0B01 (LE) */
+    0x00,0x00,0x00,0x00             /* [25..28] device id (LE), filled at init */
 };
 
 static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
@@ -57,10 +58,13 @@ static void apply_identity_to_adv(void)
         device_name[10 + i] = (uint8)suffix[i];
     }
     device_name[14] = '\0';
-    advertising_data[24] = (uint8)(id);
-    advertising_data[25] = (uint8)(id >> 8);
-    advertising_data[26] = (uint8)(id >> 16);
-    advertising_data[27] = (uint8)(id >> 24);
+    /* Device id lives AFTER the two company-id bytes ([23..24] = 0x01,0x0b):
+     * writing from [24] clobbered the company id and Android's
+     * getManufacturerSpecificData(0x0B01) stopped matching. */
+    advertising_data[25] = (uint8)(id);
+    advertising_data[26] = (uint8)(id >> 8);
+    advertising_data[27] = (uint8)(id >> 16);
+    advertising_data[28] = (uint8)(id >> 24);
 }
 
 static void state_changed(gaprole_States_t state)

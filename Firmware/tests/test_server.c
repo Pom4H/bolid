@@ -74,7 +74,7 @@ static bool storage_read(void *c, uint32_t sequence, dpls_event_t *event) {
     return event->sequence == sequence;
 }
 static bool lock_read(void *c) { return ((fake_t *)c)->auth_locked; }
-static void lock_write(void *c, bool locked) { ((fake_t *)c)->auth_locked = locked; }
+static bool lock_write(void *c, bool locked) { ((fake_t *)c)->auth_locked = locked; return true; }
 static void get_name(void *c, char out[DPLS_NAME_MAX + 1u]) {
     fake_t *f = c; memcpy(out, f->name, DPLS_NAME_MAX); out[DPLS_NAME_MAX] = '\0';
 }

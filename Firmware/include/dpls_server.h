@@ -132,10 +132,12 @@ typedef struct {
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
     /* Optional persistent brute-force lock. auth_lock_read reports whether the
      * device booted while locked; auth_lock_write persists (true) or clears
-     * (false) the marker. NULL on both keeps the lock RAM-only (cleared by a
-     * reboot). Cleared by factory reset alongside the password. */
+     * (false) the marker and returns false if the NV write failed (the lock
+     * would then not survive a reboot — reported as a diagnostic fault). NULL
+     * on both keeps the lock RAM-only (cleared by a reboot). Cleared by factory
+     * reset alongside the password. */
     bool (*auth_lock_read)(void *context);
-    void (*auth_lock_write)(void *context, bool locked);
+    bool (*auth_lock_write)(void *context, bool locked);
     /* Journal storage is persistent and sequence-addressed. The server keeps
      * only metadata and streams one record at a time during BLE export. */
     bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);

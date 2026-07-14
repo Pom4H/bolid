@@ -691,7 +691,7 @@ static bool auth_lock_read(void *context)
     return record.locked != 0u;
 }
 
-static void auth_lock_write(void *context, bool locked)
+static bool auth_lock_write(void *context, bool locked)
 {
     dpls_auth_lock_t record;
     (void)context;
@@ -699,7 +699,7 @@ static void auth_lock_write(void *context, bool locked)
     record.locked = locked ? 1u : 0u;
     record.reserved = 0u;
     record.crc = dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc));
-    (void)osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record);
+    return osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) == SUCCESS;
 }
 
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
@@ -817,7 +817,7 @@ static void clear_settings_and_bonds(void)
     (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
     (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
     /* Factory reset also lifts any persisted brute-force lock. */
-    auth_lock_write(NULL, false);
+    (void)auth_lock_write(NULL, false);
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();

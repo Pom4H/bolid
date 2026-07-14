@@ -381,7 +381,7 @@ static bool auth_block_active(dpls_server_t *s, uint32_t now) {
     if (!elapsed(now, s->blocked_until_ms)) return true;
     s->blocked_until_ms = 0;
     s->failed_auth_attempts = 0;
-    if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, false);
+    if (s->hal.auth_lock_write) (void)s->hal.auth_lock_write(s->hal.context, false);
     return false;
 }
 
@@ -428,13 +428,19 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
         if (s->hal.verify_auth_proof(s->hal.context, s->device_nonce, s->client_nonce, s->session_id, f.payload + 16)) {
             if (!s->authenticated) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
             s->authenticated = true; s->failed_auth_attempts = 0; s->last_authenticated_activity_ms = now_ms;
-            if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, false);
+            if (s->hal.auth_lock_write) (void)s->hal.auth_lock_write(s->hal.context, false);
             send_auth_result(s, 0, 0);
         } else {
             ++s->failed_auth_attempts; dpls_server_log(s, EVT_AUTH_FAILURE, s->failed_auth_attempts);
             if (s->failed_auth_attempts >= DPLS_AUTH_MAX_ATTEMPTS) {
                 s->blocked_until_ms = now_ms + DPLS_AUTH_BLOCK_MS;
-                if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, true);
+                /* A failed NV write means the lock will not survive a reboot:
+                 * the RAM block still holds for this power cycle, but flag the
+                 * degradation as a (non-critical) diagnostic fault. */
+                if (s->hal.auth_lock_write &&
+                    !s->hal.auth_lock_write(s->hal.context, true) &&
+                    s->hal.diagnostic_error)
+                    s->hal.diagnostic_error(s->hal.context, false);
                 dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
                 send_auth_result(s, 2, (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
             }

@@ -74,6 +74,24 @@ data class DeviceInfo(
 /** Outcome of a settings change (name/password), surfaced to the edit screens. */
 enum class SettingsOp { NONE, IN_PROGRESS, DONE, FAILED }
 
+/**
+ * UTF-8 encode [value] truncated to at most [maxBytes] WITHOUT splitting a
+ * multi-byte character: a Cyrillic name byte-sliced at the limit would produce
+ * broken UTF-8 on the device. Builds up code point by code point.
+ */
+internal fun utf8Truncate(value: String, maxBytes: Int): ByteArray {
+    var end = 0
+    var bytes = 0
+    while (end < value.length) {
+        val next = if (Character.isHighSurrogate(value[end]) && end + 1 < value.length) end + 2 else end + 1
+        val step = value.substring(end, next).encodeToByteArray().size
+        if (bytes + step > maxBytes) break
+        bytes += step
+        end = next
+    }
+    return value.substring(0, end).encodeToByteArray()
+}
+
 data class DplsUiState(
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
     val statusText: String = "Готово к поиску",
