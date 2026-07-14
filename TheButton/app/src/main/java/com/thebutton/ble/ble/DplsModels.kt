@@ -55,6 +55,25 @@ data class EventRecord(
     val parameter: Int,
 )
 
+/** Device identity/capabilities from DEVICE_INFO_REPORT — replaces the hard-coded
+ * "1.0.0 / DPLS00100001" strings the About screen used to show. */
+data class DeviceInfo(
+    val deviceId: Long,
+    val protocolVersion: Int,
+    val firmwareVersion: String,
+    val hardwareRevision: Int,
+    val adcPresent: Boolean,
+    val hardwareReadback: Boolean,
+    val adcCalibrated: Boolean,
+    val userName: String,
+) {
+    /** Stable short id shown to the operator, e.g. "DPLS-1FE3D5C3". */
+    val shortId: String get() = "DPLS-%08X".format(deviceId)
+}
+
+/** Outcome of a settings change (name/password), surfaced to the edit screens. */
+enum class SettingsOp { NONE, IN_PROGRESS, DONE, FAILED }
+
 data class DplsUiState(
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
     val statusText: String = "Готово к поиску",
@@ -79,6 +98,10 @@ data class DplsUiState(
     val setupRepeatPassword: String = "",
     /** True when UI should collect password/setup; false during auto-reauth after setup or cached login. */
     val awaitingUserPassword: Boolean = false,
+    val deviceInfo: DeviceInfo? = null,
+    /** State of an in-flight name/password change (drives the edit screens). */
+    val settingsOp: SettingsOp = SettingsOp.NONE,
+    val settingsError: String? = null,
     val error: String? = null,
 ) {
     val controlsEnabled: Boolean

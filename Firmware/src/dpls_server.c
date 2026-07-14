@@ -263,6 +263,31 @@ static void send_state(dpls_server_t *s) {
     send_frame(s, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
 }
 
+static void send_device_info(dpls_server_t *s) {
+    uint8_t p[12u + DPLS_NAME_MAX + 1u];
+    dpls_device_info_t info;
+    char name[DPLS_NAME_MAX + 1u];
+    uint8_t name_len = 0;
+    memset(&info, 0, sizeof(info));
+    if (s->hal.device_info) s->hal.device_info(s->hal.context, &info);
+    name[0] = '\0';
+    if (s->hal.settings_name) s->hal.settings_name(s->hal.context, name);
+    while (name_len < DPLS_NAME_MAX && name[name_len]) ++name_len;
+    wr32(p, info.device_id);
+    p[4] = DPLS_PROTOCOL_VERSION;
+    p[5] = info.fw_major; p[6] = info.fw_minor; p[7] = info.fw_patch;
+    p[8] = info.hw_revision; p[9] = info.capabilities;
+    p[10] = (uint8_t)s->hal.settings_state(s->hal.context);
+    p[11] = name_len;
+    if (name_len) memcpy(p + 12, name, name_len);
+    send_frame(s, DPLS_MSG_DEVICE_INFO_REPORT, p, (uint16_t)(12u + name_len), false);
+}
+
+static void send_settings_result(dpls_server_t *s, uint32_t command_id, uint8_t status) {
+    uint8_t p[5]; wr32(p, command_id); p[4] = status;
+    send_frame(s, DPLS_MSG_SETTINGS_RESULT, p, sizeof(p), false);
+}
+
 static dpls_cached_command_t *cached(dpls_server_t *s, uint32_t id) {
     uint8_t i; for (i = 0; i < DPLS_COMMAND_CACHE_SIZE; ++i)
         if (s->command_cache[i].valid && s->command_cache[i].session_id == s->session_id && s->command_cache[i].command_id == id) return &s->command_cache[i];
@@ -406,6 +431,44 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
             else send_auth_result(s, 1, 0);
         }
         break;
+    case DPLS_MSG_DEVICE_INFO_GET:
+        if (session_matches(s, &f, 12)) send_device_info(s); else send_error(s, 2);
+        break;
+    case DPLS_MSG_NAME_SET: {
+        uint8_t name_len; char name[DPLS_NAME_MAX + 1u]; uint32_t cmd_id;
+        if (!session_matches(s, &f, 17)) { send_error(s, 2); break; }
+        cmd_id = rd32(f.payload + 12);
+        name_len = f.payload[16];
+        if (!name_len || name_len > DPLS_NAME_MAX ||
+            f.payload_length != (uint16_t)(17u + name_len)) { send_settings_result(s, cmd_id, 1); break; }
+        memcpy(name, f.payload + 17, name_len); name[name_len] = '\0';
+        if (!s->hal.settings_set_name || !s->hal.settings_set_name(s->hal.context, name)) {
+            send_settings_result(s, cmd_id, 2); break;
+        }
+        /* One indication only: the client refreshes the name with its own
+         * DEVICE_INFO_GET. Two back-to-back indications would race the ATT
+         * confirmation and drop the second (fixed properly by the TX queue in
+         * stage 4). */
+        send_settings_result(s, cmd_id, 0);
+        break;
+    }
+    case DPLS_MSG_PASSWORD_SET: {
+        uint32_t cmd_id;
+        if (!session_matches(s, &f, 64)) { send_error(s, 2); break; }
+        cmd_id = rd32(f.payload + 12);
+        if (!s->hal.settings_set_password ||
+            !s->hal.settings_set_password(s->hal.context, f.payload + 16, f.payload + 32)) {
+            send_settings_result(s, cmd_id, 2); break;
+        }
+        dpls_server_log(s, EVT_PASSWORD_SET, 0);
+        send_settings_result(s, cmd_id, 0);
+        /* Invalidate the live session and drop the link so the operator must log
+         * in again with the new password (verifier changed under them). */
+        s->authenticated = false;
+        memset(s->session_token, 0, sizeof(s->session_token));
+        s->setup_disconnect_deadline_ms = now_ms + 500u;
+        break;
+    }
     case DPLS_MSG_STATE_GET: if (session_matches(s, &f, 12)) send_state(s); else send_error(s, 2); break;
     case DPLS_MSG_MODE_SET: handle_mode(s, &f); break;
     case DPLS_MSG_KEEP_ALIVE:

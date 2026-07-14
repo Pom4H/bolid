@@ -35,6 +35,7 @@
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
+#define DPLS_HW_REVISION 1u /* PB-03F-based Test-DPLS opytny obrazets rev.1 */
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
@@ -530,19 +531,14 @@ static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
     else memset(out, 0, DPLS_AUTH_SALT_SIZE);
 }
 
-static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
+/* Persist the current in-RAM `settings` record (magic + CRC), read it back to
+ * confirm the write, then set the VALID marker. Shared by initial commissioning
+ * and the in-place name/password updates. */
+static bool persist_current_settings(void)
 {
-    size_t name_length;
     dpls_settings_t verified;
     uint8 marker = DPLS_SETTINGS_VALID_MARKER;
-    (void)context;
-    memset(&settings, 0, sizeof(settings));
     settings.magic = DPLS_SETTINGS_MAGIC;
-    name_length = strlen(name);
-    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
-    memcpy(settings.name, name, name_length);
-    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
     settings.crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
     if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) != SUCCESS ||
         osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(verified), &verified) != SUCCESS ||
@@ -555,6 +551,69 @@ static bool write_settings(void *context, const char *name, const uint8_t salt[1
     }
     settings_state = DPLS_SETTINGS_VALID;
     return true;
+}
+
+static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    size_t name_length;
+    (void)context;
+    memset(&settings, 0, sizeof(settings));
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memcpy(settings.name, name, name_length);
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
+static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
+{
+    (void)context;
+    if (settings_state == DPLS_SETTINGS_VALID) {
+        memcpy(out, settings.name, DPLS_NAME_MAX);
+        out[DPLS_NAME_MAX] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+}
+
+/* NAME_SET: replace just the user name, keep salt/verifier. */
+static bool settings_set_name(void *context, const char *name)
+{
+    size_t name_length;
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memset(settings.name, 0, sizeof(settings.name));
+    memcpy(settings.name, name, name_length);
+    return persist_current_settings();
+}
+
+/* PASSWORD_SET: replace just salt+verifier, keep the name. */
+static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
+static void device_info(void *context, dpls_device_info_t *out)
+{
+    (void)context;
+    out->device_id = dpls_ble_identity_device_id();
+    out->fw_major = DPLS_FW_VERSION_MAJOR;
+    out->fw_minor = DPLS_FW_VERSION_MINOR;
+    out->fw_patch = DPLS_FW_VERSION_PATCH;
+    out->hw_revision = DPLS_HW_REVISION;
+    out->capabilities = 0u;
+#if DPLS_ADC_SAMPLING
+    out->capabilities |= DPLS_CAP_ADC_PRESENT;
+    if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
+#endif
+    /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
 }
 
 static bool auth_lock_read(void *context)
@@ -732,6 +791,10 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.settings_state = get_settings_state;
     hal.settings_salt = settings_salt;
     hal.settings_write = write_settings;
+    hal.settings_name = settings_name;
+    hal.settings_set_name = settings_set_name;
+    hal.settings_set_password = settings_set_password;
+    hal.device_info = device_info;
     hal.verify_auth_proof = verify_proof;
     hal.auth_lock_read = auth_lock_read;
     hal.auth_lock_write = auth_lock_write;

@@ -39,6 +39,15 @@ class DplsApplication : Application() {
                     ACTION_E2E_EXPORT_CSV -> bleClient.exportLogCsvForE2e()
                     ACTION_E2E_UNPAIR_ALL -> bleClient.unpairDplsBondsForE2e()
                     ACTION_E2E_LOAD_JOURNAL -> bleClient.loadEventLog()
+                    ACTION_E2E_SET_NAME -> {
+                        val name = intent.getStringExtra(EXTRA_E2E_NAME) ?: return
+                        bleClient.setNameForE2e(name)
+                    }
+                    ACTION_E2E_SET_PASSWORD -> {
+                        val current = intent.getStringExtra(EXTRA_E2E_PASSWORD) ?: return
+                        val next = intent.getStringExtra(EXTRA_E2E_NEW_PASSWORD) ?: return
+                        bleClient.changePasswordForE2e(current, next)
+                    }
                 }
             }
         }
@@ -51,6 +60,8 @@ class DplsApplication : Application() {
             addAction(ACTION_E2E_EXPORT_CSV)
             addAction(ACTION_E2E_UNPAIR_ALL)
             addAction(ACTION_E2E_LOAD_JOURNAL)
+            addAction(ACTION_E2E_SET_NAME)
+            addAction(ACTION_E2E_SET_PASSWORD)
         }
         registerReceiver(e2eReceiver, filter, RECEIVER_EXPORTED)
     }
@@ -64,8 +75,11 @@ class DplsApplication : Application() {
         const val ACTION_E2E_EXPORT_CSV = "com.thebutton.ble.E2E_EXPORT_CSV"
         const val ACTION_E2E_UNPAIR_ALL = "com.thebutton.ble.E2E_UNPAIR_ALL"
         const val ACTION_E2E_LOAD_JOURNAL = "com.thebutton.ble.E2E_LOAD_JOURNAL"
+        const val ACTION_E2E_SET_NAME = "com.thebutton.ble.E2E_SET_NAME"
+        const val ACTION_E2E_SET_PASSWORD = "com.thebutton.ble.E2E_SET_PASSWORD"
         const val EXTRA_E2E_NAME = "name"
         const val EXTRA_E2E_PASSWORD = "password"
+        const val EXTRA_E2E_NEW_PASSWORD = "new_password"
         const val EXTRA_E2E_MODE_WIRE = "wire"
         const val EXTRA_E2E_ADDRESS = "address"
     }

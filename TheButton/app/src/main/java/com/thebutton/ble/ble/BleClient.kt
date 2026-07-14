@@ -65,6 +65,8 @@ class BleClient(context: Context) {
     private var authSalt = ByteArray(16)
     private var cachedVerifier: ByteArray? = null
     private var pendingSetupName: String? = null
+    private var pendingSettingsCommandId: Long? = null
+    private var pendingNewVerifier: ByteArray? = null
     private var initialized = false
     private var logBytes = ByteArray(0)
     private var logExpectedBytes = 0
@@ -295,6 +297,14 @@ class BleClient(context: Context) {
         handler.post { authenticate(password.toCharArray()) }
     }
 
+    fun setNameForE2e(name: String) {
+        handler.post { setDeviceName(name) }
+    }
+
+    fun changePasswordForE2e(current: String, new: String) {
+        handler.post { changePassword(current.toCharArray(), new.toCharArray()) }
+    }
+
     fun authenticate(password: CharArray) {
         if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
         handler.removeCallbacks(preAuthKeepAlive)
@@ -344,6 +354,71 @@ class BleClient(context: Context) {
     fun returnToNormal() {
         _uiState.update { it.copy(pendingMode = DplsMode.NORMAL) }
         confirmMode()
+    }
+
+    fun requestDeviceInfo() {
+        if (!_uiState.value.authenticated || gatt == null) return
+        send(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+    }
+
+    /** Reset the edit-screen result state when opening/closing a settings screen. */
+    fun clearSettingsOp() {
+        _uiState.update { it.copy(settingsOp = SettingsOp.NONE, settingsError = null) }
+    }
+
+    fun setDeviceName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) {
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Введите имя устройства") }
+            return
+        }
+        if (!_uiState.value.authenticated || gatt == null) {
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Нет соединения с устройством") }
+            return
+        }
+        val nameBytes = trimmed.encodeToByteArray().take(31).toByteArray()
+        val id = commandId++
+        pendingSettingsCommandId = id
+        val payload = ByteBuffer.allocate(12 + 4 + 1 + nameBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
+            .put(nameBytes.size.toByte()).put(nameBytes).array()
+        _uiState.update { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null) }
+        send(DplsProtocol.Type.NAME_SET, payload)
+    }
+
+    fun changePassword(current: CharArray, new: CharArray) {
+        if (new.size < 8) {
+            current.fill(' '); new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Пароль должен содержать не менее 8 символов") }
+            return
+        }
+        if (!_uiState.value.authenticated || gatt == null) {
+            current.fill(' '); new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Нет соединения с устройством") }
+            return
+        }
+        // Verify the current password locally against the cached verifier before
+        // touching the device: the firmware replaces the verifier unconditionally,
+        // so this guard prevents an accidental change from a mistyped old password.
+        val cached = cachedVerifier
+        val currentVerifier = deriveVerifier(current, authSalt)
+        current.fill(' ')
+        if (cached == null || !currentVerifier.contentEquals(cached)) {
+            new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Неверный текущий пароль") }
+            return
+        }
+        val newSalt = ByteArray(16).also(random::nextBytes)
+        val newVerifier = deriveVerifier(new, newSalt)
+        new.fill(' ')
+        val id = commandId++
+        pendingSettingsCommandId = id
+        pendingNewVerifier = newVerifier
+        val payload = ByteBuffer.allocate(12 + 4 + 16 + 32).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
+            .put(newSalt).put(newVerifier).array()
+        _uiState.update { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null) }
+        send(DplsProtocol.Type.PASSWORD_SET, payload)
     }
 
     fun runTestModeForE2e(wire: Int) {
@@ -835,6 +910,38 @@ class BleClient(context: Context) {
                 _uiState.update { it.copy(commandInProgress = false, statusText = "Команда выполнена, проверка состояния…", lastAckMillis = System.currentTimeMillis()) }
                 if (_uiState.value.logProgress == null) send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
             }
+            DplsProtocol.Type.DEVICE_INFO_REPORT -> parseDeviceInfo(frame.payload)
+            DplsProtocol.Type.SETTINGS_RESULT -> {
+                if (frame.payload.size < 5) return
+                val cmdId = payload.u32()
+                val status = payload.u8()
+                if (pendingSettingsCommandId != cmdId) return // stale/unmatched
+                pendingSettingsCommandId = null
+                if (status == 0) {
+                    // A password change succeeded: adopt the new verifier so the
+                    // reconnect the device triggers auto-authenticates with the
+                    // new password. A name change leaves the verifier untouched
+                    // and we re-pull DEVICE_INFO to pick up the new name (the
+                    // device sends only the one indication).
+                    val wasPasswordChange = pendingNewVerifier != null
+                    pendingNewVerifier?.let {
+                        cachedVerifier?.fill(0)
+                        cachedVerifier = it
+                        pendingNewVerifier = null
+                    }
+                    _uiState.update { it.copy(settingsOp = SettingsOp.DONE, settingsError = null) }
+                    Log.i(TAG, "E2E settings saved")
+                    if (!wasPasswordChange && gatt != null) {
+                        send(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+                    }
+                } else {
+                    pendingNewVerifier = null
+                    _uiState.update {
+                        it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Устройство отклонило изменение (код $status)")
+                    }
+                    Log.i(TAG, "E2E settings rejected status=$status")
+                }
+            }
             DplsProtocol.Type.STATE_REPORT -> parseState(payload)
             DplsProtocol.Type.LOG_INFO -> {
                 if (frame.payload.size < 10) return failLog("Повреждённый LOG_INFO")
@@ -881,6 +988,38 @@ class BleClient(context: Context) {
         // accepted for a while after power-on, so ask the operator to power-cycle.
         7 -> "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку в течение нескольких минут."
         else -> "Ошибка устройства: $code"
+    }
+
+    private fun parseDeviceInfo(raw: ByteArray) {
+        if (raw.size < 12) return
+        val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+        val deviceId = b.u32()
+        val proto = b.u8()
+        val major = b.u8(); val minor = b.u8(); val patch = b.u8()
+        val hwRev = b.u8()
+        val caps = b.u8()
+        b.u8() // settings_state — не показываем отдельно
+        val nameLen = b.u8()
+        val name = if (nameLen in 1..(raw.size - 12)) String(raw, 12, nameLen, Charsets.UTF_8) else ""
+        val info = DeviceInfo(
+            deviceId = deviceId,
+            protocolVersion = proto,
+            firmwareVersion = "$major.$minor.$patch",
+            hardwareRevision = hwRev,
+            adcPresent = (caps and 0x01) != 0,
+            hardwareReadback = (caps and 0x02) != 0,
+            adcCalibrated = (caps and 0x04) != 0,
+            userName = name,
+        )
+        _uiState.update { st ->
+            st.copy(
+                deviceInfo = info,
+                selectedDevice = st.selectedDevice?.copy(
+                    userName = name.ifBlank { st.selectedDevice.userName },
+                ),
+            )
+        }
+        Log.i(TAG, "DEVICE_INFO id=${info.shortId} fw=${info.firmwareVersion} name=$name")
     }
 
     private fun commandRejectReason(status: Int): String = when (status) {
@@ -940,6 +1079,11 @@ class BleClient(context: Context) {
         reconnectAttempt = 0
         resetBondRecoveryState()
         if (_uiState.value.logProgress == null) updateStateRefreshSchedule()
+        // Pull identity/capabilities once per session so the Settings/About
+        // screens show the device's real name, firmware and id.
+        if (_uiState.value.deviceInfo == null && _uiState.value.logProgress == null) {
+            send(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+        }
         if (logLoadPending) {
             handler.post { loadEventLog() }
         }

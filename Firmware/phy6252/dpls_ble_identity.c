@@ -196,3 +196,10 @@ void dpls_ble_identity_reset_bonding_keys(void)
     (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
     (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
 }
+
+uint32_t dpls_ble_identity_device_id(void)
+{
+    if (!s_identity_mac_valid) return 0u;
+    return (uint32_t)s_identity_mac[0] | ((uint32_t)s_identity_mac[1] << 8) |
+           ((uint32_t)s_identity_mac[2] << 16) | ((uint32_t)s_identity_mac[3] << 24);
+}

@@ -8,6 +8,19 @@
 #define DPLS_AUTH_PROOF_SIZE 32u
 #define DPLS_SESSION_TOKEN_SIZE 8u
 #define DPLS_COMMAND_CACHE_SIZE 8u
+#define DPLS_NAME_MAX 31u
+/* Firmware version reported in DEVICE_INFO_REPORT (semantic-ish). Bump on
+ * behaviour changes visible to the operator app. */
+#define DPLS_FW_VERSION_MAJOR 1u
+#define DPLS_FW_VERSION_MINOR 1u
+#define DPLS_FW_VERSION_PATCH 0u
+/* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
+ * features the hardware/firmware does not actually provide. */
+enum {
+    DPLS_CAP_ADC_PRESENT    = 1u << 0,
+    DPLS_CAP_HW_READBACK    = 1u << 1, /* power-stage feedback (false until stage 6) */
+    DPLS_CAP_ADC_CALIBRATED = 1u << 2,
+};
 #ifndef DPLS_EVENT_CAPACITY
 #define DPLS_EVENT_CAPACITY 200u
 #endif
@@ -72,6 +85,16 @@ typedef struct {
     uint8_t parameter;
 } dpls_event_t;
 
+/* Stable, platform-supplied identity/capability facts for DEVICE_INFO_REPORT. */
+typedef struct {
+    uint32_t device_id;
+    uint8_t fw_major;
+    uint8_t fw_minor;
+    uint8_t fw_patch;
+    uint8_t hw_revision;
+    uint8_t capabilities;
+} dpls_device_info_t;
+
 typedef struct {
     bool (*link_encrypted)(void *context);
     bool (*hardware_apply_mode)(void *context, dpls_mode_t mode);
@@ -93,6 +116,16 @@ typedef struct {
     dpls_settings_state_t (*settings_state)(void *context);
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
+    /* Copy the current user name (NUL-terminated, up to DPLS_NAME_MAX+1 bytes).
+     * Empty string if the device is not commissioned. */
+    void (*settings_name)(void *context, char out[DPLS_NAME_MAX + 1u]);
+    /* Read-modify-write of just the name / just the password (salt+verifier) in
+     * the persisted settings record, with a read-back verify. Return false on
+     * any NV failure. Optional (NULL disables NAME_SET / PASSWORD_SET). */
+    bool (*settings_set_name)(void *context, const char *name);
+    bool (*settings_set_password)(void *context, const uint8_t salt[16], const uint8_t verifier[32]);
+    /* Fill stable identity and capability facts for DEVICE_INFO_REPORT. */
+    void (*device_info)(void *context, dpls_device_info_t *out);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
     /* Optional persistent brute-force lock. auth_lock_read reports whether the
      * device booted while locked; auth_lock_write persists (true) or clears

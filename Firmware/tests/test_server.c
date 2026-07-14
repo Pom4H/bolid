@@ -10,6 +10,10 @@ typedef struct {
     bool short_active;
     uint8_t validity;
     bool auth_locked;
+    char name[32];
+    uint8_t last_salt[16];
+    uint8_t last_verifier[32];
+    bool password_set;
     dpls_mode_t mode;
     uint8_t tx[DPLS_MAX_FRAME];
     size_t tx_len;
@@ -71,11 +75,27 @@ static bool storage_read(void *c, uint32_t sequence, dpls_event_t *event) {
 }
 static bool lock_read(void *c) { return ((fake_t *)c)->auth_locked; }
 static void lock_write(void *c, bool locked) { ((fake_t *)c)->auth_locked = locked; }
+static void get_name(void *c, char out[DPLS_NAME_MAX + 1u]) {
+    fake_t *f = c; memcpy(out, f->name, DPLS_NAME_MAX); out[DPLS_NAME_MAX] = '\0';
+}
+static bool set_name(void *c, const char *n) {
+    fake_t *f = c; size_t i = 0; while (i < 31u && n[i]) { f->name[i] = n[i]; ++i; } f->name[i] = '\0'; return true;
+}
+static bool set_password(void *c, const uint8_t s[16], const uint8_t v[32]) {
+    fake_t *f = c; memcpy(f->last_salt, s, 16); memcpy(f->last_verifier, v, 32); f->password_set = true; return true;
+}
+static void dev_info(void *c, dpls_device_info_t *out) {
+    (void)c; out->device_id = 0x0a0b0c0du; out->fw_major = 1; out->fw_minor = 1;
+    out->fw_patch = 0; out->hw_revision = 1; out->capabilities = DPLS_CAP_ADC_PRESENT;
+}
 
 static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) {
     dpls_frame_t f; memset(&f, 0, sizeof(f)); f.type = type; f.sequence = 1; f.payload_length = n; if (n) memcpy(f.payload, p, n);
     return dpls_frame_encode(&f, out, DPLS_MAX_FRAME);
 }
+
+static void do_hello(dpls_server_t *s, uint8_t *buf, uint32_t now);
+static void send_proof(dpls_server_t *s, uint8_t *buf, bool correct, uint32_t now);
 
 static dpls_hal_t lockout_hal(fake_t *f) {
     dpls_hal_t hal = {
@@ -84,12 +104,81 @@ static dpls_hal_t lockout_hal(fake_t *f) {
         .measurement_validity = validity, .real_short_active = real_short, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
+        .settings_name = get_name, .settings_set_name = set_name,
+        .settings_set_password = set_password, .device_info = dev_info,
         .auth_lock_read = lock_read, .auth_lock_write = lock_write,
         .event_storage_init = storage_init, .event_storage_append = storage_append,
         .event_storage_read = storage_read,
         .tx_indicate = indicate, .tx_notify = notify, .context = f,
     };
     return hal;
+}
+
+/* Authenticate a fresh server against the lockout_hal fake and leave it ready
+ * for post-auth requests. Shared by the settings tests. */
+static void authenticate(dpls_server_t *s, fake_t *f, uint8_t *buf) {
+    dpls_hal_t hal = lockout_hal(f);
+    dpls_server_init(s, &hal, 0);
+    dpls_server_connected(s, 1000); do_hello(s, buf, 1100);
+    send_proof(s, buf, true, 2000);
+    assert(s->authenticated);
+}
+
+/* ТЗ 7.4.1f: change name / password over the authenticated session, and read
+ * back device info instead of hard-coded UI strings. */
+static void test_device_settings(void) {
+    uint8_t buf[DPLS_MAX_FRAME], payload[80]; size_t n; dpls_frame_t resp;
+    fake_t f = {.encrypted = true, .initialized = true};
+    dpls_server_t s;
+    memcpy(f.name, "Test-DPLS-old", 14);
+
+    authenticate(&s, &f, buf);
+
+    /* DEVICE_INFO_GET → DEVICE_INFO_REPORT with id/versions/caps/name. */
+    memcpy(payload, &s.session_id, 4); memcpy(payload + 4, s.session_token, 8);
+    n = request(DPLS_MSG_DEVICE_INFO_GET, payload, 12, buf); dpls_server_receive(&s, buf, n, 2500);
+    assert(dpls_frame_decode(f.tx, f.tx_len, &resp));
+    assert(resp.type == DPLS_MSG_DEVICE_INFO_REPORT);
+    assert(resp.payload[0] == 0x0d && resp.payload[3] == 0x0a);      /* device_id LE */
+    assert(resp.payload[4] == DPLS_PROTOCOL_VERSION);
+    assert(resp.payload[5] == 1 && resp.payload[6] == 1);            /* fw major.minor */
+    assert(resp.payload[9] == DPLS_CAP_ADC_PRESENT);
+    assert(resp.payload[11] == 13);                                  /* name length */
+    assert(memcmp(resp.payload + 12, "Test-DPLS-old", 13) == 0);
+
+    /* NAME_SET → a single SETTINGS_RESULT (no back-to-back DEVICE_INFO_REPORT). */
+    memcpy(payload, &s.session_id, 4); memcpy(payload + 4, s.session_token, 8);
+    payload[12] = 0x77; payload[13] = payload[14] = payload[15] = 0; /* command_id */
+    payload[16] = 6; memcpy(payload + 17, "NewNam", 6);
+    n = request(DPLS_MSG_NAME_SET, payload, 23, buf); dpls_server_receive(&s, buf, n, 3000);
+    assert(memcmp(f.name, "NewNam", 6) == 0 && f.name[6] == '\0');
+    assert(dpls_frame_decode(f.tx, f.tx_len, &resp));
+    assert(resp.type == DPLS_MSG_SETTINGS_RESULT && resp.payload[0] == 0x77 && resp.payload[4] == 0);
+    /* The client re-pulls DEVICE_INFO to see the new name. */
+    memcpy(payload, &s.session_id, 4); memcpy(payload + 4, s.session_token, 8);
+    n = request(DPLS_MSG_DEVICE_INFO_GET, payload, 12, buf); dpls_server_receive(&s, buf, n, 3100);
+    assert(dpls_frame_decode(f.tx, f.tx_len, &resp));
+    assert(resp.type == DPLS_MSG_DEVICE_INFO_REPORT && resp.payload[11] == 6);
+    assert(memcmp(resp.payload + 12, "NewNam", 6) == 0);
+
+    /* PASSWORD_SET → SETTINGS_RESULT ok, session invalidated, disconnect armed. */
+    memcpy(payload, &s.session_id, 4); memcpy(payload + 4, s.session_token, 8);
+    payload[12] = 0x88; payload[13] = payload[14] = payload[15] = 0;
+    memset(payload + 16, 0xcc, 16);  /* new salt */
+    memset(payload + 32, 0xdd, 32);  /* new verifier */
+    n = request(DPLS_MSG_PASSWORD_SET, payload, 64, buf); dpls_server_receive(&s, buf, n, 4000);
+    assert(f.password_set);
+    assert(f.last_salt[0] == 0xcc && f.last_verifier[0] == 0xdd);
+    assert(dpls_frame_decode(f.tx, f.tx_len, &resp));
+    assert(resp.type == DPLS_MSG_SETTINGS_RESULT && resp.payload[0] == 0x88 && resp.payload[4] == 0);
+    assert(!s.authenticated);                                        /* session dropped */
+    assert(s.setup_disconnect_deadline_ms != 0);                     /* disconnect scheduled */
+
+    /* The invalidated session no longer authorises commands. */
+    memcpy(payload, &s.session_id, 4); memcpy(payload + 4, s.session_token, 8);
+    n = request(DPLS_MSG_STATE_GET, payload, 12, buf); dpls_server_receive(&s, buf, n, 4100);
+    assert(dpls_frame_decode(f.tx, f.tx_len, &resp));
+    assert(resp.type == DPLS_MSG_ERROR);
 }
 
 static void do_hello(dpls_server_t *s, uint8_t *buf, uint32_t now) {
@@ -302,6 +391,7 @@ int main(void) {
 
     test_auth_lockout();
     test_setup_window();
+    test_device_settings();
 
     puts("test_dpls_server: OK"); return 0;
 }

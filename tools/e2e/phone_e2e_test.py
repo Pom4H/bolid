@@ -37,6 +37,8 @@ def _adb_device() -> str:
 DEV = _adb_device()
 PKG = "com.thebutton.ble"
 ACTIVITY = f"{PKG}/.MainActivity"
+ACTION_E2E_SET_NAME = f"{PKG}.E2E_SET_NAME"
+ACTION_E2E_SET_PASSWORD = f"{PKG}.E2E_SET_PASSWORD"
 PASSWORD = "TestDpls01"
 WRONG_PASSWORD = "WrongPwd1"
 DEVICE_NAME = "Test-DPLS-E2E"
@@ -630,26 +632,41 @@ def verify_journal_and_rotation(results: list[tuple[str, str]]) -> None:
     results.append(("journal", "OK"))
 
 
+def _save_name(new_name: str) -> None:
+    # Drives the exact code path the Save button calls (setDeviceName), avoiding
+    # flaky IME/clipboard fills. NAME_SET must actually reach the device and come
+    # back as SETTINGS_RESULT (the old fake screen just navigated back), and the
+    # follow-up DEVICE_INFO_REPORT must carry the new name.
+    clear_logcat()
+    e2e_broadcast(ACTION_E2E_SET_NAME, name=new_name)
+    wait_logcat("E2E settings saved", timeout=20)
+    wait_logcat(f"name={new_name}", timeout=10)
+
+
+def _save_password(current: str, new: str) -> None:
+    clear_logcat()
+    e2e_broadcast(ACTION_E2E_SET_PASSWORD, password=current, new_password=new)
+    wait_logcat("E2E settings saved", timeout=20)
+    # PASSWORD_SET invalidates the session: the device drops the link and the app
+    # reconnects and re-authenticates with the NEW password automatically.
+    wait_logcat("E2E auth done", timeout=60)
+
+
 def change_device_name_and_password(results: list[tuple[str, str]]) -> None:
     step("Основной: изменение имени")
     ensure_test_tab()
-    tap_bottom_nav("Настройки")
-    wait_text("Настройки")
-    tap_text("Имя устройства", clickable=None)
-    wait_text("Изменение имени")
-    fill_field("Имя устройства", DEVICE_NAME_NEW)
-    tap_back()
-    wait_text("Настройки", timeout=12)
+    # Rename to NEW, confirm it saved and DEVICE_INFO reflects it, then rename
+    # back so re-runs stay stable.
+    _save_name(DEVICE_NAME_NEW)
+    _save_name(DEVICE_NAME)
     results.append(("rename_ui", "OK"))
 
     step("Основной: изменение пароля")
-    tap_text("Пароль", clickable=None)
-    wait_text("Изменение пароля")
-    fill_field("Текущий пароль", PASSWORD)
-    fill_field("Новый пароль", PASSWORD_NEW)
-    fill_field("Повторите пароль", PASSWORD_NEW)
-    tap_back()
-    wait_text("Настройки", timeout=12)
+    # Change password to NEW (device reconnects + re-auths with it), then change
+    # it back to the original so the device is left as the rest of the suite
+    # expects.
+    _save_password(PASSWORD, PASSWORD_NEW)
+    _save_password(PASSWORD_NEW, PASSWORD)
     results.append(("password_ui", "OK"))
 
 
