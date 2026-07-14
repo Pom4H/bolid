@@ -332,6 +332,12 @@ static void safe_normal(void *context)
     hardware_mode = DPLS_MODE_NORMAL;
 }
 
+/* Drives the control output for the requested mode. Returns true = "output
+ * set", NOT "electrically confirmed": this board has no power-stage feedback
+ * (DEVICE_INFO capability HW_READBACK = false), so COMMAND_RESULT/STATE_REPORT
+ * report the commanded mode, not a measured state. The false-return path (and
+ * COMMAND_RESULT status 4) is the hook for a future Variant-B build that reads
+ * back the electrical state before reporting success. */
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;

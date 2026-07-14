@@ -340,13 +340,13 @@ class BleClient(context: Context) {
         val id = commandId++
         val payload = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt()).put(mode.wire.toByte()).array()
-        _uiState.update { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена, ожидается подтверждение…") }
+        _uiState.update { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена…") }
         updateStateRefreshSchedule()
         send(DplsProtocol.Type.MODE_SET, payload)
         handler.postDelayed({
             if (_uiState.value.commandInProgress) {
                 send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
-                _uiState.update { it.copy(statusText = "Проверка фактического состояния…") }
+                _uiState.update { it.copy(statusText = "Запрос состояния устройства…") }
             }
         }, COMMAND_TIMEOUT_MS)
     }
@@ -563,6 +563,7 @@ class BleClient(context: Context) {
         handler.postDelayed(e2eUnpairCheck, E2E_UNPAIR_CHECK_MS)
     }
 
+    @SuppressLint("MissingPermission")
     private val e2eUnpairCheck = Runnable {
         val remaining = adapter.bondedDevices.orEmpty().count { device ->
             val name = device.name.orEmpty()
@@ -907,7 +908,7 @@ class BleClient(context: Context) {
                 val mode = DplsMode.fromWire(payload.u8()) ?: DplsMode.NORMAL
                 val remaining = payload.u16()
                 if (result != 0) return fail(commandRejectReason(result))
-                _uiState.update { it.copy(commandInProgress = false, statusText = "Команда выполнена, проверка состояния…", lastAckMillis = System.currentTimeMillis()) }
+                _uiState.update { it.copy(commandInProgress = false, statusText = "Команда применена, чтение состояния…", lastAckMillis = System.currentTimeMillis()) }
                 if (_uiState.value.logProgress == null) send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
             }
             DplsProtocol.Type.DEVICE_INFO_REPORT -> parseDeviceInfo(frame.payload)
@@ -1063,7 +1064,10 @@ class BleClient(context: Context) {
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.READY,
-                statusText = "Состояние подтверждено",
+                // "Получено", not "подтверждено": the device reports its own
+                // mode (the control output it set), not an electrically verified
+                // state — there is no power-stage feedback (HW_READBACK = false).
+                statusText = "Состояние получено",
                 state = state,
                 deviceBootEpochSeconds = bootEpoch,
                 authenticated = true,
@@ -1250,6 +1254,7 @@ class BleClient(context: Context) {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun handleWriteFailure(status: Int) {
         val bytes = pendingWrite
         pendingWrite = null
