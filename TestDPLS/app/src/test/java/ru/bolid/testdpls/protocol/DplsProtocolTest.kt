@@ -1,4 +1,4 @@
-package com.thebutton.ble.protocol
+package ru.bolid.testdpls.protocol
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
