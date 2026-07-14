@@ -12,6 +12,8 @@
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
 #include "simpleBLEPeripheral.h"
+#include "pwrmgr.h"
+#include "fs.h"
 
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
@@ -126,6 +128,20 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
+    /* The pristine SDK 3.1.2 main.c retains only SRAM0 (0x1fff0000-0x1fff7fff)
+     * across sleep, but our scatter places the ER_IROM1 tail past 0x1fff8000
+     * (SRAM1) and ER_IROM2 at 0x1fffc000 (SRAM2). With those banks unpowered
+     * every wakeup lands on dead code and turns into a warm reboot loop.
+     * Re-assert the full-retention mask the proven 3.1.1 build used. */
+    hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
+    hal_pwrmgr_RAM_retention_set();
+    /* osal_snv is fs-backed (USE_FS=1) and needs the fs region mounted before
+     * the first read/write. The proven 3.1.1 main.c mounted it in hal_init();
+     * the pristine 3.1.2 main.c does not, which leaves every SNV operation
+     * failing (no BLE MAC, no settings, no journal persistence). Same region
+     * as before: 3 sectors at 0x1103C000. */
+    if (!hal_fs_initialized())
+        (void)hal_fs_init(0x1103C000u, 3);
     dpls_ble_identity_prepare();
     apply_identity_to_adv();
     (void)LL_EXT_SetSCA(500);

@@ -17,6 +17,7 @@
 #include "watchdog.h"
 #include "gapbondmgr.h"
 #include "peripheral.h"
+#include "pwrmgr.h"
 #include <core_cm0.h>
 #include <tinycrypt/hmac.h>
 #include <stddef.h>
@@ -148,6 +149,13 @@ typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
 static uint8 tx_head, tx_tail, tx_count;
 static bool tx_in_flight;
+/* Watchdog for a lost ATT confirmation. The SDK 3.1.2 host occasionally drops
+ * an indication queued back-to-back after a confirmation; without a deadline
+ * the one-in-flight pipeline would wedge and every later response would queue
+ * up dead. If no confirmation lands in this window the frame is written off
+ * and the pump moves on (the client's poll cycle re-requests fresh state). */
+#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
+static uint32_t tx_in_flight_since_ms;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
 
@@ -738,6 +746,7 @@ static void tx_pump(void)
                                    tx_queue[tx_head].length, task_id);
     if (rc == SUCCESS) {
         tx_in_flight = true; /* wait for the ATT confirmation before the next */
+        tx_in_flight_since_ms = now_ms();
     } else if (rc == bleMemAllocError || rc == blePending) {
         /* Transient: keep the head and retry from the next tick. */
     } else {
@@ -968,11 +977,19 @@ void dpls_phy6252_connected(uint16 conn_handle)
     connection_handle = conn_handle;
     connected_at_ms = now_ms();
     connection_had_encryption = false;
+    /* Keep the core awake for the whole connection. With sleep enabled the SoC
+     * power-cycles between connection events (~every 30 ms) and a periodic ADC
+     * kick racing those clock transitions eventually freezes the OSAL loop
+     * (observed on SDK 3.1.2 ~90 s into a connected session; on 3.1.1 the same
+     * race surfaced as watchdog resets). The tester is externally powered and
+     * connections are short-lived, so staying awake while connected is cheap. */
+    (void)hal_pwrmgr_lock(MOD_USR1);
     dpls_server_connected(&server, now_ms());
 }
 
 void dpls_phy6252_disconnected(void)
 {
+    (void)hal_pwrmgr_unlock(MOD_USR1);
     note_pre_auth_disconnect();
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
@@ -1026,6 +1043,13 @@ void dpls_phy6252_tick(void)
 #endif
     update_power_state();
     dpls_server_tick(&server, now_ms());
+    /* Recover from a lost ATT confirmation: drop the unacknowledged head so the
+     * response pipeline cannot stay wedged behind it (see tx_in_flight_since_ms). */
+    if (tx_in_flight &&
+        (uint32_t)(now_ms() - tx_in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
+        dpls_phy6252_tx_confirmed();
+        return;
+    }
     /* Retry a TX head that hit a transient stack-busy error on a prior attempt. */
     tx_pump();
 }
