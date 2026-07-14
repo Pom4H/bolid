@@ -26,7 +26,7 @@
 #define DPLS_CALIB_MAGIC 0x434C5044u
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
-#define DPLS_CALIB_SNV_ID 0x82u
+#define DPLS_CALIB_SNV_ID 0x83u /* 0x82 is taken by dpls_ble_identity (BLE MAC) */
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
 #define DPLS_JOURNAL_RECORD_SIZE 12u
@@ -46,6 +46,9 @@
  * ≤0.5 mA budget. */
 #define DPLS_ADC_DECIMATE 5u
 #define DPLS_ADC_WINDOW 8u
+/* DIAGNOSTIC: ADC sampling on the kit triggers a watchdog reset loop (radio/
+ * clock coexistence). Disabled to isolate; re-enable once ADC↔BLE is sorted. */
+#define DPLS_ADC_SAMPLING 0
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
  * from its reserve (also true while it is shorting the line in a KZ mode). */
@@ -345,6 +348,7 @@ static void load_calibration(void)
     }
 }
 
+#if DPLS_ADC_SAMPLING
 /* Fold one sample into a moving-average window and return the current average. */
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
@@ -403,6 +407,7 @@ static void adc_kick(void)
     }
     hal_adc_start();
 }
+#endif /* DPLS_ADC_SAMPLING */
 
 /* Derive the power-source and reserve-low flags with hysteresis. Skipped until
  * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
@@ -644,7 +649,9 @@ void dpls_phy6252_init(uint8 new_task_id)
     line_established = false;
     adc_busy = false;
     load_calibration();
+#if DPLS_ADC_SAMPLING
     hal_adc_init();
+#endif
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
     hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     classify_settings();
@@ -764,10 +771,12 @@ void dpls_phy6252_tick(void)
             clear_settings_and_bonds();
         }
     }
+#if DPLS_ADC_SAMPLING
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
         adc_kick();
     }
+#endif
     update_power_state();
     dpls_server_tick(&server, now_ms());
 }
