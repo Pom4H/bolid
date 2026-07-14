@@ -19,21 +19,43 @@ PHY6252 (плата PB-03F-Kit) и Android-клиент. Протокол, ау�
 
 ## Прошивка
 
+Собираются два образа — с измерением напряжений (ADC) и без него:
+
+| Образ | Команда сборки | Когда использовать |
+|---|---|---|
+| **С ADC** (основной) | `DPLS_ADC=1 tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex` | Реальная плата с силовой частью: меряет напряжение ДПЛС (P20) и резерва (P23) |
+| **Без ADC** | `DPLS_ADC=0 tools/build_firmware.sh tmp/test-dpls-adcoff.hex` | Голый PB-03F-Kit без силовой части: входы ADC висят в воздухе, «низкий резерв» мгновенно снимал бы тестовые режимы |
+
+`DPLS_ADC=1` — значение по умолчанию. CI (workflow `firmware-target.yml`)
+собирает оба образа и выкладывает их одним artifact'ом
+(`test-dpls-phy6252-sdk-3.1.2`: hex + axf + map на каждый вариант).
+
 ```sh
 # ядро на хосте: сборка + тесты
 cmake -S Firmware -B Firmware/build && cmake --build Firmware/build
 ctest --test-dir Firmware/build --output-on-failure
 
-# полная прошивка (cbuild + AC6 из vcpkg) → tmp/test-dpls.hex
+# полная прошивка (cbuild + AC6 из vcpkg), ADC по умолчанию включён
 tools/build_firmware.sh
 
 # прошивка платы (см. подсказки про кнопку KEY1 в самом скрипте);
-# без --erase журнал и настройки в SNV сохраняются
-tools/flash_firmware.sh tmp/test-dpls.hex [--erase]
+# без --erase журнал и настройки в SNV сохраняются,
+# с --erase — полный сброс, включая пароль (устройство снова некоммишено)
+tools/flash_firmware.sh tmp/test-dpls-sdk-3.1.2.hex [--erase]
 
 # UART-лог платы (115200); лог загрузки — по короткому нажатию KEY1
 python3 tools/serial_capture.py 20 --no-reset
 ```
+
+## Подключение к силовой части
+
+Распиновка управляющих и измерительных сигналов PB-03F-Kit ↔ прототип силовой
+части (таблица режимов — в правом нижнем углу):
+
+![Распиновка PB-03F-Kit ↔ силовая часть](docs/hardware/pb03f-kit-power-pinout.png)
+
+Логика управления 3,3 В; безопасное состояние по умолчанию — все управляющие
+сигналы `0` (режим «Норма»).
 
 ## Android
 
