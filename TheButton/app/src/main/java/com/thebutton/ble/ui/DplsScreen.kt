@@ -55,6 +55,7 @@ fun DplsScreen(viewModel: MainViewModel, onExportCsv: () -> Unit, onExportJson: 
         viewModel::confirmIdentifiedDevice, viewModel::updateSetupName, viewModel::updateSetupPassword,
         viewModel::updateSetupRepeatPassword, viewModel::authenticate, viewModel::setup, viewModel::requestMode, viewModel::cancelMode,
         viewModel::confirmMode, viewModel::returnToNormal, viewModel::loadEventLog, viewModel::refreshState, viewModel::disconnect,
+        viewModel::setDeviceName, viewModel::changePassword, viewModel::requestDeviceInfo, viewModel::clearSettingsOp,
         onExportCsv, onExportJson, modifier,
     )
 }
@@ -66,7 +67,9 @@ private fun App(
     onSetupName: (String) -> Unit, onSetupPassword: (String) -> Unit, onSetupRepeat: (String) -> Unit,
     auth: (CharArray) -> Unit, setup: (String, CharArray) -> Unit,
     requestMode: (DplsMode) -> Unit, cancelMode: () -> Unit, confirmMode: () -> Unit,
-    normal: () -> Unit, loadLog: () -> Unit, refreshState: () -> Unit, disconnect: () -> Unit, exportCsv: () -> Unit,
+    normal: () -> Unit, loadLog: () -> Unit, refreshState: () -> Unit, disconnect: () -> Unit,
+    setName: (String) -> Unit, changePassword: (CharArray, CharArray) -> Unit,
+    requestDeviceInfo: () -> Unit, clearSettingsOp: () -> Unit, exportCsv: () -> Unit,
     exportTxt: () -> Unit, modifier: Modifier,
 ) {
     var page by remember { mutableStateOf(Page.MAIN) }
@@ -137,9 +140,9 @@ private fun App(
                 page == Page.LOG -> LogScreen(state, loadLog) { page = Page.EXPORT }
                 page == Page.EXPORT -> ExportScreen({ page = Page.LOG }, exportCsv, exportTxt)
                 page == Page.SETTINGS -> SettingsScreen(state, { page = Page.NAME }, { page = Page.PASSWORD }, { page = Page.ABOUT }, disconnect)
-                page == Page.NAME -> NameScreen(state) { page = Page.SETTINGS }
-                page == Page.PASSWORD -> PasswordScreen { page = Page.SETTINGS }
-                page == Page.ABOUT -> AboutScreen { page = Page.SETTINGS }
+                page == Page.NAME -> NameScreen(state, setName, clearSettingsOp) { page = Page.SETTINGS }
+                page == Page.PASSWORD -> PasswordScreen(state, changePassword, clearSettingsOp) { page = Page.SETTINGS }
+                page == Page.ABOUT -> AboutScreen(state, requestDeviceInfo) { page = Page.SETTINGS }
             }
         }
     }
@@ -401,12 +404,22 @@ private fun RowScope.NavTab(
                 Text(" ${mode.title}", color = modeColor, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             }
             HorizontalDivider(color = Line)
-            CompactInfoRow("Напряжение ДПЛС", s?.voltageMv?.let { "%.1f В".format(it / 1000f) } ?: "—", Green)
-            CompactInfoRow("Источник питания", s?.powerSource?.let { "От ${it.title}" } ?: "—", Green)
-            if (s?.reserveLow == true) {
+            val voltageShown = s != null && s.lineVoltageValid
+            CompactInfoRow(
+                "Напряжение ДПЛС",
+                if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
+                if (voltageShown) Green else Muted,
+            )
+            val powerShown = s != null && s.powerValid
+            CompactInfoRow(
+                "Источник питания",
+                if (powerShown) "От ${s!!.powerSource.title}" else "Не определён",
+                if (powerShown) Green else Muted,
+            )
+            if (s?.reserveValid == true && s.reserveLow) {
                 CompactInfoRow("Заряд резерва", "Низкий", Orange)
             }
-            if (s?.realShort == true) {
+            if (s?.autoIsoValid == true && s.realShort) {
                 HorizontalDivider(color = Line)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("⚠", color = Orange, fontSize = 20.sp)
@@ -518,6 +531,12 @@ private fun RowScope.NavTab(
 }
 
 @Composable private fun LogScreen(state: DplsUiState, load: () -> Unit, export: () -> Unit) {
+    // The most recent "Запуск устройства" (type 1) marks the start of the
+    // current run. Only its events map to phone-synced calendar time; earlier
+    // runs had their own boot moment we cannot know, so they show relative uptime.
+    val currentRunFirstSeq = remember(state.eventLog) {
+        state.eventLog.filter { it.type == 1 }.maxOfOrNull { it.sequence } ?: 0L
+    }
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Журнал")
         LazyColumn(Modifier.weight(1f).padding(horizontal = 18.dp)) {
@@ -548,7 +567,7 @@ private fun RowScope.NavTab(
                 }
             } else {
                 itemsIndexed(state.eventLog, key = { index, _ -> index }) { _, e ->
-                    LogRow(formatEventTime(e.timestampSeconds, state.deviceBootEpochSeconds), eventTitle(e.type, e.parameter))
+                    LogRow(formatEventTime(e, currentRunFirstSeq, state.deviceBootEpochSeconds), eventTitle(e.type, e.parameter))
                 }
             }
         }
@@ -558,15 +577,23 @@ private fun RowScope.NavTab(
 
 @Composable private fun LogRow(time: String, title: String) { Row(Modifier.fillMaxWidth().heightIn(min = 50.dp).border(.5.dp, Line).padding(9.dp), verticalAlignment = Alignment.CenterVertically) { Text(time, color = Muted, fontSize = 12.sp, maxLines = 1); Text(title, Modifier.weight(1f).padding(start = 16.dp), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Box(Modifier.size(9.dp).background(if (title.contains("КЗ")) Orange else if (title.contains("BLE")) Blue else Green, CircleShape)) } }
 
-/** Device uptime mapped to phone local time (ТЗ 7.5.2 + sync with phone). */
-private fun formatEventTime(uptimeSec: Long, bootEpochSec: Long?): String {
-    val epochSec = (bootEpochSec ?: 0L) + uptimeSec
-    val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochSec * 1000L }
-    return "%02d:%02d:%02d".format(
-        cal.get(java.util.Calendar.HOUR_OF_DAY),
-        cal.get(java.util.Calendar.MINUTE),
-        cal.get(java.util.Calendar.SECOND),
-    )
+/**
+ * ТЗ 7.5.2: relative time is allowed. Events of the current run (sequence at or
+ * after the last boot) are shown in phone-local calendar time via the synced
+ * boot epoch; events from earlier runs show relative uptime "+чч:мм:сс" with no
+ * fabricated calendar date, since their boot moment is unknown.
+ */
+private fun formatEventTime(e: EventRecord, currentRunFirstSeq: Long, bootEpochSec: Long?): String {
+    if (e.sequence >= currentRunFirstSeq && bootEpochSec != null) {
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = (bootEpochSec + e.timestampSeconds) * 1000L }
+        return "%02d:%02d:%02d".format(
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+            cal.get(java.util.Calendar.SECOND),
+        )
+    }
+    val t = e.timestampSeconds
+    return "+%02d:%02d:%02d".format(t / 3600, (t % 3600) / 60, t % 60)
 }
 
 private fun eventTitle(type: Int, parameter: Int): String = when (type) {
@@ -614,10 +641,12 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
 @Composable private fun FormatRow(title: String, selected: Boolean, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 92.dp).border(1.dp, Line, RoundedCornerShape(5.dp)).clickable(onClick = click).padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text("▤", fontSize = 38.sp); Text(title, Modifier.weight(1f).padding(start = 22.dp), fontSize = 17.sp, maxLines = 1); RadioButton(selected, click, colors = RadioButtonDefaults.colors(selectedColor = Blue)) } }
 
 @Composable private fun SettingsScreen(state: DplsUiState, name: () -> Unit, password: () -> Unit, about: () -> Unit, disconnect: () -> Unit) {
+    val deviceName = state.deviceInfo?.userName?.takeIf { it.isNotBlank() }
+        ?: state.selectedDevice?.userName ?: "—"
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Настройки")
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            SettingRow("Имя устройства", state.selectedDevice?.userName ?: "Test-DPLS-001", Blue, name)
+            SettingRow("Имя устройства", deviceName, Blue, name)
             SettingRow("Пароль", "••••••••", Muted, password)
             SettingRow("Автовозврат в Норма", "5 минут", Green) {}
             SettingRow("Информация об устройстве", "", Muted, about)
@@ -628,11 +657,88 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
 
 @Composable private fun SettingRow(label: String, value: String, color: Color, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).border(1.dp, Line, RoundedCornerShape(4.dp)).clickable(onClick = click).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(value, color = color, fontSize = 12.sp, maxLines = 2, textAlign = TextAlign.End, modifier = Modifier.widthIn(max = 132.dp)); Text("  ›", color = Muted, fontSize = 25.sp) } }
 
-@Composable private fun NameScreen(state: DplsUiState, back: () -> Unit) { var value by remember { mutableStateOf(state.selectedDevice?.userName ?: "Test-DPLS-001") }; EditPage("Изменение имени", back, { DarkField("Имя устройства", value) { value = it } }) }
-@Composable private fun PasswordScreen(back: () -> Unit) { var a by remember { mutableStateOf("") }; var b by remember { mutableStateOf("") }; var c by remember { mutableStateOf("") }; EditPage("Изменение пароля", back, { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { DarkField("Текущий пароль", a, true) { a=it }; DarkField("Новый пароль", b, true) { b=it }; DarkField("Повторите пароль", c, true) { c=it } } }, b.length >= 8 && b == c) }
-@Composable private fun EditPage(title: String, back: () -> Unit, content: @Composable () -> Unit, enabled: Boolean = true) { Column(Modifier.fillMaxSize()) { ScreenTitle(title, back); Box(Modifier.weight(1f).padding(18.dp)) { content() }; PrimaryButton("Сохранить", back, enabled) } }
+@Composable private fun NameScreen(state: DplsUiState, onSave: (String) -> Unit, clearOp: () -> Unit, back: () -> Unit) {
+    var value by remember {
+        mutableStateOf(state.deviceInfo?.userName?.takeIf { it.isNotBlank() } ?: state.selectedDevice?.userName ?: "")
+    }
+    LaunchedEffect(Unit) { clearOp() }
+    LaunchedEffect(state.settingsOp) { if (state.settingsOp == SettingsOp.DONE) { clearOp(); back() } }
+    val saving = state.settingsOp == SettingsOp.IN_PROGRESS
+    EditPage(
+        "Изменение имени", back,
+        enabled = value.isNotBlank() && !saving, saving = saving,
+        onSave = { onSave(value) },
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            DarkField("Имя устройства", value) { value = it }
+            state.settingsError?.let { Text(it, color = Orange, fontSize = 13.sp) }
+        }
+    }
+}
 
-@Composable private fun AboutScreen(back: () -> Unit) { Column(Modifier.fillMaxSize()) { ScreenTitle("О устройстве", back); Column(Modifier.padding(18.dp)) { listOf("Модель" to "Тест ДПЛС", "Версия прошивки" to "1.0.0", "Аппаратная версия" to "1.0", "Серийный номер" to "DPLS00100001").forEach { (a,b) -> InfoRow(a,b); HorizontalDivider(color=Line) } } } }
+@Composable private fun PasswordScreen(state: DplsUiState, onSave: (CharArray, CharArray) -> Unit, clearOp: () -> Unit, back: () -> Unit) {
+    var current by remember { mutableStateOf("") }
+    var next by remember { mutableStateOf("") }
+    var repeat by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { clearOp() }
+    LaunchedEffect(state.settingsOp) { if (state.settingsOp == SettingsOp.DONE) { clearOp(); back() } }
+    val saving = state.settingsOp == SettingsOp.IN_PROGRESS
+    val ready = current.isNotEmpty() && next.length >= 8 && next == repeat && !saving
+    EditPage(
+        "Изменение пароля", back,
+        enabled = ready, saving = saving,
+        onSave = { onSave(current.toCharArray(), next.toCharArray()) },
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            DarkField("Текущий пароль", current, true) { current = it }
+            DarkField("Новый пароль", next, true) { next = it }
+            DarkField("Повторите пароль", repeat, true) { repeat = it }
+            state.settingsError?.let { Text(it, color = Orange, fontSize = 13.sp) }
+        }
+    }
+}
+
+@Composable private fun EditPage(
+    title: String,
+    back: () -> Unit,
+    enabled: Boolean,
+    saving: Boolean,
+    onSave: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        ScreenTitle(title, back)
+        Box(Modifier.weight(1f).padding(18.dp)) { content() }
+        PrimaryButton(if (saving) "Сохранение…" else "Сохранить", onSave, enabled)
+    }
+}
+
+@Composable private fun AboutScreen(state: DplsUiState, requestInfo: () -> Unit, back: () -> Unit) {
+    LaunchedEffect(Unit) { requestInfo() }
+    val info = state.deviceInfo
+    fun yn(v: Boolean?) = when (v) { true -> "есть"; false -> "нет"; null -> "—" }
+    val rows = listOf(
+        "Модель" to "Тест-ДПЛС",
+        "Идентификатор" to (info?.shortId ?: "—"),
+        "Имя устройства" to (info?.userName?.takeIf { it.isNotBlank() } ?: "—"),
+        "Версия прошивки" to (info?.firmwareVersion ?: "—"),
+        "Аппаратная версия" to (info?.hardwareRevision?.toString() ?: "—"),
+        "Версия протокола" to (info?.protocolVersion?.toString() ?: "—"),
+        "Измерение напряжения" to yn(info?.adcPresent),
+        "Калибровка АЦП" to yn(info?.adcCalibrated),
+        "Аппаратное подтверждение" to yn(info?.hardwareReadback),
+    )
+    Column(Modifier.fillMaxSize()) {
+        ScreenTitle("О устройстве", back)
+        Column(Modifier.padding(18.dp)) {
+            rows.forEach { (a, b) -> InfoRow(a, b); HorizontalDivider(color = Line) }
+            if (info == null) {
+                Spacer(Modifier.height(16.dp))
+                Text("Чтение данных устройства…", color = Muted, fontSize = 13.sp)
+            }
+        }
+    }
+}
 
 @Composable private fun DarkField(label: String, value: String, password: Boolean = false, onChange: (String) -> Unit) {
     OutlinedTextField(

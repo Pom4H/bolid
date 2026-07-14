@@ -47,6 +47,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun returnToNormal() = client.returnToNormal()
     fun loadEventLog() = client.loadEventLog()
     fun refreshState() = client.refreshState()
+    fun requestDeviceInfo() = client.requestDeviceInfo()
+    fun clearSettingsOp() = client.clearSettingsOp()
+    fun setDeviceName(name: String) = client.setDeviceName(name)
+    fun changePassword(current: CharArray, new: CharArray) = client.changePassword(current, new)
     fun disconnect() {
         client.disconnect()
         app.stopService(Intent(app, BleConnectionService::class.java))

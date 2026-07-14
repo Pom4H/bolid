@@ -19,9 +19,12 @@
 
 static uint8 app_task_id;
 
+/* Short stable name "Test-DPLS-XXXX" (XXXX = low 16 bits of the device id in
+ * hex); the last four chars are filled from the id at init. ТЗ 7.1.3: every unit
+ * has a unique id shown in the app and used in the BLE name. */
 static uint8 scan_response[] = {
-    0x10, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'T','e','s','t','-','D','P','L','S','-','P','B','0','3','F'
+    0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
+    'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
 };
 
 static uint8 advertising_data[] = {
@@ -31,10 +34,38 @@ static uint8 advertising_data[] = {
     0x01,0x00,0xf0,0xd5,0xb7,0x14,0x4c,0x9a,
     0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b,
     0x07, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01,0x0b, 0x0f,0x03,0x00,0x00
+    0x01,0x0b,                      /* [23..24] company id 0x0B01 (LE) */
+    0x00,0x00,0x00,0x00             /* [25..28] device id (LE), filled at init */
 };
 
-static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-PB03F";
+static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
+
+/* Fill the advertised name and manufacturer id from the device's stable id so
+ * multiple units are distinguishable (ТЗ 7.1.3). No more hard-coded PB03F. */
+static void apply_identity_to_adv(void)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    uint32 id = dpls_ble_identity_device_id();
+    uint16 tag = (uint16)(id & 0xffffu);
+    char suffix[4];
+    uint8 i;
+    suffix[0] = HEX[(tag >> 12) & 0xfu];
+    suffix[1] = HEX[(tag >> 8) & 0xfu];
+    suffix[2] = HEX[(tag >> 4) & 0xfu];
+    suffix[3] = HEX[tag & 0xfu];
+    for (i = 0; i < 4u; ++i) {
+        scan_response[12 + i] = (uint8)suffix[i];
+        device_name[10 + i] = (uint8)suffix[i];
+    }
+    device_name[14] = '\0';
+    /* Device id lives AFTER the two company-id bytes ([23..24] = 0x01,0x0b):
+     * writing from [24] clobbered the company id and Android's
+     * getManufacturerSpecificData(0x0B01) stopped matching. */
+    advertising_data[25] = (uint8)(id);
+    advertising_data[26] = (uint8)(id >> 8);
+    advertising_data[27] = (uint8)(id >> 16);
+    advertising_data[28] = (uint8)(id >> 24);
+}
 
 static void state_changed(gaprole_States_t state)
 {
@@ -111,6 +142,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
 
     app_task_id = task_id;
     dpls_ble_identity_prepare();
+    apply_identity_to_adv();
     (void)LL_EXT_SetSCA(500);
     GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, 2);
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
@@ -149,7 +181,16 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     (void)task_id;
     if (events & SYS_EVENT_MSG) {
         uint8 *message = osal_msg_receive(app_task_id);
-        if (message) osal_msg_deallocate(message);
+        if (message) {
+            osal_event_hdr_t *hdr = (osal_event_hdr_t *)message;
+            /* An ATT Handle Value Confirmation releases the in-flight indication
+             * so the TX queue can send the next frame. */
+            if (hdr->event == GATT_MSG_EVENT &&
+                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
+                dpls_phy6252_tx_confirmed();
+            }
+            osal_msg_deallocate(message);
+        }
         return events ^ SYS_EVENT_MSG;
     }
     if (events & SBP_START_DEVICE_EVT) {
@@ -170,6 +211,14 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
         return events ^ DPLS_PHY6252_RX_EVT;
+    }
+    if (events & DPLS_PHY6252_TX_EVT) {
+        dpls_phy6252_process_tx();
+        return events ^ DPLS_PHY6252_TX_EVT;
+    }
+    if (events & DPLS_PHY6252_ADC_EVT) {
+        dpls_phy6252_process_adc();
+        return events ^ DPLS_PHY6252_ADC_EVT;
     }
     return 0;
 }

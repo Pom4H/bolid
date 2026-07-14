@@ -65,6 +65,41 @@ class BleClient(context: Context) {
     private var authSalt = ByteArray(16)
     private var cachedVerifier: ByteArray? = null
     private var pendingSetupName: String? = null
+
+    /** One in-flight settings change. Typed so a NAME_SET result can never be
+     * mistaken for a PASSWORD_SET result: the new verifier is adopted only when
+     * the matching Password operation completes. Cleared on result, timeout,
+     * disconnect/reconnect and screen cancel. */
+    private sealed interface PendingSettings {
+        val commandId: Long
+        data class Name(override val commandId: Long) : PendingSettings
+        class Password(override val commandId: Long, val newVerifier: ByteArray) : PendingSettings
+    }
+    private var pendingSettings: PendingSettings? = null
+    /** DEVICE_INFO_GET in flight — lets ERROR 5 from old firmware downgrade to
+     * "feature unsupported" instead of a fatal session error. */
+    private var awaitingDeviceInfo = false
+    /** Firmware predates DEVICE_INFO/NAME_SET/PASSWORD_SET (answered ERROR 5). */
+    private var legacyFirmware = false
+
+    private val settingsOpTimeout = Runnable {
+        if (pendingSettings != null) {
+            clearPendingSettings()
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Устройство не ответило на изменение настроек") }
+        }
+    }
+
+    private fun clearPendingSettings() {
+        handler.removeCallbacks(settingsOpTimeout)
+        (pendingSettings as? PendingSettings.Password)?.newVerifier?.fill(0)
+        pendingSettings = null
+    }
+
+    private fun armPendingSettings(op: PendingSettings) {
+        clearPendingSettings()
+        pendingSettings = op
+        handler.postDelayed(settingsOpTimeout, SETTINGS_OP_TIMEOUT_MS)
+    }
     private var initialized = false
     private var logBytes = ByteArray(0)
     private var logExpectedBytes = 0
@@ -218,6 +253,10 @@ class BleClient(context: Context) {
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
             ?: return fail("Некорректный адрес устройства")
         selectedAddress = address
+        // Fresh link: re-probe device info support (cheap — one ERROR 5 at most
+        // per connection on legacy firmware).
+        legacyFirmware = false
+        awaitingDeviceInfo = false
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.CONNECTING,
@@ -295,6 +334,14 @@ class BleClient(context: Context) {
         handler.post { authenticate(password.toCharArray()) }
     }
 
+    fun setNameForE2e(name: String) {
+        handler.post { setDeviceName(name) }
+    }
+
+    fun changePasswordForE2e(current: String, new: String) {
+        handler.post { changePassword(current.toCharArray(), new.toCharArray()) }
+    }
+
     fun authenticate(password: CharArray) {
         if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
         handler.removeCallbacks(preAuthKeepAlive)
@@ -312,7 +359,7 @@ class BleClient(context: Context) {
         password.fill('\u0000')
         cachedVerifier = verifier
         pendingSetupName = deviceName.trim()
-        val name = pendingSetupName!!.encodeToByteArray().take(31).toByteArray()
+        val name = utf8Truncate(pendingSetupName!!, 31)
         val payload = ByteBuffer.allocate(4 + 1 + name.size + salt.size + verifier.size)
             .order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).put(name.size.toByte()).put(name).put(salt).put(verifier).array()
         send(DplsProtocol.Type.SETUP, payload)
@@ -330,13 +377,13 @@ class BleClient(context: Context) {
         val id = commandId++
         val payload = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
             .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt()).put(mode.wire.toByte()).array()
-        _uiState.update { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена, ожидается подтверждение…") }
+        _uiState.update { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена…") }
         updateStateRefreshSchedule()
         send(DplsProtocol.Type.MODE_SET, payload)
         handler.postDelayed({
             if (_uiState.value.commandInProgress) {
                 send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
-                _uiState.update { it.copy(statusText = "Проверка фактического состояния…") }
+                _uiState.update { it.copy(statusText = "Запрос состояния устройства…") }
             }
         }, COMMAND_TIMEOUT_MS)
     }
@@ -344,6 +391,79 @@ class BleClient(context: Context) {
     fun returnToNormal() {
         _uiState.update { it.copy(pendingMode = DplsMode.NORMAL) }
         confirmMode()
+    }
+
+    fun requestDeviceInfo() {
+        if (!_uiState.value.authenticated || gatt == null) return
+        requestDeviceInfoInternal()
+    }
+
+    private fun requestDeviceInfoInternal() {
+        // Old firmware (protocol without 0x06) answers ERROR 5; remember the
+        // request is in flight so that error downgrades to "legacy firmware"
+        // instead of killing the session.
+        awaitingDeviceInfo = true
+        send(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+    }
+
+    /** Reset the edit-screen result state when opening/closing a settings screen. */
+    fun clearSettingsOp() {
+        clearPendingSettings()
+        _uiState.update { it.copy(settingsOp = SettingsOp.NONE, settingsError = null) }
+    }
+
+    fun setDeviceName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) {
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Введите имя устройства") }
+            return
+        }
+        if (!_uiState.value.authenticated || gatt == null) {
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Нет соединения с устройством") }
+            return
+        }
+        val nameBytes = utf8Truncate(trimmed, 31)
+        val id = commandId++
+        armPendingSettings(PendingSettings.Name(id))
+        val payload = ByteBuffer.allocate(12 + 4 + 1 + nameBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
+            .put(nameBytes.size.toByte()).put(nameBytes).array()
+        _uiState.update { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null) }
+        send(DplsProtocol.Type.NAME_SET, payload)
+    }
+
+    fun changePassword(current: CharArray, new: CharArray) {
+        if (new.size < 8) {
+            current.fill(' '); new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Пароль должен содержать не менее 8 символов") }
+            return
+        }
+        if (!_uiState.value.authenticated || gatt == null) {
+            current.fill(' '); new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Нет соединения с устройством") }
+            return
+        }
+        // Verify the current password locally against the cached verifier before
+        // touching the device: the firmware replaces the verifier unconditionally,
+        // so this guard prevents an accidental change from a mistyped old password.
+        val cached = cachedVerifier
+        val currentVerifier = deriveVerifier(current, authSalt)
+        current.fill(' ')
+        if (cached == null || !currentVerifier.contentEquals(cached)) {
+            new.fill(' ')
+            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Неверный текущий пароль") }
+            return
+        }
+        val newSalt = ByteArray(16).also(random::nextBytes)
+        val newVerifier = deriveVerifier(new, newSalt)
+        new.fill(' ')
+        val id = commandId++
+        armPendingSettings(PendingSettings.Password(id, newVerifier))
+        val payload = ByteBuffer.allocate(12 + 4 + 16 + 32).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
+            .put(newSalt).put(newVerifier).array()
+        _uiState.update { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null) }
+        send(DplsProtocol.Type.PASSWORD_SET, payload)
     }
 
     fun runTestModeForE2e(wire: Int) {
@@ -488,6 +608,7 @@ class BleClient(context: Context) {
         handler.postDelayed(e2eUnpairCheck, E2E_UNPAIR_CHECK_MS)
     }
 
+    @SuppressLint("MissingPermission")
     private val e2eUnpairCheck = Runnable {
         val remaining = adapter.bondedDevices.orEmpty().count { device ->
             val name = device.name.orEmpty()
@@ -557,6 +678,9 @@ class BleClient(context: Context) {
         }
         val name = record.deviceName ?: result.device.name ?: id?.let { "Test-DPLS-%04X".format(it and 0xffff) } ?: "Test-DPLS"
         val discovered = DiscoveredDevice(result.device.address, name, null, id, result.rssi)
+        if (_uiState.value.devices.none { it.address == discovered.address }) {
+            Log.i(TAG, "Scan: $name id=${id?.let { "%08X".format(it) } ?: "none"} rssi=${result.rssi}")
+        }
         _uiState.update { state ->
             val devices = (state.devices.filterNot { it.address == discovered.address } + discovered)
                 .sortedByDescending { it.rssi }
@@ -832,8 +956,43 @@ class BleClient(context: Context) {
                 val mode = DplsMode.fromWire(payload.u8()) ?: DplsMode.NORMAL
                 val remaining = payload.u16()
                 if (result != 0) return fail(commandRejectReason(result))
-                _uiState.update { it.copy(commandInProgress = false, statusText = "Команда выполнена, проверка состояния…", lastAckMillis = System.currentTimeMillis()) }
+                _uiState.update { it.copy(commandInProgress = false, statusText = "Команда применена, чтение состояния…", lastAckMillis = System.currentTimeMillis()) }
                 if (_uiState.value.logProgress == null) send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+            }
+            DplsProtocol.Type.DEVICE_INFO_REPORT -> parseDeviceInfo(frame.payload)
+            DplsProtocol.Type.SETTINGS_RESULT -> {
+                if (frame.payload.size < 5) return
+                val cmdId = payload.u32()
+                val status = payload.u8()
+                val op = pendingSettings ?: return
+                if (op.commandId != cmdId) return // stale/unmatched result
+                // Detach without wiping: the Password verifier is adopted below.
+                handler.removeCallbacks(settingsOpTimeout)
+                pendingSettings = null
+                if (status == 0) {
+                    when (op) {
+                        is PendingSettings.Password -> {
+                            // Adopt the new verifier only for the confirmed
+                            // Password operation, so the reconnect the device
+                            // triggers auto-authenticates with the new password.
+                            cachedVerifier?.fill(0)
+                            cachedVerifier = op.newVerifier
+                        }
+                        is PendingSettings.Name -> {
+                            // Re-pull DEVICE_INFO to pick up the new name (the
+                            // device sends only the one indication).
+                            if (gatt != null) requestDeviceInfoInternal()
+                        }
+                    }
+                    _uiState.update { it.copy(settingsOp = SettingsOp.DONE, settingsError = null) }
+                    Log.i(TAG, "E2E settings saved")
+                } else {
+                    (op as? PendingSettings.Password)?.newVerifier?.fill(0)
+                    _uiState.update {
+                        it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Устройство отклонило изменение (код $status)")
+                    }
+                    Log.i(TAG, "E2E settings rejected status=$status")
+                }
             }
             DplsProtocol.Type.STATE_REPORT -> parseState(payload)
             DplsProtocol.Type.LOG_INFO -> {
@@ -863,17 +1022,74 @@ class BleClient(context: Context) {
                     applyLogChunk(chunk, data)
                 }
                 logPendingChunks.clear()
-                if (logReceivedEvents < logExpectedEvents) scheduleLogAck()
+                afterChunkBatch()
             }
             DplsProtocol.Type.LOG_CHUNK -> parseLogChunk(payload)
             DplsProtocol.Type.LOG_RESULT -> finishLog()
             DplsProtocol.Type.ERROR -> {
                 val code = frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
-                if (_uiState.value.logProgress != null) failLog("Ошибка загрузки журнала: $code")
-                else fail("Ошибка устройства: $code")
+                if (_uiState.value.logProgress != null) return failLog("Ошибка загрузки журнала: $code")
+                // ERROR 5 = "unknown message type": old firmware without the
+                // settings protocol. Downgrade contextually instead of killing
+                // an otherwise healthy authenticated session.
+                if (code == 5 && awaitingDeviceInfo) {
+                    awaitingDeviceInfo = false
+                    legacyFirmware = true
+                    Log.w(TAG, "Device info unsupported: legacy firmware")
+                    return
+                }
+                if (code == 5 && pendingSettings != null) {
+                    clearPendingSettings()
+                    legacyFirmware = true
+                    _uiState.update {
+                        it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Прошивка устройства не поддерживает изменение настроек")
+                    }
+                    return
+                }
+                fail(deviceErrorReason(code))
             }
             else -> Unit
         }
+    }
+
+    private fun deviceErrorReason(code: Int): String = when (code) {
+        // Code 7: the commissioning window has closed. First setup is only
+        // accepted for a while after power-on, so ask the operator to power-cycle.
+        7 -> "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку в течение нескольких минут."
+        else -> "Ошибка устройства: $code"
+    }
+
+    private fun parseDeviceInfo(raw: ByteArray) {
+        awaitingDeviceInfo = false
+        if (raw.size < 12) return
+        val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+        val deviceId = b.u32()
+        val proto = b.u8()
+        val major = b.u8(); val minor = b.u8(); val patch = b.u8()
+        val hwRev = b.u8()
+        val caps = b.u8()
+        b.u8() // settings_state — не показываем отдельно
+        val nameLen = b.u8()
+        val name = if (nameLen in 1..(raw.size - 12)) String(raw, 12, nameLen, Charsets.UTF_8) else ""
+        val info = DeviceInfo(
+            deviceId = deviceId,
+            protocolVersion = proto,
+            firmwareVersion = "$major.$minor.$patch",
+            hardwareRevision = hwRev,
+            adcPresent = (caps and 0x01) != 0,
+            hardwareReadback = (caps and 0x02) != 0,
+            adcCalibrated = (caps and 0x04) != 0,
+            userName = name,
+        )
+        _uiState.update { st ->
+            st.copy(
+                deviceInfo = info,
+                selectedDevice = st.selectedDevice?.copy(
+                    userName = name.ifBlank { st.selectedDevice.userName },
+                ),
+            )
+        }
+        Log.i(TAG, "DEVICE_INFO id=${info.shortId} fw=${info.firmwareVersion} name=$name")
     }
 
     private fun commandRejectReason(status: Int): String = when (status) {
@@ -894,6 +1110,11 @@ class BleClient(context: Context) {
         val realShort = (flags and 0x02) != 0
         val uptimeSeconds = payload.u32()
         val revision = payload.u32()
+        // Byte 16 (validity mask) is present on firmware ≥ this build. A legacy
+        // 16-byte report defaults to "nothing measured": every legacy build ran
+        // with ADC sampling disabled, so its 0 mV / LINE values are fabricated —
+        // treating them as valid would resurrect the fake readings.
+        val validity = if (payload.remaining() >= 1) payload.u8() else 0x00
         val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
         val state = DeviceState(
             mode = mode,
@@ -905,11 +1126,19 @@ class BleClient(context: Context) {
             uptimeSeconds = uptimeSeconds,
             revision = revision,
             receivedAtMillis = System.currentTimeMillis(),
+            lineVoltageValid = (validity and 0x01) != 0,
+            reserveValid = (validity and 0x02) != 0,
+            powerValid = (validity and 0x04) != 0,
+            autoIsoValid = (validity and 0x08) != 0,
+            adcCalibrated = (validity and 0x10) != 0,
         )
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.READY,
-                statusText = "Состояние подтверждено",
+                // "Получено", not "подтверждено": the device reports its own
+                // mode (the control output it set), not an electrically verified
+                // state — there is no power-stage feedback (HW_READBACK = false).
+                statusText = "Состояние получено",
                 state = state,
                 deviceBootEpochSeconds = bootEpoch,
                 authenticated = true,
@@ -925,44 +1154,58 @@ class BleClient(context: Context) {
         reconnectAttempt = 0
         resetBondRecoveryState()
         if (_uiState.value.logProgress == null) updateStateRefreshSchedule()
+        // Pull identity/capabilities once per session so the Settings/About
+        // screens show the device's real name, firmware and id. Skipped on
+        // legacy firmware (it answered ERROR 5 once already) and while a
+        // request is already in flight.
+        if (_uiState.value.deviceInfo == null && !legacyFirmware && !awaitingDeviceInfo &&
+            _uiState.value.logProgress == null
+        ) {
+            requestDeviceInfoInternal()
+        }
         if (logLoadPending) {
             handler.post { loadEventLog() }
         }
     }
 
     private fun parseLogChunk(payload: ByteBuffer) {
-        if (payload.remaining() < 12) return
-        val chunk = payload.u16()
-        val data = ByteArray(10)
-        payload.get(data)
+        // Batched chunk: first_index (u16), count (u8), count × 10-byte events.
+        if (payload.remaining() < 3) return
+        val first = payload.u16()
+        val count = payload.u8()
+        if (count == 0 || payload.remaining() < count * 10) return
         if (!logInfoReceived) {
-            logPendingChunks.removeAll { it.first == chunk }
-            logPendingChunks.add(chunk to data)
+            for (i in 0 until count) {
+                val data = ByteArray(10); payload.get(data)
+                val idx = first + i
+                logPendingChunks.removeAll { it.first == idx }
+                logPendingChunks.add(idx to data)
+            }
             return
         }
-        applyLogChunk(chunk, data)
+        for (i in 0 until count) {
+            val data = ByteArray(10); payload.get(data)
+            applyLogChunk(first + i, data)
+        }
+        Log.i(TAG, "LOG_CHUNK first=$first count=$count received=$logReceivedEvents/$logExpectedEvents")
+        afterChunkBatch()
     }
 
+    /** Marks a single event received; batch-level progress/ack is handled by
+     * [afterChunkBatch] so we ack once per chunk, not once per event. */
     private fun applyLogChunk(chunk: Int, data: ByteArray) {
+        if (logExpectedEvents == 0 || chunk < 0 || chunk >= logExpectedEvents) return
+        if (logChunkReceived[chunk]) return
+        System.arraycopy(data, 0, logBytes, chunk * 10, 10)
+        logChunkReceived[chunk] = true
+        logReceivedEvents++
+    }
+
+    private fun afterChunkBatch() {
         if (logExpectedEvents == 0) return
-        if (chunk >= logExpectedEvents) {
-            Log.w(TAG, "LOG_CHUNK out of range chunk=$chunk expected=$logExpectedEvents")
-            if (logReceivedEvents >= logExpectedEvents) finishLog()
-            return
-        }
-        if (!logChunkReceived[chunk]) {
-            System.arraycopy(data, 0, logBytes, chunk * 10, 10)
-            logChunkReceived[chunk] = true
-            logReceivedEvents++
-            val progress = logReceivedEvents.toFloat() / logExpectedEvents.toFloat()
-            _uiState.update { it.copy(logProgress = progress.coerceIn(0.05f, 1f)) }
-            Log.i(TAG, "LOG_CHUNK $chunk ok received=$logReceivedEvents/$logExpectedEvents")
-        }
-        if (logReceivedEvents >= logExpectedEvents) {
-            finishLog()
-            return
-        }
-        scheduleLogAck()
+        val progress = logReceivedEvents.toFloat() / logExpectedEvents.toFloat()
+        _uiState.update { it.copy(logProgress = progress.coerceIn(0.05f, 1f)) }
+        if (logReceivedEvents >= logExpectedEvents) finishLog() else scheduleLogAck()
     }
 
     private fun scheduleLogAck() {
@@ -996,14 +1239,14 @@ class BleClient(context: Context) {
         handler.removeCallbacks(logLoadTimeout)
         handler.removeCallbacks(flushLogAckRunnable)
         logInfoReceived = false
+        // Sort by sequence only. The record timestamp is uptime-since-boot and
+        // resets every reboot, so sorting by it would interleave separate runs.
+        // Sequence is monotonic across reboots and is the true chronological key.
         val records = logBytes.asList().chunked(10).mapNotNull { raw ->
             if (raw.size != 10) null else ByteBuffer.wrap(raw.toByteArray()).order(ByteOrder.LITTLE_ENDIAN).let {
                 EventRecord(it.u32(), it.u32(), it.u8(), it.u8())
             }
-        }.sortedWith(
-                compareByDescending<EventRecord> { it.timestampSeconds }
-                    .thenByDescending { it.sequence },
-            )
+        }.sortedByDescending { it.sequence }
         val rawCount = if (logExpectedBytes == 0) 0 else logBytes.size / 10
         Log.i(TAG, "LOG_DONE raw=$rawCount records=${records.size}")
         if (records.isNotEmpty()) {
@@ -1049,11 +1292,13 @@ class BleClient(context: Context) {
     private fun sendPriority(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf(), flush: Boolean = false) {
         handler.post {
             if (flush) resetWriteState()
-            if (payload.size > negotiatedMtu - 3) {
-                fail("Кадр ${payload.size} байт не помещается в MTU $negotiatedMtu")
+            // The MTU limits the full encoded frame (payload + 9 bytes of
+            // header/CRC), not the bare payload — encode first, then check.
+            val bytes = DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload))
+            if (bytes.size > negotiatedMtu - 3) {
+                fail("Кадр ${bytes.size} байт не помещается в MTU $negotiatedMtu")
                 return@post
             }
-            val bytes = DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload))
             writeQueue.addFirst(bytes)
             drainWriteQueue()
         }
@@ -1086,6 +1331,7 @@ class BleClient(context: Context) {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun handleWriteFailure(status: Int) {
         val bytes = pendingWrite
         pendingWrite = null
@@ -1216,6 +1462,8 @@ class BleClient(context: Context) {
         handler.removeCallbacks(stateRefresh)
         cancelPairingTimeout()
         cancelReconnect()
+        clearPendingSettings()
+        awaitingDeviceInfo = false
         closeCurrentGatt()
         scanning = false
         rx = null
@@ -1244,6 +1492,19 @@ class BleClient(context: Context) {
         tx = null
         resetWriteState()
         sessionToken.fill(0)
+        // A settings change that never got its SETTINGS_RESULT is void: drop it
+        // so a later operation's result can't be misattributed (e.g. a NAME_SET
+        // result adopting a stale password verifier). If the device did save a
+        // new password before the link died, auto-reauth with the old verifier
+        // fails and the user is simply asked for the password again.
+        if (pendingSettings != null) {
+            clearPendingSettings()
+            _uiState.update { st ->
+                if (st.settingsOp == SettingsOp.IN_PROGRESS)
+                    st.copy(settingsOp = SettingsOp.FAILED, settingsError = "Связь прервана до подтверждения изменения")
+                else st
+            }
+        }
         val lastState = _uiState.value.state
         if (!reachedReady && reconnectAttempt >= MAX_INITIAL_RECONNECT_ATTEMPTS) {
             val address = selectedAddress
@@ -1291,6 +1552,8 @@ class BleClient(context: Context) {
         handler.removeCallbacks(stateRefresh)
         cancelPairingTimeout()
         cancelReconnect()
+        clearPendingSettings()
+        awaitingDeviceInfo = false
         closeCurrentGatt()
         rx = null
         tx = null
@@ -1390,7 +1653,10 @@ class BleClient(context: Context) {
         private const val PRE_AUTH_GATT133_RECOVERY_THRESHOLD = 2
         private const val BOND_CLEAR_WAIT_MS = 6_000L
         private const val BOND_CLEAR_POLL_MS = 200L
-        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 143, 201)
+        // 17 = ATT_ERR_INSUFFICIENT_RESOURCES: the device's RX queue is full and
+        // NAK'd the write on purpose — retry rather than fail the frame.
+        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 17, 143, 201)
+        private const val SETTINGS_OP_TIMEOUT_MS = 10_000L
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
         private const val MANUFACTURER_ID = 0x0B01

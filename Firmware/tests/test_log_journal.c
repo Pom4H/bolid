@@ -104,6 +104,8 @@ static uint16_t export_events(dpls_server_t *s, fake_t *fake, uint8_t *buf, dpls
     next = 0;
     while (count < max_out) {
         unsigned before = fake->notification_count;
+        uint16_t first;
+        uint8_t chunk_count, j;
         memcpy(payload, &s->session_id, 4);
         memcpy(payload + 4, s->session_token, 8);
         payload[12] = (uint8_t)next;
@@ -114,14 +116,21 @@ static uint16_t export_events(dpls_server_t *s, fake_t *fake, uint8_t *buf, dpls
         assert(dpls_frame_decode(fake->notif[fake->notification_count - 1], fake->notif_len[fake->notification_count - 1], &frame));
         if (frame.type == DPLS_MSG_LOG_RESULT) break;
         assert(frame.type == DPLS_MSG_LOG_CHUNK);
-        out[count].sequence = (uint32_t)frame.payload[2] | ((uint32_t)frame.payload[3] << 8) |
-                              ((uint32_t)frame.payload[4] << 16) | ((uint32_t)frame.payload[5] << 24);
-        out[count].timestamp_seconds = (uint32_t)frame.payload[6] | ((uint32_t)frame.payload[7] << 8) |
-                                       ((uint32_t)frame.payload[8] << 16) | ((uint32_t)frame.payload[9] << 24);
-        out[count].event_type = frame.payload[10];
-        out[count].parameter = frame.payload[11];
-        ++count;
-        next = (uint16_t)(frame.payload[0] | (frame.payload[1] << 8)) + 1u;
+        /* Batched chunk: first_index (u16), count (u8), count × 10-byte events. */
+        first = (uint16_t)(frame.payload[0] | (frame.payload[1] << 8));
+        chunk_count = frame.payload[2];
+        assert(chunk_count >= 1u && chunk_count <= DPLS_LOG_CHUNK_EVENTS);
+        for (j = 0; j < chunk_count && count < max_out; ++j) {
+            const uint8_t *ev = &frame.payload[3u + (uint16_t)j * 10u];
+            out[count].sequence = (uint32_t)ev[0] | ((uint32_t)ev[1] << 8) |
+                                  ((uint32_t)ev[2] << 16) | ((uint32_t)ev[3] << 24);
+            out[count].timestamp_seconds = (uint32_t)ev[4] | ((uint32_t)ev[5] << 8) |
+                                           ((uint32_t)ev[6] << 16) | ((uint32_t)ev[7] << 24);
+            out[count].event_type = ev[8];
+            out[count].parameter = ev[9];
+            ++count;
+        }
+        next = (uint16_t)(first + chunk_count);
     }
     return count;
 }

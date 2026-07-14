@@ -24,15 +24,18 @@
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
 #define DPLS_CALIB_MAGIC 0x434C5044u
+#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u /* "DLCK" */
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
 #define DPLS_CALIB_SNV_ID 0x83u /* 0x82 is taken by dpls_ble_identity (BLE MAC) */
+#define DPLS_AUTH_LOCK_SNV_ID 0x84u
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
 #define DPLS_JOURNAL_RECORD_SIZE 12u
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
+#define DPLS_HW_REVISION 1u /* PB-03F-based Test-DPLS opytny obrazets rev.1 */
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
@@ -46,8 +49,18 @@
  * ≤0.5 mA budget. */
 #define DPLS_ADC_DECIMATE 5u
 #define DPLS_ADC_WINDOW 8u
-/* DIAGNOSTIC: ADC sampling on the kit triggers a watchdog reset loop (radio/
- * clock coexistence). Disabled to isolate; re-enable once ADC↔BLE is sorted. */
+/* ADC sampling. The ISR was reworked to be minimal (raw copy + task wake) with
+ * all scaling/calibration moved to the OSAL task — the correct structure and a
+ * prerequisite for enabling this. BUT a hardware soak (2026-07-14) showed the
+ * watchdog reset loop persists even with the minimal ISR: ~9 resets in 45 s the
+ * moment sampling is enabled. That rules out the heavy-ISR hypothesis and points
+ * at ADC↔radio/clock coexistence in adc_kick (hal_adc_config_channel/
+ * hal_adc_start re-touching CLKHF/DLL each kick), which needs PHY62xx-specific
+ * investigation (init the ADC clock once, gate sampling to BLE-idle windows, or
+ * an alternate clock source). Kept DISABLED so the device stays stable; the
+ * STATE_REPORT validity mask (stage 1) then honestly reports "not measured".
+ * The improved ISR/task split above is retained for when the clock issue is
+ * fixed. See docs/bring-up-checklist.md §3. */
 #define DPLS_ADC_SAMPLING 0
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
@@ -82,6 +95,15 @@ typedef struct {
     uint16_t crc;
 } dpls_settings_t;
 
+/* Persistent brute-force lock marker (SNV 0x84). Written when the 5th wrong
+ * password lands, cleared when the block expires or on factory reset. */
+typedef struct {
+    uint32_t magic;
+    uint8_t locked;
+    uint8_t reserved;
+    uint16_t crc;
+} dpls_auth_lock_t;
+
 /* Persisted two-point calibration. The reserve (VCAP) fields are reserved for
  * the reserve-monitoring stage and stored now so the layout stays fixed. */
 typedef struct {
@@ -107,10 +129,25 @@ static uint32_t connected_at_ms;
 static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
-#define DPLS_RX_QUEUE_DEPTH 4u
-typedef struct { uint8 data[DPLS_MAX_FRAME]; uint16 length; } dpls_rx_slot_t;
+/* Largest client→device frame is SETUP (9 overhead + 5 + 31 name + 16 salt + 32
+ * verifier = 93), so 96-byte RX slots cover every request. */
+#define DPLS_RX_QUEUE_DEPTH 6u
+#define DPLS_RX_SLOT_SIZE 96u
+typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
+
+/* Outgoing indications are paced one-in-flight against the ATT confirmation, so
+ * a busy stack or a back-to-back pair no longer drops the response. The largest
+ * device→client frame is a batched LOG_CHUNK (9 overhead + 3 + 15×10 = 162), so
+ * 168-byte slots cover every response without paying for the full 244-byte
+ * frame maximum. */
+#define DPLS_TX_QUEUE_DEPTH 4u
+#define DPLS_TX_SLOT_SIZE 168u
+typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
+static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
+static uint8 tx_head, tx_tail, tx_count;
+static bool tx_in_flight;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
 
@@ -128,6 +165,7 @@ static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
 static bool auto_isolation_active;
 static bool line_established;
+static bool line_calib_from_nv;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -294,6 +332,12 @@ static void safe_normal(void *context)
     hardware_mode = DPLS_MODE_NORMAL;
 }
 
+/* Drives the control output for the requested mode. Returns true = "output
+ * set", NOT "electrically confirmed": this board has no power-stage feedback
+ * (DEVICE_INFO capability HW_READBACK = false), so COMMAND_RESULT/STATE_REPORT
+ * report the commanded mode, not a measured state. The false-return path (and
+ * COMMAND_RESULT status 4) is the hook for a future Variant-B build that reads
+ * back the electrical state before reporting success. */
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;
@@ -338,12 +382,13 @@ static void load_calibration(void)
     dpls_calib_default(&line_calib);
     dpls_calib_default(&vcap_calib);
     vcap_calib.gain_milli = DPLS_VCAP_NOMINAL_GAIN_MILLI;
+    line_calib_from_nv = false;
     if (osal_snv_read(DPLS_CALIB_SNV_ID, sizeof(nv), &nv) == SUCCESS &&
         nv.magic == DPLS_CALIB_MAGIC &&
         nv.crc == dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_t, crc))) {
         dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
         dpls_calib_t vcap = {nv.vcap_gain_milli, nv.vcap_offset_mv};
-        if (dpls_calib_valid(&line)) line_calib = line;
+        if (dpls_calib_valid(&line)) { line_calib = line; line_calib_from_nv = true; }
         if (dpls_calib_valid(&vcap)) vcap_calib = vcap;
     }
 }
@@ -361,31 +406,48 @@ static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint
     return (uint16_t)(sum / *count);
 }
 
-/* ADC completion runs in interrupt context: fold the freshly measured pin
- * voltage into the per-channel window and publish the calibrated value. Both
- * the line (P20/CH9) and reserve (P23/CH1) channels arrive here. */
+/* Raw samples captured by the ISR, drained by the OSAL task. */
+static volatile uint16_t line_raw[MAX_ADC_SAMPLE_SIZE];
+static volatile uint16_t vcap_raw[MAX_ADC_SAMPLE_SIZE];
+static volatile uint8_t line_raw_size, vcap_raw_size;
+static volatile bool line_raw_ready, vcap_raw_ready;
+
+/* ADC completion ISR: copy the raw samples, flag the channel and wake the task.
+ * No float, no averaging loop, no flash, no BLE here — the previous version did
+ * hal_adc_value_cal + window folding in interrupt context, which is the leading
+ * suspect for the ADC↔radio watchdog reset loop. */
 static void adc_evt(adc_Evt_t *event)
 {
-    float pin_volts;
-    uint32_t pin_mv;
+    uint8_t i, n;
     if (event->type != HAL_ADC_EVT_DATA) {
         adc_busy = false;
         return;
     }
+    n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
     if (event->ch == ADC_CH9) {
-        pin_volts = hal_adc_value_cal(ADC_CH9, event->data, event->size, FALSE, FALSE);
-        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
-        cached_line_mv = fold_window(line_window, &line_window_count, &line_window_pos,
-                                     dpls_calib_apply(&line_calib, pin_mv));
+        for (i = 0; i < n; ++i) line_raw[i] = event->data[i];
+        line_raw_size = n;
+        line_raw_ready = true;
     } else if (event->ch == ADC_CH1) {
-        pin_volts = hal_adc_value_cal(ADC_CH1, event->data, event->size, FALSE, FALSE);
-        pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
-        cached_vcap_mv = fold_window(vcap_window, &vcap_window_count, &vcap_window_pos,
-                                     dpls_calib_apply(&vcap_calib, pin_mv));
+        for (i = 0; i < n; ++i) vcap_raw[i] = event->data[i];
+        vcap_raw_size = n;
+        vcap_raw_ready = true;
     }
     /* One-shot mode: the ADC IRQ handler stops the converter after the last
-     * channel callback returns, so we only clear our own re-entrancy guard. */
+     * channel callback returns, so we only clear our re-entrancy guard. */
     adc_busy = false;
+    osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
+}
+
+/* Task context: raw samples → pin volts (soft-float scaling lives here now) →
+ * two-point calibration → moving-average window. */
+static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t size,
+                                const dpls_calib_t *calib, uint16_t *window,
+                                uint8_t *wcount, uint8_t *wpos, volatile uint16_t *cached)
+{
+    float pin_volts = hal_adc_value_cal(ch, (uint16_t *)raw, size, FALSE, FALSE);
+    uint32_t pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
+    *cached = fold_window(window, wcount, wpos, dpls_calib_apply(calib, pin_mv));
 }
 
 static void adc_kick(void)
@@ -408,6 +470,22 @@ static void adc_kick(void)
     hal_adc_start();
 }
 #endif /* DPLS_ADC_SAMPLING */
+
+void dpls_phy6252_process_adc(void)
+{
+#if DPLS_ADC_SAMPLING
+    if (line_raw_ready) {
+        line_raw_ready = false;
+        process_adc_channel(ADC_CH9, line_raw, line_raw_size, &line_calib,
+                            line_window, &line_window_count, &line_window_pos, &cached_line_mv);
+    }
+    if (vcap_raw_ready) {
+        vcap_raw_ready = false;
+        process_adc_channel(ADC_CH1, vcap_raw, vcap_raw_size, &vcap_calib,
+                            vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
+    }
+#endif
+}
 
 /* Derive the power-source and reserve-low flags with hysteresis. Skipped until
  * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
@@ -459,6 +537,25 @@ static bool real_short_active(void *context)
     return auto_isolation_active;
 }
 
+/* Which STATE_REPORT fields carry a real measurement. Line-derived fields
+ * (voltage, power source, auto-isolation) become valid once the line channel
+ * has produced a sample; reserve once the VCAP channel has. With ADC sampling
+ * disabled the windows never fill, so this stays 0 and the app hides the
+ * fabricated 0 mV / "from line" values behind "—" / "Не определён". */
+static uint8_t measurement_validity(void *context)
+{
+    uint8_t flags = 0;
+    (void)context;
+    if (line_window_count != 0u)
+        flags |= DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID |
+                 DPLS_STATE_AUTOISO_VALID;
+    if (vcap_window_count != 0u)
+        flags |= DPLS_STATE_RESERVE_VALID;
+    if (line_calib_from_nv)
+        flags |= DPLS_STATE_ADC_CALIBRATED;
+    return flags;
+}
+
 static void identify_led(void *context, bool enabled)
 {
     (void)context;
@@ -498,19 +595,14 @@ static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
     else memset(out, 0, DPLS_AUTH_SALT_SIZE);
 }
 
-static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
+/* Persist the current in-RAM `settings` record (magic + CRC), read it back to
+ * confirm the write, then set the VALID marker. Shared by initial commissioning
+ * and the in-place name/password updates. */
+static bool persist_current_settings(void)
 {
-    size_t name_length;
     dpls_settings_t verified;
     uint8 marker = DPLS_SETTINGS_VALID_MARKER;
-    (void)context;
-    memset(&settings, 0, sizeof(settings));
     settings.magic = DPLS_SETTINGS_MAGIC;
-    name_length = strlen(name);
-    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
-    memcpy(settings.name, name, name_length);
-    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
     settings.crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
     if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) != SUCCESS ||
         osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(verified), &verified) != SUCCESS ||
@@ -523,6 +615,91 @@ static bool write_settings(void *context, const char *name, const uint8_t salt[1
     }
     settings_state = DPLS_SETTINGS_VALID;
     return true;
+}
+
+static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    size_t name_length;
+    (void)context;
+    memset(&settings, 0, sizeof(settings));
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memcpy(settings.name, name, name_length);
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
+static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
+{
+    (void)context;
+    if (settings_state == DPLS_SETTINGS_VALID) {
+        memcpy(out, settings.name, DPLS_NAME_MAX);
+        out[DPLS_NAME_MAX] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+}
+
+/* NAME_SET: replace just the user name, keep salt/verifier. */
+static bool settings_set_name(void *context, const char *name)
+{
+    size_t name_length;
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memset(settings.name, 0, sizeof(settings.name));
+    memcpy(settings.name, name, name_length);
+    return persist_current_settings();
+}
+
+/* PASSWORD_SET: replace just salt+verifier, keep the name. */
+static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
+static void device_info(void *context, dpls_device_info_t *out)
+{
+    (void)context;
+    out->device_id = dpls_ble_identity_device_id();
+    out->fw_major = DPLS_FW_VERSION_MAJOR;
+    out->fw_minor = DPLS_FW_VERSION_MINOR;
+    out->fw_patch = DPLS_FW_VERSION_PATCH;
+    out->hw_revision = DPLS_HW_REVISION;
+    out->capabilities = 0u;
+#if DPLS_ADC_SAMPLING
+    out->capabilities |= DPLS_CAP_ADC_PRESENT;
+    if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
+#endif
+    /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
+}
+
+static bool auth_lock_read(void *context)
+{
+    dpls_auth_lock_t record;
+    (void)context;
+    if (osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
+    if (record.magic != DPLS_AUTH_LOCK_MAGIC ||
+        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc)))
+        return false;
+    return record.locked != 0u;
+}
+
+static bool auth_lock_write(void *context, bool locked)
+{
+    dpls_auth_lock_t record;
+    (void)context;
+    record.magic = DPLS_AUTH_LOCK_MAGIC;
+    record.locked = locked ? 1u : 0u;
+    record.reserved = 0u;
+    record.crc = dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc));
+    return osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) == SUCCESS;
 }
 
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
@@ -550,10 +727,63 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
     return difference == 0;
 }
 
+/* Send the head of the TX queue if nothing is in flight. Runs from the OSAL
+ * task (via DPLS_PHY6252_TX_EVT or the tick), never nested under the RX handler,
+ * so the ATT indication buffer stays off the receive path's stack. */
+static void tx_pump(void)
+{
+    bStatus_t rc;
+    if (tx_in_flight || tx_count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+    rc = dpls_gatt_send_indication(connection_handle, tx_queue[tx_head].data,
+                                   tx_queue[tx_head].length, task_id);
+    if (rc == SUCCESS) {
+        tx_in_flight = true; /* wait for the ATT confirmation before the next */
+    } else if (rc == bleMemAllocError || rc == blePending) {
+        /* Transient: keep the head and retry from the next tick. */
+    } else {
+        /* Permanent (not subscribed / too big for MTU / not connected): drop
+         * this frame so the queue cannot deadlock behind an unsendable head. */
+        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx_count) --tx_count;
+        if (tx_count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    }
+}
+
 static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
 {
     (void)context;
-    return dpls_gatt_send_indication(connection_handle, frame, (uint16)length, task_id);
+    if (length > DPLS_TX_SLOT_SIZE) return false;
+    if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
+        /* Queue full: the client has stopped confirming. Fail safe rather than
+         * lose a control response — drop to Norma, reset the queue and drop the
+         * link so the reconnect starts clean. */
+        safe_normal(NULL);
+        tx_head = tx_tail = tx_count = 0;
+        tx_in_flight = false;
+        if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
+        return false;
+    }
+    memcpy(tx_queue[tx_tail].data, frame, length);
+    tx_queue[tx_tail].length = (uint16)length;
+    tx_tail = (uint8)((tx_tail + 1u) % DPLS_TX_QUEUE_DEPTH);
+    ++tx_count;
+    osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    return true;
+}
+
+void dpls_phy6252_process_tx(void)
+{
+    tx_pump();
+}
+
+void dpls_phy6252_tx_confirmed(void)
+{
+    if (tx_in_flight) {
+        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx_count) --tx_count;
+        tx_in_flight = false;
+    }
+    tx_pump();
 }
 
 static bool tx_notify(void *context, const uint8_t *frame, size_t length)
@@ -562,16 +792,20 @@ static bool tx_notify(void *context, const uint8_t *frame, size_t length)
     return dpls_gatt_send_notification(connection_handle, frame, (uint16)length, task_id);
 }
 
-static void receive_frame(const uint8 *data, uint16 length)
+static uint8 receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
-    if (length > DPLS_MAX_FRAME || rx_count >= DPLS_RX_QUEUE_DEPTH) return;
+    if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
+    /* Full queue: NAK the write so the client retries instead of losing the
+     * frame silently. */
+    if (rx_count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
     slot = &rx_queue[rx_tail];
     memcpy(slot->data, data, length);
     slot->length = length;
     rx_tail = (uint8)((rx_tail + 1u) % DPLS_RX_QUEUE_DEPTH);
     ++rx_count;
     osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    return SUCCESS;
 }
 
 static void clear_settings_and_bonds(void)
@@ -582,6 +816,8 @@ static void clear_settings_and_bonds(void)
      * settings record never becomes remotely commissionable by accident. */
     (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
     (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
+    /* Factory reset also lifts any persisted brute-force lock. */
+    (void)auth_lock_write(NULL, false);
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
@@ -626,6 +862,8 @@ void dpls_phy6252_init(uint8 new_task_id)
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
     rx_head = rx_tail = rx_count = 0;
+    tx_head = tx_tail = tx_count = 0;
+    tx_in_flight = false;
     identify_led_active = false;
     /* Drive every mode output to the safe "Norma" level before the radio or
      * the state machine can touch them. */
@@ -669,13 +907,20 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.voltage_mv = voltage_mv;
     hal.power_source = power_source;
     hal.reserve_low = reserve_low;
+    hal.measurement_validity = measurement_validity;
     hal.real_short_active = real_short_active;
     hal.identify_led = identify_led;
     hal.random_bytes = random_bytes;
     hal.settings_state = get_settings_state;
     hal.settings_salt = settings_salt;
     hal.settings_write = write_settings;
+    hal.settings_name = settings_name;
+    hal.settings_set_name = settings_set_name;
+    hal.settings_set_password = settings_set_password;
+    hal.device_info = device_info;
     hal.verify_auth_proof = verify_proof;
+    hal.auth_lock_read = auth_lock_read;
+    hal.auth_lock_write = auth_lock_write;
     hal.event_storage_init = journal_storage_init;
     hal.event_storage_append = journal_storage_append;
     hal.event_storage_read = journal_storage_read;
@@ -734,6 +979,8 @@ void dpls_phy6252_disconnected(void)
     connected_at_ms = 0;
     connection_had_encryption = false;
     rx_head = rx_tail = rx_count = 0;
+    tx_head = tx_tail = tx_count = 0;
+    tx_in_flight = false;
 }
 
 void dpls_phy6252_process_rx(void)
@@ -779,6 +1026,8 @@ void dpls_phy6252_tick(void)
 #endif
     update_power_state();
     dpls_server_tick(&server, now_ms());
+    /* Retry a TX head that hit a transient stack-busy error on a prior attempt. */
+    tx_pump();
 }
 
 uint32 dpls_phy6252_led_tick(void)

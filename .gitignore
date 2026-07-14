@@ -11,6 +11,8 @@ pvvx-PHY62x2/.venv/
 Firmware/build/
 Firmware/sdk/**/ac6/out/
 Firmware/sdk/**/ac6/tmp/
+Firmware/sdk/**/ac6/*.cbuild-idx.yml
+Firmware/sdk/**/ac6/*.cbuild-pack.yml
 **/.ninja_log
 
 TheButton/**/build/

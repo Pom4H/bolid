@@ -12,4 +12,8 @@ void dpls_ble_identity_on_stack_started(void);
 /* Erases persisted bonding keys; MAC is kept. Reboot after calling. */
 void dpls_ble_identity_reset_bonding_keys(void);
 
+/* Stable 32-bit device id derived from the identity MAC (0 if not ready).
+ * Reported in DEVICE_INFO_REPORT and used by the app to key its name cache. */
+uint32_t dpls_ble_identity_device_id(void);
+
 #endif

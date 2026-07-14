@@ -52,6 +52,7 @@ class BleConnectionService : Service() {
         super.onDestroy()
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private fun handleState(state: DplsUiState) {
         NotificationManagerCompat.from(this).notify(
             CONNECTION_NOTIFICATION_ID,
