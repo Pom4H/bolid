@@ -1,5 +1,5 @@
-/* PHY62XX SDK 3.1.1 GATT adapter. Add this file and dpls_server core to a
- * simpleBlePeripheral project. All RX writes require an encrypted link. */
+/* PHY62XX SDK 3.1.2 GATT adapter for the portable DPLS server core.
+ * All RX writes require an encrypted link. */
 #include "dpls_gatt_service.h"
 #include "OSAL.h"
 #include "linkdb.h"
@@ -26,8 +26,8 @@ static uint8 tx_value;
 static gattCharCfg_t tx_cccd[GATT_MAX_NUM_CONN];
 static dpls_gatt_rx_cb_t app_rx;
 
-static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *len, uint16 offset, uint8 max_len);
-static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 len, uint16 offset);
+static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 *len, uint16 offset, uint8 max_len);
+static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 len, uint16 offset);
 static void connection_cb(uint16 conn, uint8 change);
 
 static gattAttribute_t attrs[DPLS_ATTR_COUNT] = {
@@ -39,7 +39,7 @@ static gattAttribute_t attrs[DPLS_ATTR_COUNT] = {
     {{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE, 0, (uint8 *)&tx_cccd}
 };
 
-CONST gattServiceCBs_t callbacks = {(pfnGATTReadAttrCB_t)read_cb, (pfnGATTWriteAttrCB_t)write_cb, NULL};
+CONST gattServiceCBs_t callbacks = {read_cb, write_cb, NULL};
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback) {
     app_rx = rx_callback;
@@ -48,7 +48,7 @@ bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback) {
     return GATTServApp_RegisterService(attrs, GATT_NUM_ATTRS(attrs), &callbacks);
 }
 
-static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *len, uint16 offset, uint8 max_len) {
+static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 *len, uint16 offset, uint8 max_len) {
     (void)conn; (void)offset; (void)max_len;
     if (osal_memcmp(attr->type.uuid, clientCharCfgUUID, ATT_BT_UUID_SIZE)) {
         *len = 2; osal_memcpy(value, attr->pValue, 2); return SUCCESS;
@@ -56,7 +56,7 @@ static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *le
     return ATT_ERR_ATTR_NOT_FOUND;
 }
 
-static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 len, uint16 offset) {
+static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 len, uint16 offset) {
     if (osal_memcmp(attr->type.uuid, clientCharCfgUUID, ATT_BT_UUID_SIZE))
         return GATTServApp_ProcessCCCWriteReq(conn, attr, value, len, offset, GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE);
     if (attr->handle == attrs[DPLS_RX_VALUE_INDEX].handle && osal_memcmp(attr->type.uuid, dpls_rx_uuid, ATT_UUID_SIZE)) {
@@ -96,7 +96,9 @@ bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 lengt
 
 bool dpls_gatt_send_notification(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     attHandleValueNoti_t noti;
-    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_NOTIFY) || length > ATT_MTU_SIZE - 3) return false;
+    (void)task_id;
+    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_NOTIFY) ||
+        length + 3u > ATT_GetCurrentMTUSize(conn)) return false;
     noti.handle = attrs[DPLS_TX_VALUE_INDEX].handle; noti.len = length; osal_memcpy(noti.value, data, length);
     return GATT_Notification(conn, &noti, FALSE) == SUCCESS;
 }
