@@ -1,0 +1,9 @@
+solution:
+  created-for: CMSIS-Toolbox@2.12.0
+  compiler: AC6
+  target-types:
+    - type: Target_1
+      device: ARMCM0
+      optimize: size
+  projects:
+    - project: test-dpls.cproject.yml
