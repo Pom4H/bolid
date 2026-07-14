@@ -34,6 +34,7 @@ static uint8 s_task_id;
 static volatile uint8 s_ready_mask;
 static volatile uint8 s_line_count;
 static volatile uint8 s_vcap_count;
+static volatile bool s_conversion_active;
 static uint16 s_line_samples[MAX_ADC_SAMPLE_SIZE];
 static uint16 s_vcap_samples[MAX_ADC_SAMPLE_SIZE];
 static uint32 s_started;
@@ -55,7 +56,7 @@ static void adc_soak_callback(adc_Evt_t *event)
     uint8 i;
     uint8 count;
 
-    if (!event || event->type != HAL_ADC_EVT_DATA || !event->data) return;
+    if (!s_conversion_active || !event || event->type != HAL_ADC_EVT_DATA || !event->data) return;
     count = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
 
     if (event->ch == ADC_CH9) {
@@ -85,6 +86,7 @@ static void start_sample(void)
     adc_Cfg_t cfg;
     int rc;
 
+    if (s_conversion_active) return;
     memset(&cfg, 0, sizeof(cfg));
     cfg.channel = ADC_BIT(ADC_CH3P_P20);
 #if DPLS_ADC_SOAK_INCLUDE_VCAP
@@ -117,6 +119,7 @@ static void start_sample(void)
         return;
     }
 
+    s_conversion_active = true;
     ++s_started;
     osal_start_timerEx(s_task_id, ADC_SOAK_TIMEOUT_EVT, ADC_SOAK_TIMEOUT_MS);
 }
@@ -128,6 +131,8 @@ static void finish_sample(void)
     uint32 vcap_mv;
 #endif
 
+    if (!s_conversion_active) return; /* stale DONE after timeout */
+    s_conversion_active = false;
     osal_stop_timerEx(s_task_id, ADC_SOAK_TIMEOUT_EVT);
     ++s_completed;
 
@@ -155,6 +160,8 @@ static void finish_sample(void)
 
 static void sample_timeout(void)
 {
+    if (!s_conversion_active) return; /* timer event raced with DONE processing */
+    s_conversion_active = false;
     ++s_timeouts;
     (void)hal_adc_stop();
     LOG("[ADC SOAK] TIMEOUT starts=%lu done=%lu timeout=%lu err=%lu\n",
@@ -166,6 +173,7 @@ void DplsAdcSoak_Init(uint8 task_id)
 {
     s_task_id = task_id;
     s_ready_mask = 0u;
+    s_conversion_active = false;
     s_started = s_completed = s_timeouts = s_start_errors = 0u;
     hal_adc_init();
     schedule_next(ADC_SOAK_INITIAL_DELAY_MS);
