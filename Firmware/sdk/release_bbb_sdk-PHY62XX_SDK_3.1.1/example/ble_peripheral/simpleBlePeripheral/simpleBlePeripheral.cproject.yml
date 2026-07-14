@@ -37,8 +37,8 @@ project:
         - ../../../components/driver/flash
         - ../../../components/libraries/fs
         - ../../../components/driver/led_light
-        - /Users/rom/Documents/Bolid/Firmware/include
-        - /Users/rom/Documents/Bolid/Firmware/phy6252
+        - ../../../../../include
+        - ../../../../../phy6252
         - ../../../components/libraries/tinycrypt-0.2.8/lib/include
       debug: "on"
       define:
@@ -114,7 +114,6 @@ project:
         - file: ../../../components/driver/uart/uart.c
         - file: ../../../components/driver/clock/clock.c
         - file: ../../../components/driver/gpio/gpio.c
-        - file: ../../../components/driver/adc/adc.c
         - file: ../../../components/driver/timer/timer.c
         - file: ../../../components/driver/watchdog/watchdog.c
         - file: ../../../components/driver/pwrmgr/pwrmgr.c
@@ -146,13 +145,15 @@ project:
         - file: source/SimpleBLEPeripheral_Main.c
     - group: dpls
       files:
-        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_protocol.c
-        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_server.c
-        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_led.c
-        - file: /Users/rom/Documents/Bolid/Firmware/src/dpls_calib.c
-        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_gatt_service.c
-        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_phy6252_app.c
-        - file: /Users/rom/Documents/Bolid/Firmware/phy6252/dpls_ble_identity.c
+        - file: ../../../../../src/dpls_protocol.c
+        - file: ../../../../../src/dpls_server.c
+        - file: ../../../../../src/dpls_led.c
+        - file: ../../../../../src/dpls_calib.c
+        - file: ../../../../../phy6252/dpls_gatt_service.c
+        - file: ../../../../../phy6252/dpls_phy6252_app.c
+        - file: ../../../../../phy6252/dpls_ble_identity.c
+        - file: ../../../../../phy6252/dpls_adc_phy6252.c
+        - file: ../../../../../phy6252/dpls_adc_soak.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/hmac.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/sha256.c
         - file: ../../../components/libraries/tinycrypt-0.2.8/lib/source/utils.c
