@@ -22,8 +22,45 @@ Vendor SDK не редактируется и не копируется в ис�
 power manager, flash и BLE examples. Отдельное копирование `adc.c` оставляло бы
 гибрид из компонентов двух SDK и усложняло бы диагностику sleep/radio/ADC.
 
-После успешного target build и аппаратного soak ветка с самописной заменой ADC
-не нужна.
+Миграционная сборка использует штатный `components/driver/adc/adc.c` SDK 3.1.2.
+Самописный backport ADC больше не нужен.
+
+## Изменения API 3.1.2
+
+В target-сборке учтены обнаруженные несовместимости:
+
+- `GATT_MAX_NUM_CONN=MAX_NUM_LL_CONN+1`;
+- `CFG_HCLK_DYNAMIC_CHANGE=0`;
+- GATT read callback: `uint16 *length` вместо `uint8 *length`;
+- GATT write callback: `uint16 length` вместо `uint8 length`;
+- ADC запускается через `hal_adc_start(INTERRUPT_MODE)`;
+- CMSIS RTE startup генерируется с `cbuild --update-rte`.
+
+Пока ветка миграции не слита, две ADC-правки применяются к общей версии
+`dpls_phy6252_app.c` проверяемым скриптом
+`tools/prepare_phy6252_sdk312_app.py`. Скрипт требует ровно одно совпадение для
+каждого изменения и восстанавливает исходник после сборки. После принятия
+миграции эти изменения следует внести непосредственно в основной адаптер и
+удалить migration shim.
+
+## Результат target build
+
+GitHub Actions успешно собрал прошивку Arm Compiler 6.24 с полным SDK 3.1.2 и
+включённым ADC P20 + P23.
+
+Размер образа:
+
+- Code: 74 382 байта;
+- RO-data: 2 446 байт;
+- RW-data: 1 856 байт;
+- ZI-data: 10 504 байта;
+- `ER_IROM1`: 29 424 из 30 664 байт, свободно 1 240 байт;
+- `ER_IROM2`: 3 808 из 16 384 байт;
+- `ER_ROM_XIP`: 53 908 из 131 072 байт.
+
+То есть target помещается, но retained-регион `ER_IROM1` остаётся тесным — около
+4 % запаса. Новые крупные статические буферы туда добавлять нельзя без анализа
+MAP-файла и перераскладки секций.
 
 ## Локальная сборка
 
@@ -53,32 +90,33 @@ Workflow: `.github/workflows/firmware-target.yml`.
 - `cbuild` для target image;
 - `fromelf` для формирования flashable HEX.
 
-В настройках репозитория требуется secret:
+Для коммерческих сборок в настройках репозитория требуется secret:
 
 `ARM_LICENSE_CODE`
 
-Без secret workflow намеренно падает. Бесплатная лицензия `KEMDK-COM0`, которую
-`armlm@v1` может активировать без параметров, по документации Arm предназначена
-для evaluation/non-commercial использования и поэтому не применяется в CI
-коммерческого устройства.
+На pull request без secret используется официальная `KEMDK-COM0` только для
+технической evaluation-сборки; artifact помечается как непригодный для релиза.
+Push-сборка `main` без коммерческого license code блокируется.
 
 ## Что проверяет CI, а что остаётся на плате
 
-CI подтверждает:
+CI уже подтверждает:
 
 - совместимость исходников с заголовками и библиотеками SDK 3.1.2;
+- компиляцию ADC-кода с `INTERRUPT_MODE`;
 - линковку через AC6 и scatter-файл;
 - фактический размер Flash/SRAM;
-- создание AXF, MAP и HEX.
+- создание AXF, MAP и flashable HEX;
+- прохождение host tests и Android build/tests.
 
-После зелёной target-сборки нужны аппаратные проверки:
+Остались аппаратные проверки:
 
-1. boot и BLE advertising без ADC;
+1. boot и BLE advertising с новым SDK;
 2. подключение, bonding и MTU/DLE;
-3. включение ADC API 3.1.2 в interrupt mode;
-4. P20 one-shot soak;
-5. P20 + P23 soak при активном GATT traffic;
+3. P20 + P23 one-shot ADC при advertising;
+4. ADC при подключении и активном GATT traffic;
+5. отсутствие watchdog reset не менее двух часов;
 6. sleep/wakeup и ток потребления;
-7. двухчасовой прогон без watchdog reset.
+7. проверка диапазона и калибровка обоих делителей.
 
-До завершения этих пунктов миграционный PR должен оставаться draft.
+До завершения этих пунктов миграционный PR остаётся draft.
