@@ -26,7 +26,7 @@ static uint8 tx_value;
 static gattCharCfg_t tx_cccd[GATT_MAX_NUM_CONN];
 static dpls_gatt_rx_cb_t app_rx;
 
-static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *len, uint16 offset, uint8 max_len);
+static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 *len, uint16 offset, uint8 max_len);
 static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 len, uint16 offset);
 static void connection_cb(uint16 conn, uint8 change);
 
@@ -48,7 +48,7 @@ bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback) {
     return GATTServApp_RegisterService(attrs, GATT_NUM_ATTRS(attrs), &callbacks);
 }
 
-static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint8 *len, uint16 offset, uint8 max_len) {
+static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 *len, uint16 offset, uint8 max_len) {
     (void)conn; (void)offset; (void)max_len;
     if (osal_memcmp(attr->type.uuid, clientCharCfgUUID, ATT_BT_UUID_SIZE)) {
         *len = 2; osal_memcpy(value, attr->pValue, 2); return SUCCESS;
