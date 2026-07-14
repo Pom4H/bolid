@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/Firmware/targets/phy6252"
 OUT="${1:-$ROOT/tmp/test-dpls-sdk-3.1.2.hex}"
 
-"$ROOT/tools/fetch_phy6252_sdk.sh"
+bash "$ROOT/tools/fetch_phy6252_sdk.sh"
 
 for tool in cbuild fromelf; do
     if ! command -v "$tool" >/dev/null 2>&1; then
