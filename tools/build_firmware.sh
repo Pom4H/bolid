@@ -11,16 +11,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/Firmware/targets/phy6252"
 OUT="${1:-$ROOT/tmp/test-dpls-sdk-3.1.2.hex}"
+APP_SOURCE="$ROOT/Firmware/phy6252/dpls_phy6252_app.c"
+APP_BACKUP=""
+REGION_ROOT=""
+
+cleanup() {
+    if [ -n "$APP_BACKUP" ] && [ -f "$APP_BACKUP" ]; then
+        cp "$APP_BACKUP" "$APP_SOURCE"
+        rm -f "$APP_BACKUP"
+    fi
+    if [ -n "$REGION_ROOT" ]; then
+        rm -rf "$REGION_ROOT"
+    fi
+}
+trap cleanup EXIT
 
 bash "$ROOT/tools/fetch_phy6252_sdk.sh"
 
-for tool in cbuild fromelf; do
+for tool in cbuild fromelf python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "$tool not found. Activate the Arm vcpkg environment from:" >&2
         echo "  $TARGET/vcpkg-configuration.json" >&2
         exit 1
     fi
 done
+
+# The shared adapter still supports the stable 3.1.1 target on main. Apply the
+# two checked 3.1.2 API changes only for this build, and restore the source even
+# when compilation fails.
+APP_BACKUP="$(mktemp)"
+cp "$APP_SOURCE" "$APP_BACKUP"
+python3 "$ROOT/tools/prepare_phy6252_sdk312_app.py" "$APP_SOURCE"
 
 rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
 # CMSIS Toolbox resolves free-form linker input paths relative to the generated
@@ -38,7 +59,6 @@ fi
 
 REGION_ROOT="$(mktemp -d)"
 REGIONS="$REGION_ROOT/regions"
-trap 'rm -rf "$REGION_ROOT"' EXIT
 fromelf --i32 --output "$REGIONS" "$AXF"
 
 for region in ER_ROM_XIP JUMP_TABLE ER_IROM1; do
