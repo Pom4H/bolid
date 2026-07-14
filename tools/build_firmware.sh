@@ -23,6 +23,11 @@ for tool in cbuild fromelf; do
 done
 
 rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
+# CMSIS Toolbox resolves free-form linker input paths relative to the generated
+# output directory. Keep a deterministic bridge to Firmware/sdk so the vendor
+# ROM symbol table is found without machine-specific absolute paths.
+mkdir -p "$TARGET/out"
+ln -s ../../../sdk "$TARGET/out/sdk"
 cbuild "$TARGET/test-dpls.csolution.yml" --packs --update-rte
 
 AXF="$(find "$TARGET/out" -type f -name '*.axf' | head -n 1)"
