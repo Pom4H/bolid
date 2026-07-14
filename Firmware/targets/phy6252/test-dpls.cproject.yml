@@ -57,9 +57,11 @@ project:
         - OSALMEM_METRICS: "0"
         - PHY_MCU_TYPE: MCU_BUMBEE_M0
         - CFG_SLEEP_MODE: PWR_MODE_SLEEP
+        - CFG_HCLK_DYNAMIC_CHANGE: "0"
         - DEF_GAPBOND_MGR_ENABLE: "1"
         - USE_FS: "1"
         - MAX_NUM_LL_CONN: "1"
+        - GATT_MAX_NUM_CONN: MAX_NUM_LL_CONN+1
         - DPLS_EVENT_CAPACITY: "200"
         - __MICROLIB
       define-asm:
