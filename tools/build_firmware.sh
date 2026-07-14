@@ -22,8 +22,8 @@ for tool in cbuild fromelf; do
     fi
 done
 
-rm -rf "$TARGET/out" "$TARGET/tmp"
-cbuild "$TARGET/test-dpls.csolution.yml" --packs
+rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
+cbuild "$TARGET/test-dpls.csolution.yml" --packs --update-rte
 
 AXF="$(find "$TARGET/out" -type f -name '*.axf' | head -n 1)"
 if [ -z "$AXF" ] || [ ! -f "$AXF" ]; then
