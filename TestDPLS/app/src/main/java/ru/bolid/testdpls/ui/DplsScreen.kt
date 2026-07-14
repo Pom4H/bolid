@@ -151,8 +151,8 @@ private fun App(
 
 @Composable private fun ScreenTitle(title: String, back: (() -> Unit)? = null) {
     Box(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 18.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-        if (back != null) Text("‹", fontSize = 40.sp, modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = back))
-        Text(title, fontSize = 17.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 42.dp))
+        if (back != null) Text("‹", color = Color.White, fontSize = 40.sp, modifier = Modifier.align(Alignment.CenterStart).clickable(onClick = back))
+        Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 42.dp))
     }
 }
 
@@ -166,9 +166,9 @@ private fun App(
             .border(1.dp, Line),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NavTab("Испытание", page == Page.MAIN, icon = { TestNavIcon(it) }, onClick = { onPage(Page.MAIN) })
-        NavTab("Журнал", page == Page.LOG, icon = { NavGlyphIcon("☷", it) }, onClick = { onPage(Page.LOG) })
-        NavTab("Настройки", page == Page.SETTINGS, icon = { NavGlyphIcon("⚙", it) }, onClick = { onPage(Page.SETTINGS) })
+        NavTab("Испытание", page == Page.MAIN, icon = { TestTabIcon(if (it) Blue else Muted) }, onClick = { onPage(Page.MAIN) })
+        NavTab("Журнал", page == Page.LOG, icon = { LogTabIcon(if (it) Blue else Muted) }, onClick = { onPage(Page.LOG) })
+        NavTab("Настройки", page == Page.SETTINGS, icon = { SettingsTabIcon(if (it) Blue else Muted) }, onClick = { onPage(Page.SETTINGS) })
     }
 }
 
@@ -202,25 +202,6 @@ private fun RowScope.NavTab(
     }
 }
 
-@Composable private fun NavGlyphIcon(glyph: String, active: Boolean) {
-    Text(glyph, color = if (active) Blue else Muted, fontSize = 22.sp, lineHeight = 22.sp)
-}
-
-@Composable private fun TestNavIcon(active: Boolean) {
-    val color = if (active) Blue else Muted
-    Canvas(Modifier.size(24.dp)) {
-        val strokeW = 2.4.dp.toPx()
-        val cx = size.width / 2f
-        val top = size.height * .08f
-        val midY = size.height * .48f
-        val bot = size.height * .92f
-        val wing = size.width * .28f
-        drawLine(color, Offset(cx, top), Offset(cx + wing, midY), strokeW, StrokeCap.Round)
-        drawLine(color, Offset(cx + wing, midY), Offset(cx - wing * .15f, midY), strokeW, StrokeCap.Round)
-        drawLine(color, Offset(cx - wing * .15f, midY), Offset(cx + wing * .55f, bot), strokeW, StrokeCap.Round)
-    }
-}
-
 @Composable private fun DevicesScreen(state: DplsUiState, scan: () -> Unit, openDevice: (DiscoveredDevice) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Устройства рядом")
@@ -229,11 +210,35 @@ private fun RowScope.NavTab(
             if (state.phase == ConnectionPhase.SCANNING) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Blue)
         }
         LazyColumn(Modifier.weight(1f).padding(horizontal = 18.dp, vertical = 8.dp)) {
+            if (state.devices.isEmpty()) {
+                item {
+                    Column(
+                        Modifier.fillParentMaxHeight(.7f).fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        DeviceModuleIcon(Line, size = 56.dp)
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            if (state.phase == ConnectionPhase.SCANNING) "Идёт поиск устройств…"
+                            else "Устройства не найдены",
+                            color = Muted, fontSize = 15.sp, textAlign = TextAlign.Center,
+                        )
+                        if (state.phase != ConnectionPhase.SCANNING) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Включите Bluetooth и поднесите телефон\nближе к устройству, затем обновите",
+                                color = Muted.copy(alpha = .7f), fontSize = 12.sp, textAlign = TextAlign.Center, lineHeight = 17.sp,
+                            )
+                        }
+                    }
+                }
+            }
             items(state.devices, key = { it.address }) { d ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 67.dp).border(width = 0.5.dp, color = Line).clickable { openDevice(d) }.padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("▥", fontSize = 26.sp)
-                    Column(Modifier.weight(1f).padding(start = 12.dp)) { Text(d.userName ?: d.advertisedName, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(d.address, color = Muted, fontSize = 11.sp, maxLines = 1) }
-                    Text("${d.rssi} dBm", color = Green, fontSize = 12.sp)
+                Row(Modifier.fillMaxWidth().heightIn(min = 67.dp).border(width = 0.5.dp, color = Line).clickable { openDevice(d) }.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    DeviceModuleIcon(Blue, size = 28.dp)
+                    Column(Modifier.weight(1f).padding(start = 14.dp)) { Text(d.userName ?: d.advertisedName, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(d.address, color = Muted, fontSize = 11.sp, maxLines = 1) }
+                    Text("${d.rssi} дБм", color = Green, fontSize = 12.sp)
                     Text("  ›", color = Muted, fontSize = 27.sp)
                 }
             }
@@ -365,12 +370,17 @@ private fun RowScope.NavTab(
     auth: (CharArray) -> Unit,
     setup: (String, CharArray) -> Unit,
 ) {
+    val target = state.selectedDevice?.userName ?: state.selectedDevice?.advertisedName
+    val pwdHint = if (state.initialized) null else "Не менее 8 символов, латинские буквы и цифры"
     Column(Modifier.fillMaxSize()) {
         ScreenTitle(if (state.initialized) "Вход" else "Первичная настройка")
+        target?.let {
+            Text(it, color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp))
+        }
         Column(Modifier.weight(1f).padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             if (!state.initialized) DarkField("Имя устройства", state.setupName, onChange = onName)
-            DarkField("Пароль", state.setupPassword, true, onPassword)
-            if (!state.initialized) DarkField("Повторите пароль", state.setupRepeatPassword, true, onRepeat)
+            DarkField("Пароль", state.setupPassword, true, hint = pwdHint, onChange = onPassword)
+            if (!state.initialized) DarkField("Повторите пароль", state.setupRepeatPassword, true, onChange = onRepeat)
             state.error?.let { Text(it, color = Orange, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) }
         }
         PrimaryButton(if (state.initialized) "Подключиться" else "Сохранить", {
@@ -384,7 +394,8 @@ private fun RowScope.NavTab(
     val mode = s?.mode ?: DplsMode.NORMAL
     val testActive = mode.isActiveTest()
     val countdownSeconds = activeTestCountdownSeconds(s)
-    val deviceName = state.selectedDevice?.userName ?: state.selectedDevice?.advertisedName ?: "Test-DPLS-001"
+    val deviceName = state.deviceInfo?.userName?.takeIf { it.isNotBlank() }
+        ?: state.selectedDevice?.userName ?: state.selectedDevice?.advertisedName ?: "Устройство"
     val modeColor = if (testActive) Orange else Green
     Column(Modifier.fillMaxSize()) {
         Column(
@@ -400,19 +411,29 @@ private fun RowScope.NavTab(
             padding = 12.dp,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (testActive) "⚡" else "✓", color = modeColor, fontSize = 28.sp)
-                Text(" ${mode.title}", color = modeColor, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                if (testActive) ModeSchematic(mode, size = 30.dp, base = modeColor) else CheckCircleIcon(modeColor, size = 28.dp)
+                Column(Modifier.padding(start = 12.dp)) {
+                    Text(mode.title, color = modeColor, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    if (mode.portHint.isNotEmpty()) {
+                        Text(mode.portHint, color = Muted, fontSize = 12.sp)
+                    }
+                }
             }
             HorizontalDivider(color = Line)
             val voltageShown = s != null && s.lineVoltageValid
-            CompactInfoRow(
-                "Напряжение ДПЛС",
-                if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
-                if (voltageShown) Green else Muted,
-            )
+            val adcUnsupported = state.deviceInfo?.adcPresent == false
+            // Прибор без АЦП физически не измеряет напряжение (капабилити честно
+            // показана в «Об устройстве») — не захламляем карту прочерком.
+            if (!adcUnsupported) {
+                CompactInfoRow(
+                    "Напряжение",
+                    if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
+                    if (voltageShown) Green else Muted,
+                )
+            }
             val powerShown = s != null && s.powerValid
             CompactInfoRow(
-                "Источник питания",
+                "Питание",
                 if (powerShown) "От ${s!!.powerSource.title}" else "Не определён",
                 if (powerShown) Green else Muted,
             )
@@ -439,20 +460,25 @@ private fun RowScope.NavTab(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     TimerCircle(countdownSeconds, size = 88.dp)
-                    Text(
-                        "Автовозврат\nв Норма",
-                        color = Muted,
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.End,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.padding(start = 12.dp),
-                    )
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(start = 12.dp)) {
+                        Text(
+                            "До автоматического\nвозврата в «Норма»",
+                            color = Muted,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.End,
+                            lineHeight = 18.sp,
+                        )
+                        mode.controllerEffect.takeIf { it.isNotEmpty() }?.let {
+                            Spacer(Modifier.height(6.dp))
+                            Text(it, color = Orange, fontSize = 11.sp, textAlign = TextAlign.End, lineHeight = 15.sp)
+                        }
+                    }
                 }
             }
         }
         Spacer(Modifier.weight(1f))
         if (testActive) {
-            PrimaryButton("Вернуть в Норму", returnNormal, state.controlsEnabled)
+            PrimaryButton("Вернуть в «Норма»", returnNormal, state.controlsEnabled, color = Orange)
         } else {
             PrimaryButton("Провести испытание", startTest, state.controlsEnabled)
         }
@@ -465,10 +491,14 @@ private fun RowScope.NavTab(
         ScreenTitle("Выбор испытания", back)
         Column(Modifier.weight(1f).padding(horizontal = 18.dp)) {
             modes.forEach { mode ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 59.dp).border(.5.dp, Line).clickable { choose(mode) }.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (mode.name.startsWith("SHORT")) "ϟ" else "╫", fontSize = 25.sp)
-                    Text(mode.title, Modifier.weight(1f).padding(start = 18.dp), fontSize = 15.sp)
-                    RadioButton(selected == mode, { choose(mode) }, colors = RadioButtonDefaults.colors(selectedColor = Blue))
+                val active = selected == mode
+                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).border(if (active) 1.dp else .5.dp, if (active) Blue else Line, RoundedCornerShape(5.dp)).clickable { choose(mode) }.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ModeSchematic(mode, size = 36.dp, base = Muted)
+                    Column(Modifier.weight(1f).padding(start = 16.dp)) {
+                        Text(mode.title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text(mode.portHint, color = Muted, fontSize = 12.sp)
+                    }
+                    RadioButton(active, { choose(mode) }, colors = RadioButtonDefaults.colors(selectedColor = Blue))
                 }
             }
         }
@@ -478,25 +508,42 @@ private fun RowScope.NavTab(
 
 @Composable private fun ConfirmOverlay(mode: DplsMode, cancel: () -> Unit, confirm: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Bg)) {
-        Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             ScreenTitle("Подтверждение", cancel)
             Column(
                 Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text("△", color = Orange, fontSize = 64.sp, lineHeight = 56.sp)
+                WarningTriangleIcon(Orange, size = 66.dp)
+                Spacer(Modifier.height(12.dp))
                 Text("Внимание!", color = Orange, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ModeSchematic(mode, size = 26.dp, base = Muted)
+                    Text(
+                        "  Испытание «${mode.title}»",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (mode.portHint.isNotEmpty()) {
+                    Text(mode.portHint, color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
+                }
+                Spacer(Modifier.height(14.dp))
                 Text(
-                    "Вы собираетесь выполнить\nиспытание ${mode.title}",
-                    color = Color.White,
+                    "Режим сформирует события на контроллере КДЛ и может нарушить работу участка ДПЛС на время испытания.",
+                    color = Muted,
                     textAlign = TextAlign.Center,
-                    fontSize = 17.sp,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(8.dp))
-                Text("Это может нарушить работу\nучастка ДПЛС на время испытания.", color = Muted, textAlign = TextAlign.Center, fontSize = 15.sp, modifier = Modifier.fillMaxWidth())
+                mode.controllerEffect.takeIf { it.isNotEmpty() }?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(it, color = Orange, textAlign = TextAlign.Center, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.fillMaxWidth())
+                }
             }
             PrimaryButton("Продолжить", confirm, color = Orange)
             SecondaryButton("Отмена", cancel)
@@ -567,7 +614,7 @@ private fun RowScope.NavTab(
                 }
             } else {
                 itemsIndexed(state.eventLog, key = { index, _ -> index }) { _, e ->
-                    LogRow(formatEventTime(e, currentRunFirstSeq, state.deviceBootEpochSeconds), eventTitle(e.type, e.parameter))
+                    LogRow(dplsEventTime(e, currentRunFirstSeq, state.deviceBootEpochSeconds), dplsEventTitle(e.type, e.parameter))
                 }
             }
         }
@@ -575,55 +622,15 @@ private fun RowScope.NavTab(
     }
 }
 
-@Composable private fun LogRow(time: String, title: String) { Row(Modifier.fillMaxWidth().heightIn(min = 50.dp).border(.5.dp, Line).padding(9.dp), verticalAlignment = Alignment.CenterVertically) { Text(time, color = Muted, fontSize = 12.sp, maxLines = 1); Text(title, Modifier.weight(1f).padding(start = 16.dp), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Box(Modifier.size(9.dp).background(if (title.contains("КЗ")) Orange else if (title.contains("BLE")) Blue else Green, CircleShape)) } }
-
-/**
- * ТЗ 7.5.2: relative time is allowed. Events of the current run (sequence at or
- * after the last boot) are shown in phone-local calendar time via the synced
- * boot epoch; events from earlier runs show relative uptime "+чч:мм:сс" with no
- * fabricated calendar date, since their boot moment is unknown.
- */
-private fun formatEventTime(e: EventRecord, currentRunFirstSeq: Long, bootEpochSec: Long?): String {
-    if (e.sequence >= currentRunFirstSeq && bootEpochSec != null) {
-        val cal = java.util.Calendar.getInstance().apply { timeInMillis = (bootEpochSec + e.timestampSeconds) * 1000L }
-        return "%02d:%02d:%02d".format(
-            cal.get(java.util.Calendar.HOUR_OF_DAY),
-            cal.get(java.util.Calendar.MINUTE),
-            cal.get(java.util.Calendar.SECOND),
-        )
+@Composable private fun LogRow(time: DplsEventTime, title: String) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 50.dp).border(.5.dp, Line).padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.width(88.dp)) {
+            time.dateLabel?.let { Text(it, color = Muted.copy(alpha = .7f), fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1) }
+            Text(time.time, color = Muted, fontSize = 12.sp, lineHeight = 14.sp, maxLines = 1)
+        }
+        Text(title, Modifier.weight(1f).padding(start = 12.dp), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.size(9.dp).background(if (title.contains("КЗ")) Orange else if (title.contains("BLE")) Blue else Green, CircleShape))
     }
-    val t = e.timestampSeconds
-    return "+%02d:%02d:%02d".format(t / 3600, (t % 3600) / 60, t % 60)
-}
-
-private fun eventTitle(type: Int, parameter: Int): String = when (type) {
-    1 -> "Запуск устройства"
-    2 -> "BLE подключение"
-    3 -> "BLE отключение"
-    4 -> "Успешный вход"
-    5 -> "Ошибка входа · попытка $parameter"
-    6 -> "Вход заблокирован"
-    7 -> "Режим: ${DplsMode.fromWire(parameter)?.title ?: "код $parameter"}"
-    8 -> autoReturnTitle(parameter)
-    9 -> "Идентификация начата"
-    10 -> "Идентификация остановлена"
-    11 -> "Пароль установлен"
-    12 -> "Питание: ${if (parameter == 0) "от ДПЛС" else "от резерва"}"
-    13 -> "Резерв: ${if (parameter == 0) "норма" else "низкий заряд"}"
-    14 -> "Автоизоляция КЗ: ${if (parameter == 0) "снята" else "активна"}"
-    else -> "Событие $type · $parameter"
-}
-
-private fun autoReturnTitle(reason: Int): String = when (reason) {
-    0 -> "Автовозврат в Норма (команда оператора)"
-    1 -> "Автовозврат в Норма (таймер)"
-    2 -> "Автовозврат в Норма (таймаут сессии)"
-    3 -> "Автовозврат в Норма (отключение BLE)"
-    4 -> "Автовозврат в Норма (низкий резерв)"
-    5 -> "Автовозврат в Норма (ошибка)"
-    6 -> "Автовозврат в Норма (перезапуск)"
-    7 -> "Автовозврат в Норма (автоизоляция КЗ)"
-    else -> "Автовозврат в Норма"
 }
 
 @Composable private fun ExportScreen(back: () -> Unit, csv: () -> Unit, txt: () -> Unit) {
@@ -638,7 +645,7 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     }
 }
 
-@Composable private fun FormatRow(title: String, selected: Boolean, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 92.dp).border(1.dp, Line, RoundedCornerShape(5.dp)).clickable(onClick = click).padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text("▤", fontSize = 38.sp); Text(title, Modifier.weight(1f).padding(start = 22.dp), fontSize = 17.sp, maxLines = 1); RadioButton(selected, click, colors = RadioButtonDefaults.colors(selectedColor = Blue)) } }
+@Composable private fun FormatRow(title: String, selected: Boolean, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 92.dp).border(if (selected) 1.dp else 1.dp, if (selected) Blue else Line, RoundedCornerShape(5.dp)).clickable(onClick = click).padding(18.dp), verticalAlignment = Alignment.CenterVertically) { DocIcon(if (selected) Blue else Muted, size = 36.dp); Text(title, Modifier.weight(1f).padding(start = 22.dp), fontSize = 17.sp, maxLines = 1); RadioButton(selected, click, colors = RadioButtonDefaults.colors(selectedColor = Blue)) } }
 
 @Composable private fun SettingsScreen(state: DplsUiState, name: () -> Unit, password: () -> Unit, about: () -> Unit, disconnect: () -> Unit) {
     val deviceName = state.deviceInfo?.userName?.takeIf { it.isNotBlank() }
@@ -646,16 +653,26 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     Column(Modifier.fillMaxSize()) {
         ScreenTitle("Настройки")
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            SettingRow("Имя устройства", deviceName, Blue, name)
-            SettingRow("Пароль", "••••••••", Muted, password)
-            SettingRow("Автовозврат в Норма", "5 минут", Green) {}
-            SettingRow("Информация об устройстве", "", Muted, about)
-            SettingRow("Отключиться", "", Orange, disconnect)
+            SettingRow("Имя устройства", deviceName, Blue, onClick = name)
+            SettingRow("Пароль", "Изменить", Blue, onClick = password)
+            SettingRow("Автовозврат в «Норма»", "5 минут", Green, onClick = null)
+            SettingRow("Об устройстве", "", Muted, onClick = about)
+            Spacer(Modifier.height(4.dp))
+            SettingRow("Отключиться", "", Orange, onClick = disconnect, labelColor = Orange, showChevron = false)
         }
     }
 }
 
-@Composable private fun SettingRow(label: String, value: String, color: Color, click: () -> Unit) { Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).border(1.dp, Line, RoundedCornerShape(4.dp)).clickable(onClick = click).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(value, color = color, fontSize = 12.sp, maxLines = 2, textAlign = TextAlign.End, modifier = Modifier.widthIn(max = 132.dp)); Text("  ›", color = Muted, fontSize = 25.sp) } }
+@Composable private fun SettingRow(label: String, value: String, color: Color, onClick: (() -> Unit)?, labelColor: Color = Color.White, showChevron: Boolean = true) {
+    val base = Modifier.fillMaxWidth().heightIn(min = 58.dp).border(1.dp, Line, RoundedCornerShape(4.dp))
+    Row((if (onClick != null) base.clickable(onClick = onClick) else base).padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = labelColor, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (value.isNotEmpty()) Text(value, color = color, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+        }
+        if (onClick != null && showChevron) Text("›", color = Muted, fontSize = 25.sp, modifier = Modifier.padding(start = 8.dp))
+    }
+}
 
 @Composable private fun NameScreen(state: DplsUiState, onSave: (String) -> Unit, clearOp: () -> Unit, back: () -> Unit) {
     var value by remember {
@@ -691,7 +708,7 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             DarkField("Текущий пароль", current, true) { current = it }
-            DarkField("Новый пароль", next, true) { next = it }
+            DarkField("Новый пароль", next, true, hint = "Не менее 8 символов, латинские буквы и цифры") { next = it }
             DarkField("Повторите пароль", repeat, true) { repeat = it }
             state.settingsError?.let { Text(it, color = Orange, fontSize = 13.sp) }
         }
@@ -717,21 +734,23 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     LaunchedEffect(Unit) { requestInfo() }
     val info = state.deviceInfo
     fun yn(v: Boolean?) = when (v) { true -> "есть"; false -> "нет"; null -> "—" }
+    fun ynColor(v: Boolean?) = when (v) { true -> Green; else -> Muted }
+    // (label, value, valueColor)
     val rows = listOf(
-        "Модель" to "Тест-ДПЛС",
-        "Идентификатор" to (info?.shortId ?: "—"),
-        "Имя устройства" to (info?.userName?.takeIf { it.isNotBlank() } ?: "—"),
-        "Версия прошивки" to (info?.firmwareVersion ?: "—"),
-        "Аппаратная версия" to (info?.hardwareRevision?.toString() ?: "—"),
-        "Версия протокола" to (info?.protocolVersion?.toString() ?: "—"),
-        "Измерение напряжения" to yn(info?.adcPresent),
-        "Калибровка АЦП" to yn(info?.adcCalibrated),
-        "Аппаратное подтверждение" to yn(info?.hardwareReadback),
+        Triple("Модель", "Тест-ДПЛС", Color.White),
+        Triple("Идентификатор", info?.shortId ?: "—", Color.White),
+        Triple("Имя устройства", info?.userName?.takeIf { it.isNotBlank() } ?: "—", Color.White),
+        Triple("Версия прошивки", info?.firmwareVersion ?: "—", Color.White),
+        Triple("Аппаратная версия", info?.hardwareRevision?.toString() ?: "—", Color.White),
+        Triple("Версия протокола", info?.protocolVersion?.toString() ?: "—", Color.White),
+        Triple("Измерение напряжения", yn(info?.adcPresent), ynColor(info?.adcPresent)),
+        Triple("Калибровка АЦП", yn(info?.adcCalibrated), ynColor(info?.adcCalibrated)),
+        Triple("Аппаратное подтверждение", yn(info?.hardwareReadback), ynColor(info?.hardwareReadback)),
     )
     Column(Modifier.fillMaxSize()) {
-        ScreenTitle("О устройстве", back)
+        ScreenTitle("Об устройстве", back)
         Column(Modifier.padding(18.dp)) {
-            rows.forEach { (a, b) -> InfoRow(a, b); HorizontalDivider(color = Line) }
+            rows.forEach { (a, b, c) -> InfoRow(a, b, c); HorizontalDivider(color = Line) }
             if (info == null) {
                 Spacer(Modifier.height(16.dp))
                 Text("Чтение данных устройства…", color = Muted, fontSize = 13.sp)
@@ -740,13 +759,24 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
     }
 }
 
-@Composable private fun DarkField(label: String, value: String, password: Boolean = false, onChange: (String) -> Unit) {
+@Composable private fun DarkField(label: String, value: String, password: Boolean = false, hint: String? = null, onChange: (String) -> Unit) {
+    var revealed by remember { mutableStateOf(false) }
     OutlinedTextField(
         value,
         onChange,
         label = { Text(label) },
         singleLine = true,
-        visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        visualTransformation = if (password && !revealed) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+        trailingIcon = if (password) {
+            {
+                Text(
+                    if (revealed) "Скрыть" else "Показать",
+                    color = Blue, fontSize = 13.sp,
+                    modifier = Modifier.padding(end = 12.dp).clickable { revealed = !revealed },
+                )
+            }
+        } else null,
+        supportingText = hint?.let { { Text(it, color = Muted, fontSize = 12.sp) } },
         modifier = Modifier.fillMaxWidth().semantics { contentDescription = "dpls_field:$label" },
         colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Blue, unfocusedBorderColor = Line),
     )
@@ -766,8 +796,9 @@ private fun autoReturnTitle(reason: Int): String = when (reason) {
 
 @Composable private fun CompactInfoRow(label: String, value: String, valueColor: Color = Color.White) {
     Row(Modifier.fillMaxWidth().heightIn(min = 34.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f), color = Muted, fontSize = 13.sp)
-        Text(value, color = valueColor, fontSize = 14.sp)
+        Text(label, color = Muted, fontSize = 13.sp, maxLines = 1)
+        Spacer(Modifier.weight(1f))
+        Text(value, color = valueColor, fontSize = 14.sp, maxLines = 1)
     }
 }
 @Composable private fun InfoRow(label: String, value: String, valueColor: Color = Color.White) { Row(Modifier.fillMaxWidth().heightIn(min=43.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f), color = Muted, fontSize = 13.sp); Text(value, color = valueColor, fontSize = 14.sp) } }
