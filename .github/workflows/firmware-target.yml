@@ -71,13 +71,19 @@ jobs:
           echo "::warning::AC6 is using KEMDK-COM0 evaluation/non-commercial licensing. Do not use this artifact for release."
 
       - name: Build and package firmware
-        run: bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p tmp
+          bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex 2>&1 | tee tmp/ac6-build.log
 
-      - name: Upload target artifacts
+      - name: Upload target artifacts and build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-dpls-phy6252-sdk-3.1.2
           path: |
+            tmp/ac6-build.log
             tmp/test-dpls-sdk-3.1.2.hex
             Firmware/targets/phy6252/out/**/*.axf
             Firmware/targets/phy6252/out/**/*.map
