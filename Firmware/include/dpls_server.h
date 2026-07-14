@@ -14,6 +14,16 @@
 #define DPLS_MODE_MAX_MS 300000u
 #define DPLS_SESSION_TIMEOUT_MS 10000u
 #define DPLS_AUTH_BLOCK_MS 300000u
+#define DPLS_AUTH_MAX_ATTEMPTS 5u
+/* Minimum spacing between processed AUTH_PROOF attempts. A burst arriving faster
+ * than this is rejected without a verify or a failed-attempt increment, so a
+ * duplicate from a legit client is harmless while brute force is throttled. */
+#define DPLS_AUTH_MIN_INTERVAL_MS 1000u
+/* Commissioning window: SETUP of an uninitialised device is only accepted for
+ * this long after power-on. After it closes, a power-cycle or factory reset
+ * (both physical actions) re-opens it. Tighten for production; kept generous so
+ * a normal commissioning flow — and the E2E — completes inside it. */
+#define DPLS_SETUP_WINDOW_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
 #define DPLS_IDENTIFY_BLINK_MS 500u
 
@@ -84,6 +94,12 @@ typedef struct {
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
+    /* Optional persistent brute-force lock. auth_lock_read reports whether the
+     * device booted while locked; auth_lock_write persists (true) or clears
+     * (false) the marker. NULL on both keeps the lock RAM-only (cleared by a
+     * reboot). Cleared by factory reset alongside the password. */
+    bool (*auth_lock_read)(void *context);
+    void (*auth_lock_write)(void *context, bool locked);
     /* Journal storage is persistent and sequence-addressed. The server keeps
      * only metadata and streams one record at a time during BLE export. */
     bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
@@ -119,6 +135,8 @@ typedef struct {
     bool real_short;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
+    uint32_t last_auth_proof_ms;
+    uint32_t boot_ms;
     uint32_t now_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;

@@ -24,9 +24,11 @@
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
 #define DPLS_CALIB_MAGIC 0x434C5044u
+#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u /* "DLCK" */
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
 #define DPLS_CALIB_SNV_ID 0x83u /* 0x82 is taken by dpls_ble_identity (BLE MAC) */
+#define DPLS_AUTH_LOCK_SNV_ID 0x84u
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
 #define DPLS_JOURNAL_RECORD_SIZE 12u
@@ -81,6 +83,15 @@ typedef struct {
     uint8_t verifier[DPLS_AUTH_PROOF_SIZE];
     uint16_t crc;
 } dpls_settings_t;
+
+/* Persistent brute-force lock marker (SNV 0x84). Written when the 5th wrong
+ * password lands, cleared when the block expires or on factory reset. */
+typedef struct {
+    uint32_t magic;
+    uint8_t locked;
+    uint8_t reserved;
+    uint16_t crc;
+} dpls_auth_lock_t;
 
 /* Persisted two-point calibration. The reserve (VCAP) fields are reserved for
  * the reserve-monitoring stage and stored now so the layout stays fixed. */
@@ -546,6 +557,28 @@ static bool write_settings(void *context, const char *name, const uint8_t salt[1
     return true;
 }
 
+static bool auth_lock_read(void *context)
+{
+    dpls_auth_lock_t record;
+    (void)context;
+    if (osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
+    if (record.magic != DPLS_AUTH_LOCK_MAGIC ||
+        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc)))
+        return false;
+    return record.locked != 0u;
+}
+
+static void auth_lock_write(void *context, bool locked)
+{
+    dpls_auth_lock_t record;
+    (void)context;
+    record.magic = DPLS_AUTH_LOCK_MAGIC;
+    record.locked = locked ? 1u : 0u;
+    record.reserved = 0u;
+    record.crc = dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc));
+    (void)osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record);
+}
+
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
                          uint32_t session_id, const uint8_t proof[32])
 {
@@ -603,6 +636,8 @@ static void clear_settings_and_bonds(void)
      * settings record never becomes remotely commissionable by accident. */
     (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
     (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
+    /* Factory reset also lifts any persisted brute-force lock. */
+    auth_lock_write(NULL, false);
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
@@ -698,6 +733,8 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.settings_salt = settings_salt;
     hal.settings_write = write_settings;
     hal.verify_auth_proof = verify_proof;
+    hal.auth_lock_read = auth_lock_read;
+    hal.auth_lock_write = auth_lock_write;
     hal.event_storage_init = journal_storage_init;
     hal.event_storage_append = journal_storage_append;
     hal.event_storage_read = journal_storage_read;

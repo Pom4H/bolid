@@ -96,6 +96,7 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
     memset(s, 0, sizeof(*s));
     s->hal = *hal;
     s->now_ms = now_ms;
+    s->boot_ms = now_ms;
     s->mode = DPLS_MODE_NORMAL;
     s->next_event_sequence = 1;
     s->state_revision = 1;
@@ -112,6 +113,13 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
             s->hal.diagnostic_error(s->hal.context, false);
         }
     }
+    /* A brute-force lock persisted in NV survives the reboot: re-arm a fresh
+     * full block so power-cycling never shortens the 300 s penalty. The marker
+     * is cleared when this block expires or on factory reset. */
+    if (s->hal.auth_lock_read && s->hal.auth_lock_read(s->hal.context)) {
+        s->failed_auth_attempts = DPLS_AUTH_MAX_ATTEMPTS;
+        s->blocked_until_ms = now_ms + DPLS_AUTH_BLOCK_MS;
+    }
     s->hal.hardware_safe_normal(s->hal.context);
     dpls_server_log(s, EVT_BOOT, DPLS_RETURN_BOOT);
 }
@@ -120,7 +128,11 @@ void dpls_server_connected(dpls_server_t *s, uint32_t now_ms) {
     s->now_ms = now_ms;
     if (s->connected) return;
     s->connected = true; s->authenticated = false; s->hello_received = false;
-    s->setup_disconnect_deadline_ms = 0; s->failed_auth_attempts = 0;
+    s->setup_disconnect_deadline_ms = 0;
+    /* failed_auth_attempts and blocked_until_ms deliberately survive a
+     * reconnect — resetting them here let an attacker clear the count by simply
+     * dropping and re-opening the link. They clear only on successful auth,
+     * block expiry, or factory reset. */
     dpls_server_log(s, EVT_BLE_CONNECTED, 0);
 }
 
@@ -327,6 +339,17 @@ static void send_log_from(dpls_server_t *s, uint16_t first) {
     else send_log_result(s);
 }
 
+/* True while the brute-force block is in force. On expiry it clears the block,
+ * the failed-attempt counter and any persisted NV marker in one place. */
+static bool auth_block_active(dpls_server_t *s, uint32_t now) {
+    if (!s->blocked_until_ms) return false;
+    if (!elapsed(now, s->blocked_until_ms)) return true;
+    s->blocked_until_ms = 0;
+    s->failed_auth_attempts = 0;
+    if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, false);
+    return false;
+}
+
 bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, uint32_t now_ms) {
     dpls_frame_t f; s->now_ms = now_ms;
     if (!dpls_frame_decode(bytes, length, &f)) { send_error(s, 1); return false; }
@@ -342,6 +365,11 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
         if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) ||
             s->hal.settings_state(s->hal.context) != DPLS_SETTINGS_EMPTY || !s->hello_received ||
             f.payload_length < 54 || rd32(f.payload) != s->session_id) { send_error(s, 2); break; }
+        /* Commissioning window: refuse SETUP once it has closed. A power-cycle or
+         * factory reset (both physical) re-opens it, so an uninitialised device
+         * left powered is not indefinitely commissionable by the first app near
+         * it. Distinct error 7 lets the app tell the operator to power-cycle. */
+        if (elapsed(now_ms, s->boot_ms + DPLS_SETUP_WINDOW_MS)) { send_error(s, 7); break; }
         name_len = f.payload[4];
         if (!name_len || name_len > 31 || f.payload_length != (uint16_t)(5u + name_len + 16u + 32u)) { send_error(s, 3); break; }
         memcpy(name, f.payload + 5, name_len); name[name_len] = '\0';
@@ -352,15 +380,29 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
     }
     case DPLS_MSG_AUTH_PROOF:
         if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) || !s->hello_received || f.payload_length != 48) { send_error(s, 2); break; }
-        if (s->blocked_until_ms && !elapsed(now_ms, s->blocked_until_ms)) { send_auth_result(s, 2, (uint16_t)((s->blocked_until_ms - now_ms + 999u) / 1000u)); break; }
+        if (auth_block_active(s, now_ms)) { send_auth_result(s, 2, (uint16_t)((s->blocked_until_ms - now_ms + 999u) / 1000u)); break; }
+        /* Rate-limit: a proof arriving under DPLS_AUTH_MIN_INTERVAL_MS after the
+         * last processed one is rejected without verifying or counting it, so a
+         * duplicate from a legit client is harmless and brute force is capped at
+         * one attempt per interval. */
+        if (s->last_auth_proof_ms && (uint32_t)(now_ms - s->last_auth_proof_ms) < DPLS_AUTH_MIN_INTERVAL_MS) {
+            send_auth_result(s, 1, 0); break;
+        }
+        s->last_auth_proof_ms = now_ms;
         memcpy(s->client_nonce, f.payload, 16);
         if (s->hal.verify_auth_proof(s->hal.context, s->device_nonce, s->client_nonce, s->session_id, f.payload + 16)) {
             if (!s->authenticated) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
             s->authenticated = true; s->failed_auth_attempts = 0; s->last_authenticated_activity_ms = now_ms;
+            if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, false);
             send_auth_result(s, 0, 0);
         } else {
             ++s->failed_auth_attempts; dpls_server_log(s, EVT_AUTH_FAILURE, s->failed_auth_attempts);
-            if (s->failed_auth_attempts >= 5) { s->blocked_until_ms = now_ms + DPLS_AUTH_BLOCK_MS; dpls_server_log(s, EVT_AUTH_BLOCKED, 0); send_auth_result(s, 2, 300); }
+            if (s->failed_auth_attempts >= DPLS_AUTH_MAX_ATTEMPTS) {
+                s->blocked_until_ms = now_ms + DPLS_AUTH_BLOCK_MS;
+                if (s->hal.auth_lock_write) s->hal.auth_lock_write(s->hal.context, true);
+                dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
+                send_auth_result(s, 2, (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
+            }
             else send_auth_result(s, 1, 0);
         }
         break;

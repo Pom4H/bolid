@@ -870,10 +870,17 @@ class BleClient(context: Context) {
             DplsProtocol.Type.ERROR -> {
                 val code = frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
                 if (_uiState.value.logProgress != null) failLog("Ошибка загрузки журнала: $code")
-                else fail("Ошибка устройства: $code")
+                else fail(deviceErrorReason(code))
             }
             else -> Unit
         }
+    }
+
+    private fun deviceErrorReason(code: Int): String = when (code) {
+        // Code 7: the commissioning window has closed. First setup is only
+        // accepted for a while after power-on, so ask the operator to power-cycle.
+        7 -> "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку в течение нескольких минут."
+        else -> "Ошибка устройства: $code"
     }
 
     private fun commandRejectReason(status: Int): String = when (status) {
