@@ -8,6 +8,7 @@ typedef struct {
     dpls_power_t power_src;
     bool low_reserve;
     bool short_active;
+    uint8_t validity;
     dpls_mode_t mode;
     uint8_t tx[DPLS_MAX_FRAME];
     size_t tx_len;
@@ -24,6 +25,7 @@ static void normal(void *c) { fake_t *f = c; f->normal = true; f->mode = DPLS_MO
 static uint16_t voltage(void *c) { (void)c; return 24100; }
 static dpls_power_t power(void *c) { return ((fake_t *)c)->power_src; }
 static bool low(void *c) { return ((fake_t *)c)->low_reserve; }
+static uint8_t validity(void *c) { return ((fake_t *)c)->validity; }
 static bool real_short(void *c) { return ((fake_t *)c)->short_active; }
 static void identify(void *c, bool on) { ((fake_t *)c)->identify = on; }
 static bool random_bytes(void *c, uint8_t *p, size_t n) { (void)c; memset(p, 0x55, n); return true; }
@@ -77,6 +79,7 @@ int main(void) {
     dpls_hal_t hal = {
         .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
         .voltage_mv = voltage, .power_source = power, .reserve_low = low,
+        .measurement_validity = validity,
         .real_short_active = real_short, .identify_led = identify,
         .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
         .settings_write = settings, .verify_auth_proof = verify,
@@ -90,6 +93,16 @@ int main(void) {
     memset(payload, 1, 16); n = request(DPLS_MSG_HELLO, payload, 16, buf); assert(dpls_server_receive(&server, buf, n, 20));
     assert(dpls_frame_decode(fake.tx, fake.tx_len, &response)); assert(response.type == DPLS_MSG_AUTH_CHALLENGE);
     memset(payload, 0, 48); payload[16] = 0xa5; n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf); dpls_server_receive(&server, buf, n, 30); assert(server.authenticated);
+    /* STATE_REPORT is 17 bytes: live voltage at [2..3] and the validity mask at
+     * [16], forwarded verbatim from the HAL so the app can hide unmeasured data. */
+    fake.validity = DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID;
+    memcpy(payload, &server.session_id, 4); memcpy(payload + 4, server.session_token, 8);
+    n = request(DPLS_MSG_STATE_GET, payload, 12, buf); dpls_server_receive(&server, buf, n, 35);
+    assert(dpls_frame_decode(fake.tx, fake.tx_len, &response));
+    assert(response.type == DPLS_MSG_STATE_REPORT);
+    assert(response.payload_length == 17);
+    assert(response.payload[2] == (uint8_t)(24100u & 0xffu) && response.payload[3] == (uint8_t)(24100u >> 8));
+    assert(response.payload[16] == (DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID));
     memcpy(payload, &server.session_id, 4); memcpy(payload + 4, server.session_token, 8); payload[12] = 7; payload[13] = payload[14] = payload[15] = 0; payload[16] = DPLS_MODE_SHORT_1;
     n = request(DPLS_MSG_MODE_SET, payload, 17, buf); dpls_server_receive(&server, buf, n, 40); assert(server.mode == DPLS_MODE_SHORT_1); assert(fake.apply_count == 1);
     dpls_server_receive(&server, buf, n, 50); assert(fake.apply_count == 1); /* idempotent */

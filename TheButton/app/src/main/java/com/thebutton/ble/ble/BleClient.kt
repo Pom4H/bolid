@@ -894,6 +894,9 @@ class BleClient(context: Context) {
         val realShort = (flags and 0x02) != 0
         val uptimeSeconds = payload.u32()
         val revision = payload.u32()
+        // Byte 16 (validity mask) is present on firmware ≥ this build. A legacy
+        // 16-byte report has no byte to read, so default every field to valid.
+        val validity = if (payload.remaining() >= 1) payload.u8() else 0xff
         val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
         val state = DeviceState(
             mode = mode,
@@ -905,6 +908,11 @@ class BleClient(context: Context) {
             uptimeSeconds = uptimeSeconds,
             revision = revision,
             receivedAtMillis = System.currentTimeMillis(),
+            lineVoltageValid = (validity and 0x01) != 0,
+            reserveValid = (validity and 0x02) != 0,
+            powerValid = (validity and 0x04) != 0,
+            autoIsoValid = (validity and 0x08) != 0,
+            adcCalibrated = (validity and 0x10) != 0,
         )
         _uiState.update {
             it.copy(

@@ -236,7 +236,7 @@ static void send_auth_result(dpls_server_t *s, uint8_t status, uint16_t retry_se
 }
 
 static void send_state(dpls_server_t *s) {
-    uint8_t p[16]; memset(p, 0, sizeof(p));
+    uint8_t p[17]; memset(p, 0, sizeof(p));
     p[0] = (uint8_t)s->mode; p[1] = (uint8_t)s->hal.power_source(s->hal.context);
     wr16(p + 2, s->hal.voltage_mv(s->hal.context));
     if (s->mode != DPLS_MODE_NORMAL && !elapsed(s->now_ms, s->mode_deadline_ms))
@@ -245,6 +245,9 @@ static void send_state(dpls_server_t *s) {
     /* p[7] is a flag byte: bit0 = connected, bit1 = real-short auto-isolation. */
     p[7] = (uint8_t)((s->connected ? 0x01u : 0u) | (s->real_short ? 0x02u : 0u));
     wr32(p + 8, s->now_ms / 1000u); wr32(p + 12, s->state_revision);
+    /* p[16]: measurement-validity mask. Legacy clients read only 16 bytes and
+     * ignore this; new clients hide unmeasured fields when a bit is clear. */
+    p[16] = s->hal.measurement_validity ? s->hal.measurement_validity(s->hal.context) : 0u;
     send_frame(s, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
 }
 

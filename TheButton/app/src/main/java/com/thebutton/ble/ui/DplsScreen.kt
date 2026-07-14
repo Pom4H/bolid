@@ -401,12 +401,22 @@ private fun RowScope.NavTab(
                 Text(" ${mode.title}", color = modeColor, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             }
             HorizontalDivider(color = Line)
-            CompactInfoRow("Напряжение ДПЛС", s?.voltageMv?.let { "%.1f В".format(it / 1000f) } ?: "—", Green)
-            CompactInfoRow("Источник питания", s?.powerSource?.let { "От ${it.title}" } ?: "—", Green)
-            if (s?.reserveLow == true) {
+            val voltageShown = s != null && s.lineVoltageValid
+            CompactInfoRow(
+                "Напряжение ДПЛС",
+                if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
+                if (voltageShown) Green else Muted,
+            )
+            val powerShown = s != null && s.powerValid
+            CompactInfoRow(
+                "Источник питания",
+                if (powerShown) "От ${s!!.powerSource.title}" else "Не определён",
+                if (powerShown) Green else Muted,
+            )
+            if (s?.reserveValid == true && s.reserveLow) {
                 CompactInfoRow("Заряд резерва", "Низкий", Orange)
             }
-            if (s?.realShort == true) {
+            if (s?.autoIsoValid == true && s.realShort) {
                 HorizontalDivider(color = Line)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("⚠", color = Orange, fontSize = 20.sp)

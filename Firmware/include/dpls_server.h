@@ -27,6 +27,18 @@ typedef enum {
 } dpls_mode_t;
 
 typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
+
+/* Validity mask carried in STATE_REPORT byte 16. A zero measurement is a real
+ * value (0 V is a legitimate reading), so the client must not treat it as
+ * "measured" unless the matching bit is set. With ADC sampling disabled every
+ * bit is 0 and the app shows "—" / "Не определён" instead of fabricated data. */
+enum {
+    DPLS_STATE_LINE_VOLTAGE_VALID = 1u << 0,
+    DPLS_STATE_RESERVE_VALID      = 1u << 1,
+    DPLS_STATE_POWER_VALID        = 1u << 2,
+    DPLS_STATE_AUTOISO_VALID      = 1u << 3,
+    DPLS_STATE_ADC_CALIBRATED     = 1u << 4,
+};
 typedef enum {
     DPLS_SETTINGS_EMPTY = 0,
     DPLS_SETTINGS_VALID = 1,
@@ -57,6 +69,9 @@ typedef struct {
     uint16_t (*voltage_mv)(void *context);
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
+    /* Optional: validity mask (DPLS_STATE_*_VALID bits) for the measured
+     * fields. NULL is treated as "nothing measured yet" (mask 0). */
+    uint8_t (*measurement_validity)(void *context);
     /* Reports identify mode entering/leaving. The blink shape is owned by the
      * LED driver, so this is called once on start (true) and once on stop
      * (false), not toggled per blink. */

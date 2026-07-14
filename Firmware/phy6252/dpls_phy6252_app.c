@@ -128,6 +128,7 @@ static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
 static bool auto_isolation_active;
 static bool line_established;
+static bool line_calib_from_nv;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -338,12 +339,13 @@ static void load_calibration(void)
     dpls_calib_default(&line_calib);
     dpls_calib_default(&vcap_calib);
     vcap_calib.gain_milli = DPLS_VCAP_NOMINAL_GAIN_MILLI;
+    line_calib_from_nv = false;
     if (osal_snv_read(DPLS_CALIB_SNV_ID, sizeof(nv), &nv) == SUCCESS &&
         nv.magic == DPLS_CALIB_MAGIC &&
         nv.crc == dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_t, crc))) {
         dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
         dpls_calib_t vcap = {nv.vcap_gain_milli, nv.vcap_offset_mv};
-        if (dpls_calib_valid(&line)) line_calib = line;
+        if (dpls_calib_valid(&line)) { line_calib = line; line_calib_from_nv = true; }
         if (dpls_calib_valid(&vcap)) vcap_calib = vcap;
     }
 }
@@ -457,6 +459,25 @@ static bool real_short_active(void *context)
 {
     (void)context;
     return auto_isolation_active;
+}
+
+/* Which STATE_REPORT fields carry a real measurement. Line-derived fields
+ * (voltage, power source, auto-isolation) become valid once the line channel
+ * has produced a sample; reserve once the VCAP channel has. With ADC sampling
+ * disabled the windows never fill, so this stays 0 and the app hides the
+ * fabricated 0 mV / "from line" values behind "—" / "Не определён". */
+static uint8_t measurement_validity(void *context)
+{
+    uint8_t flags = 0;
+    (void)context;
+    if (line_window_count != 0u)
+        flags |= DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID |
+                 DPLS_STATE_AUTOISO_VALID;
+    if (vcap_window_count != 0u)
+        flags |= DPLS_STATE_RESERVE_VALID;
+    if (line_calib_from_nv)
+        flags |= DPLS_STATE_ADC_CALIBRATED;
+    return flags;
 }
 
 static void identify_led(void *context, bool enabled)
@@ -669,6 +690,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.voltage_mv = voltage_mv;
     hal.power_source = power_source;
     hal.reserve_low = reserve_low;
+    hal.measurement_validity = measurement_validity;
     hal.real_short_active = real_short_active;
     hal.identify_led = identify_led;
     hal.random_bytes = random_bytes;

@@ -38,6 +38,14 @@ data class DeviceState(
     val revision: Long,
     /** Wall-clock millis when this snapshot was received from the device. */
     val receivedAtMillis: Long = 0L,
+    /** STATE_REPORT validity mask (byte 16). A clear bit means the field is not
+     * actually measured (e.g. ADC sampling disabled) and must not be shown as
+     * a real value. Legacy 16-byte reports default every bit to valid. */
+    val lineVoltageValid: Boolean = true,
+    val reserveValid: Boolean = true,
+    val powerValid: Boolean = true,
+    val autoIsoValid: Boolean = true,
+    val adcCalibrated: Boolean = false,
 )
 
 data class EventRecord(
