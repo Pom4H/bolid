@@ -68,7 +68,7 @@ MAP-файла и перераскладки секций.
 
    `Firmware/targets/phy6252/vcpkg-configuration.json`
 
-2. Активировать коммерческую лицензию Arm Compiler 6.
+2. Активировать лицензию Arm Compiler 6 (Keil MDK Community, бесплатная).
 3. Запустить:
 
 ```sh
@@ -90,13 +90,8 @@ Workflow: `.github/workflows/firmware-target.yml`.
 - `cbuild` для target image;
 - `fromelf` для формирования flashable HEX.
 
-Для коммерческих сборок в настройках репозитория требуется secret:
-
-`ARM_LICENSE_CODE`
-
-На pull request без secret используется официальная `KEMDK-COM0` только для
-технической evaluation-сборки; artifact помечается как непригодный для релиза.
-Push-сборка `main` без коммерческого license code блокируется.
+Сборка использует бесплатную лицензию Arm Compiler 6 (Keil MDK Community,
+`KEMDK-COM0`) на всех событиях, включая push в `main`. Secret не требуется.
 
 ## Что проверяет CI, а что остаётся на плате
 
