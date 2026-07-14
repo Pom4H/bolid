@@ -9,6 +9,8 @@ import ru.bolid.testdpls.DplsApplication
 import ru.bolid.testdpls.ble.BleClient
 import ru.bolid.testdpls.ble.DplsMode
 import ru.bolid.testdpls.ble.DplsUiState
+import ru.bolid.testdpls.ble.dplsEventTitle
+import ru.bolid.testdpls.ble.dplsEventTime
 import kotlinx.coroutines.flow.StateFlow
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -56,15 +58,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         app.stopService(Intent(app, BleConnectionService::class.java))
     }
 
+    private fun currentRunFirstSeq(): Long =
+        uiState.value.eventLog.filter { it.type == 1 }.maxOfOrNull { it.sequence } ?: 0L
+
     fun eventLogCsv(): String = buildString {
-        appendLine("sequence;timestamp_seconds;event_type;parameter")
-        uiState.value.eventLog.forEach { appendLine("${it.sequence};${it.timestampSeconds};${it.type};${it.parameter}") }
+        val boot = uiState.value.deviceBootEpochSeconds
+        val firstSeq = currentRunFirstSeq()
+        appendLine("sequence;datetime;uptime_seconds;event_type;parameter;event")
+        uiState.value.eventLog.forEach {
+            val ts = dplsEventTime(it, firstSeq, boot)
+            appendLine("${it.sequence};${ts.full};${it.timestampSeconds};${it.type};${it.parameter};\"${dplsEventTitle(it.type, it.parameter)}\"")
+        }
     }
 
     fun eventLogTxt(): String = buildString {
+        val boot = uiState.value.deviceBootEpochSeconds
+        val firstSeq = currentRunFirstSeq()
         appendLine("Журнал событий Тест-ДПЛС")
+        appendLine("Устройство: ${uiState.value.deviceInfo?.userName ?: uiState.value.selectedDevice?.userName ?: "—"}")
+        appendLine("Записей: ${uiState.value.eventLog.size}")
+        appendLine("—".repeat(32))
         uiState.value.eventLog.forEach {
-            appendLine("#${it.sequence}  t=${it.timestampSeconds} с  событие ${it.type}  параметр ${it.parameter}")
+            val ts = dplsEventTime(it, firstSeq, boot)
+            appendLine("#${it.sequence}  ${ts.full}  ${dplsEventTitle(it.type, it.parameter)}")
         }
     }
 
