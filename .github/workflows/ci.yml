@@ -8,19 +8,16 @@ on:
 jobs:
   firmware-host-tests:
     # Portable DPLS core (protocol, server, LED, calibration) built with the
-    # system compiler and exercised by ctest. The target PHY6252 image is built
-    # separately with the proprietary ARM Compiler (tools/build_firmware.sh) and
-    # is out of scope for hosted CI.
-    name: Firmware host tests
+    # system compiler, exercised by ctest and checked with cppcheck. The target
+    # PHY6252 image and the third-party SDK are checked separately.
+    name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S Firmware -B Firmware/build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build Firmware/build
-      - name: Test
-        run: ctest --test-dir Firmware/build --output-on-failure
+      - name: Install firmware lint tools
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Build, test and lint firmware
+        run: bash tools/lint_firmware.sh
 
   android:
     name: Android build + unit tests
