@@ -355,6 +355,14 @@ class BleClient(context: Context) {
         handler.post { changePassword(current.toCharArray(), new.toCharArray()) }
     }
 
+    /** DEBUG-only: рвёт ТОЛЬКО текущий GATT-линк (BT остаётся включён, процесс
+     * жив, cachedVerifier сохраняется) — детерминированно воспроизводит потерю
+     * линка на GATT-133 в окне смены пароля для e2e-теста рассинхрона. */
+    @SuppressLint("MissingPermission")
+    fun dropLinkForE2e() {
+        handler.post { gatt?.disconnect() }
+    }
+
     fun authenticate(password: CharArray) {
         if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
         handler.removeCallbacks(preAuthKeepAlive)

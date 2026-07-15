@@ -48,6 +48,7 @@ class DplsApplication : Application() {
                         val next = intent.getStringExtra(EXTRA_E2E_NEW_PASSWORD) ?: return
                         bleClient.changePasswordForE2e(current, next)
                     }
+                    ACTION_E2E_DROP_LINK -> bleClient.dropLinkForE2e()
                 }
             }
         }
@@ -62,6 +63,7 @@ class DplsApplication : Application() {
             addAction(ACTION_E2E_LOAD_JOURNAL)
             addAction(ACTION_E2E_SET_NAME)
             addAction(ACTION_E2E_SET_PASSWORD)
+            addAction(ACTION_E2E_DROP_LINK)
         }
         registerReceiver(e2eReceiver, filter, RECEIVER_EXPORTED)
     }
@@ -77,6 +79,7 @@ class DplsApplication : Application() {
         const val ACTION_E2E_LOAD_JOURNAL = "ru.bolid.testdpls.E2E_LOAD_JOURNAL"
         const val ACTION_E2E_SET_NAME = "ru.bolid.testdpls.E2E_SET_NAME"
         const val ACTION_E2E_SET_PASSWORD = "ru.bolid.testdpls.E2E_SET_PASSWORD"
+        const val ACTION_E2E_DROP_LINK = "ru.bolid.testdpls.E2E_DROP_LINK"
         const val EXTRA_E2E_NAME = "name"
         const val EXTRA_E2E_PASSWORD = "password"
         const val EXTRA_E2E_NEW_PASSWORD = "new_password"
