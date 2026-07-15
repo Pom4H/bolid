@@ -1,0 +1,6 @@
+# The PHY62XX SDK is third-party legacy code. Keep clangd focused on the
+# project-owned firmware instead of surfacing thousands of vendor diagnostics.
+Diagnostics:
+  Suppress: '*'
+Index:
+  Background: Skip
