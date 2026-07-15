@@ -64,6 +64,13 @@ class BleClient(context: Context) {
     private var deviceNonce = ByteArray(16)
     private var authSalt = ByteArray(16)
     private var cachedVerifier: ByteArray? = null
+    // A password change interrupted before its SETTINGS_RESULT: the firmware
+    // commits the new password unconditionally on receiving PASSWORD_SET, so the
+    // device may already be on the new password while we still hold the old
+    // verifier. Stash the new verifier and try it once if the old one is rejected
+    // on the reconnect, instead of dead-ending the user on "wrong password".
+    private var interruptedNewVerifier: ByteArray? = null
+    private var triedInterruptedVerifier = false
     private var pendingSetupName: String? = null
 
     /** One in-flight settings change. Typed so a NAME_SET result can never be
@@ -93,6 +100,12 @@ class BleClient(context: Context) {
         handler.removeCallbacks(settingsOpTimeout)
         (pendingSettings as? PendingSettings.Password)?.newVerifier?.fill(0)
         pendingSettings = null
+    }
+
+    private fun clearInterruptedVerifier() {
+        interruptedNewVerifier?.fill(0)
+        interruptedNewVerifier = null
+        triedInterruptedVerifier = false
     }
 
     private fun armPendingSettings(op: PendingSettings) {
@@ -345,6 +358,9 @@ class BleClient(context: Context) {
     fun authenticate(password: CharArray) {
         if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
         handler.removeCallbacks(preAuthKeepAlive)
+        // The user supplied a password explicitly — any stashed interrupted-change
+        // verifier is no longer relevant.
+        clearInterruptedVerifier()
         val verifier = deriveVerifier(password, authSalt)
         password.fill('\u0000')
         cachedVerifier = verifier
@@ -659,6 +675,7 @@ class BleClient(context: Context) {
         selectedAddress = null
         cachedVerifier?.fill(0)
         cachedVerifier = null
+        clearInterruptedVerifier()
         disconnectGatt(clearSelection = true)
         _uiState.value = DplsUiState()
     }
@@ -723,6 +740,7 @@ class BleClient(context: Context) {
                 if (selectedAddress == null) {
                     cachedVerifier?.fill(0)
                     cachedVerifier = null
+                    clearInterruptedVerifier()
                 }
                 if (wasLoadingLog) {
                     handler.removeCallbacks(logLoadTimeout)
@@ -925,6 +943,26 @@ class BleClient(context: Context) {
                     return
                 }
                 if (!ok) {
+                    // The old verifier was rejected but a password change was
+                    // interrupted before its confirmation: the device may already
+                    // be on the new password. Try the stashed new verifier once
+                    // before surfacing an error, so a link drop mid-change doesn't
+                    // lock the user out of a device that did accept the change.
+                    val stash = interruptedNewVerifier
+                    if (retryAfter == 0 && stash != null && !triedInterruptedVerifier) {
+                        triedInterruptedVerifier = true
+                        interruptedNewVerifier = null
+                        Log.w(TAG, "Auth rejected with old verifier; retrying interrupted new-password verifier")
+                        cachedVerifier?.fill(0)
+                        cachedVerifier = stash
+                        // Pace past the firmware's min auth interval so this second
+                        // proof on the same challenge isn't dropped as too-soon.
+                        handler.postDelayed({
+                            if (gatt != null && !_uiState.value.authenticated) sendAuthProof(stash)
+                        }, AUTH_RETRY_INTERVAL_MS)
+                        return
+                    }
+                    clearInterruptedVerifier()
                     _uiState.update { it.copy(awaitingUserPassword = true) }
                     if (retryAfter > 0) {
                         Log.i(TAG, "E2E auth blocked seconds=$retryAfter")
@@ -933,6 +971,7 @@ class BleClient(context: Context) {
                     }
                     return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
                 }
+                clearInterruptedVerifier()
                 if (payload.remaining() >= 8) payload.get(sessionToken)
                 _uiState.update {
                     it.copy(
@@ -1472,6 +1511,7 @@ class BleClient(context: Context) {
         sessionToken.fill(0)
         cachedVerifier?.fill(0)
         cachedVerifier = null
+        clearInterruptedVerifier()
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.RECONNECTING,
@@ -1494,10 +1534,16 @@ class BleClient(context: Context) {
         sessionToken.fill(0)
         // A settings change that never got its SETTINGS_RESULT is void: drop it
         // so a later operation's result can't be misattributed (e.g. a NAME_SET
-        // result adopting a stale password verifier). If the device did save a
-        // new password before the link died, auto-reauth with the old verifier
-        // fails and the user is simply asked for the password again.
+        // result adopting a stale password verifier). But a PASSWORD_SET may have
+        // reached the device (which commits unconditionally) before the link
+        // died, so stash its new verifier: if auto-reauth with the old verifier
+        // is rejected on the reconnect, we try the new one before giving up.
         if (pendingSettings != null) {
+            (pendingSettings as? PendingSettings.Password)?.let { op ->
+                interruptedNewVerifier?.fill(0)
+                interruptedNewVerifier = op.newVerifier.copyOf()
+                triedInterruptedVerifier = false
+            }
             clearPendingSettings()
             _uiState.update { st ->
                 if (st.settingsOp == SettingsOp.IN_PROGRESS)
@@ -1651,6 +1697,9 @@ class BleClient(context: Context) {
         private const val MAX_INITIAL_RECONNECT_ATTEMPTS = 3
         private const val MAX_BOND_RECOVERY = 3
         private const val PRE_AUTH_GATT133_RECOVERY_THRESHOLD = 2
+        // Pace the interrupted-change verifier retry past the firmware's minimum
+        // auth interval (DPLS_AUTH_MIN_INTERVAL_MS ≈ 1 s) so it isn't dropped.
+        private const val AUTH_RETRY_INTERVAL_MS = 1_300L
         private const val BOND_CLEAR_WAIT_MS = 6_000L
         private const val BOND_CLEAR_POLL_MS = 200L
         // 17 = ATT_ERR_INSUFFICIENT_RESOURCES: the device's RX queue is full and
