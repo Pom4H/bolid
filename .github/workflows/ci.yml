@@ -23,7 +23,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firmware-cppcheck
-          path: tmp/cppcheck.txt
+          path: |
+            tmp/cppcheck.txt
+            Firmware/tests/test_server.c
           if-no-files-found: warn
 
   android:
