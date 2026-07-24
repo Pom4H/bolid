@@ -1,5 +1,7 @@
 package ru.bolid.testdpls.ble
 
+import java.util.Calendar
+
 enum class DplsMode(
     val wire: Int,
     val title: String,
@@ -16,10 +18,30 @@ enum class DplsMode(
     SHORT_2(4, "КЗ +2", true, "Порт +2", "КДЛ: «Короткое замыкание ДПЛС»"),
     SHORT_T(5, "КЗ +Т", true, "Ответвление +Т", "КДЛ: «Короткое замыкание ДПЛС»");
 
-    companion object { fun fromWire(value: Int) = entries.firstOrNull { it.wire == value } }
+    companion object {
+        fun fromWire(value: Int) = entries.firstOrNull { it.wire == value }
+    }
 }
 
 enum class PowerSource(val title: String) { DPLS("ДПЛС"), RESERVE("Резерв") }
+
+enum class RssiQuality(val title: String) {
+    UNKNOWN("Нет данных"),
+    GOOD("Хорошая связь"),
+    MEDIUM("Средняя связь"),
+    WEAK("Слабая связь"),
+}
+
+fun rssiQuality(rssi: Int?): RssiQuality = when {
+    rssi == null -> RssiQuality.UNKNOWN
+    rssi >= -65 -> RssiQuality.GOOD
+    rssi >= -80 -> RssiQuality.MEDIUM
+    else -> RssiQuality.WEAK
+}
+
+/** Пароль по ТЗ: не менее 8 символов, только латинские буквы и цифры. */
+fun isValidDplsPassword(value: CharSequence): Boolean =
+    value.length >= 8 && value.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' }
 
 /**
  * Отметка времени записи журнала. Для событий текущего запуска (sequence не
@@ -32,13 +54,13 @@ data class DplsEventTime(val dateLabel: String?, val time: String, val full: Str
 
 fun dplsEventTime(e: EventRecord, currentRunFirstSeq: Long, bootEpochSec: Long?): DplsEventTime {
     if (e.sequence >= currentRunFirstSeq && bootEpochSec != null) {
-        val cal = java.util.Calendar.getInstance().apply { timeInMillis = (bootEpochSec + e.timestampSeconds) * 1000L }
-        val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
-        val mo = cal.get(java.util.Calendar.MONTH) + 1
-        val y = cal.get(java.util.Calendar.YEAR)
-        val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
-        val mi = cal.get(java.util.Calendar.MINUTE)
-        val s = cal.get(java.util.Calendar.SECOND)
+        val cal = Calendar.getInstance().apply { timeInMillis = (bootEpochSec + e.timestampSeconds) * 1000L }
+        val d = cal.get(Calendar.DAY_OF_MONTH)
+        val mo = cal.get(Calendar.MONTH) + 1
+        val y = cal.get(Calendar.YEAR)
+        val h = cal.get(Calendar.HOUR_OF_DAY)
+        val mi = cal.get(Calendar.MINUTE)
+        val s = cal.get(Calendar.SECOND)
         val time = "%02d:%02d:%02d".format(h, mi, s)
         return DplsEventTime(
             dateLabel = "%02d.%02d.%04d".format(d, mo, y),
@@ -84,7 +106,7 @@ private fun dplsAutoReturnTitle(reason: Int): String = when (reason) {
 
 enum class ConnectionPhase {
     IDLE, SCANNING, CONNECTING, PAIRING, NEGOTIATING_MTU, DISCOVERING,
-    SUBSCRIBING, AUTHENTICATING, SYNCHRONIZING, READY, RECONNECTING, ERROR
+    SUBSCRIBING, AUTHENTICATING, SYNCHRONIZING, READY, RECONNECTING, ERROR,
 }
 
 data class DiscoveredDevice(
@@ -93,6 +115,8 @@ data class DiscoveredDevice(
     val userName: String?,
     val deviceId: Long?,
     val rssi: Int,
+    /** Advertising текущей прошивки не передаёт этот признак, поэтому null = неизвестно до HELLO. */
+    val initialized: Boolean? = null,
 )
 
 data class DeviceState(
@@ -107,9 +131,7 @@ data class DeviceState(
     val revision: Long,
     /** Wall-clock millis when this snapshot was received from the device. */
     val receivedAtMillis: Long = 0L,
-    /** STATE_REPORT validity mask (byte 16). A clear bit means the field is not
-     * actually measured (e.g. ADC sampling disabled) and must not be shown as
-     * a real value. Legacy 16-byte reports default every bit to valid. */
+    /** STATE_REPORT validity mask. */
     val lineVoltageValid: Boolean = true,
     val reserveValid: Boolean = true,
     val powerValid: Boolean = true,
@@ -124,8 +146,6 @@ data class EventRecord(
     val parameter: Int,
 )
 
-/** Device identity/capabilities from DEVICE_INFO_REPORT — replaces the hard-coded
- * "1.0.0 / DPLS00100001" strings the About screen used to show. */
 data class DeviceInfo(
     val deviceId: Long,
     val protocolVersion: Int,
@@ -136,18 +156,12 @@ data class DeviceInfo(
     val adcCalibrated: Boolean,
     val userName: String,
 ) {
-    /** Stable short id shown to the operator, e.g. "DPLS-1FE3D5C3". */
     val shortId: String get() = "DPLS-%08X".format(deviceId)
 }
 
-/** Outcome of a settings change (name/password), surfaced to the edit screens. */
 enum class SettingsOp { NONE, IN_PROGRESS, DONE, FAILED }
 
-/**
- * UTF-8 encode [value] truncated to at most [maxBytes] WITHOUT splitting a
- * multi-byte character: a Cyrillic name byte-sliced at the limit would produce
- * broken UTF-8 on the device. Builds up code point by code point.
- */
+/** UTF-8 truncation without splitting a multi-byte code point. */
 internal fun utf8Truncate(value: String, maxBytes: Int): ByteArray {
     var end = 0
     var bytes = 0
@@ -175,27 +189,33 @@ data class DplsUiState(
     val staleState: Boolean = false,
     val lastAckMillis: Long? = null,
     val eventLog: List<EventRecord> = emptyList(),
-    /** Phone wall-clock epoch (s) when device uptime was 0; used to show journal time on phone. */
     val deviceBootEpochSeconds: Long? = null,
     val logProgress: Float? = null,
     val identifyActive: Boolean = false,
     val identifyLedLive: Boolean = false,
+    val identifyRemainingSeconds: Int = 0,
     val setupName: String = "",
     val setupPassword: String = "",
     val setupRepeatPassword: String = "",
-    /** True when UI should collect password/setup; false during auto-reauth after setup or cached login. */
     val awaitingUserPassword: Boolean = false,
     val deviceInfo: DeviceInfo? = null,
-    /** State of an in-flight name/password change (drives the edit screens). */
     val settingsOp: SettingsOp = SettingsOp.NONE,
     val settingsError: String? = null,
+    val localValidationError: String? = null,
+    val authLockoutSeconds: Int = 0,
+    val connectionRssi: Int? = null,
+    val connectionRssiUpdatedAtMillis: Long? = null,
+    val permissionRecoveryRequired: Boolean = false,
     val error: String? = null,
 ) {
     val controlsEnabled: Boolean
         get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
 
+    val passwordInputEnabled: Boolean
+        get() = authLockoutSeconds <= 0
+
     val setupFormReady: Boolean
         get() = credentialsReady &&
-            setupPassword.length >= 8 &&
+            isValidDplsPassword(setupPassword) &&
             (initialized || (setupRepeatPassword == setupPassword && setupName.isNotBlank()))
 }
