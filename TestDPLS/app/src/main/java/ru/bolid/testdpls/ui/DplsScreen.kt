@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -743,7 +744,7 @@ private fun Screen(
     title: String,
     back: (() -> Unit)? = null,
     scroll: Boolean = true,
-    content: @Composable Column.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Row(
@@ -775,7 +776,7 @@ private fun Screen(
 }
 
 @Composable
-private fun SectionCard(content: @Composable Column.() -> Unit) {
+private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -786,7 +787,7 @@ private fun SectionCard(content: @Composable Column.() -> Unit) {
 }
 
 @Composable
-private fun ErrorCard(message: String, actions: @Composable (() -> Unit)? = null) {
+private fun ErrorCard(message: String, actions: (@Composable () -> Unit)? = null) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Text(message, color = MaterialTheme.colorScheme.onErrorContainer)

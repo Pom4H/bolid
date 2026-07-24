@@ -9,7 +9,6 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -18,6 +17,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -137,6 +137,25 @@ class BleClient(context: Context) {
     private var reconnectRunnable: Runnable? = null
     private var pairingTimeoutRunnable: Runnable? = null
     private var pairingPollRunnable: Runnable? = null
+
+    private val rssiReader = object : Runnable {
+        @SuppressLint("MissingPermission")
+        override fun run() {
+            val current = gatt ?: return
+            current.readRemoteRssi()
+            if (gatt === current) handler.postDelayed(this, RSSI_READ_INTERVAL_MS)
+        }
+    }
+
+    private fun startRssiMonitor() {
+        handler.removeCallbacks(rssiReader)
+        handler.post(rssiReader)
+    }
+
+    private fun stopRssiMonitor() {
+        handler.removeCallbacks(rssiReader)
+    }
+
     private var e2eModeTarget: DplsMode? = null
     private var e2eModePhase = E2eModePhase.DONE
     private var e2eModeDeadlineMs = 0L
@@ -189,7 +208,7 @@ class BleClient(context: Context) {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    val device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) ?: return
+                    val device = intent.bluetoothDeviceExtra() ?: return
                     if (device.address != selectedAddress) return
                     when (device.bondState) {
                         BluetoothDevice.BOND_BONDED -> {
@@ -223,13 +242,47 @@ class BleClient(context: Context) {
         val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply {
             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
         }
-        appContext.registerReceiver(
-            bluetoothReceiver,
-            filter,
-            // Bond and adapter state are emitted by Android's Bluetooth
-            // process, not by this application.
-            Context.RECEIVER_EXPORTED,
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            appContext.registerReceiver(bluetoothReceiver, filter)
+        }
+    }
+
+    private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun writeDescriptorCompat(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        value: ByteArray,
+    ): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeDescriptor(descriptor, value)
+    } else {
+        descriptor.value = value
+        if (gatt.writeDescriptor(descriptor)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun writeCharacteristicCompat(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+    ): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+    } else {
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        characteristic.value = value
+        if (gatt.writeCharacteristic(characteristic)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
     }
 
     @SuppressLint("MissingPermission")
@@ -725,6 +778,7 @@ class BleClient(context: Context) {
             lastKnownBondState = current.device.bondState
             Log.i(TAG, "Connection state status=$status state=$newState bond=${current.device.bondState}")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                startRssiMonitor()
                 when (current.device.bondState) {
                     BluetoothDevice.BOND_BONDED -> beginGattNegotiation()
                     BluetoothDevice.BOND_BONDING -> {
@@ -741,6 +795,7 @@ class BleClient(context: Context) {
                     }
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                stopRssiMonitor()
                 val phase = _uiState.value.phase
                 val wasLoadingLog = _uiState.value.logProgress != null
                 current.close()
@@ -795,8 +850,8 @@ class BleClient(context: Context) {
             _uiState.update { it.copy(phase = ConnectionPhase.SUBSCRIBING, statusText = "Подключение…") }
             if (!gatt.setCharacteristicNotification(tx, true)) return fail("Не удалось включить уведомления")
             val cccd = tx!!.getDescriptor(CCCD_UUID) ?: return fail("Дескриптор уведомлений не найден")
-            val result = gatt.writeDescriptor(cccd, byteArrayOf(0x03, 0x00))
-            if (result != BluetoothStatusCodes.SUCCESS) fail("Не удалось подписаться: $result")
+            val result = writeDescriptorCompat(gatt, cccd, byteArrayOf(0x03, 0x00))
+            if (result != GATT_WRITE_SUCCESS) fail("Не удалось подписаться: $result")
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -817,7 +872,24 @@ class BleClient(context: Context) {
             }
         }
 
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            handleCharacteristicValue(gatt, characteristic, characteristic.value ?: return)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            handleCharacteristicValue(gatt, characteristic, value)
+        }
+
+        private fun handleCharacteristicValue(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
             if (gatt !== this@BleClient.gatt || characteristic.uuid != TX_UUID) return
             Log.i(TAG, "RX indication bytes=${value.size}")
             val frame = value.copyOf()
@@ -825,6 +897,16 @@ class BleClient(context: Context) {
                 handler.post { handleFrame(frame) }
             } else {
                 handleFrame(frame)
+            }
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (gatt !== this@BleClient.gatt || status != BluetoothGatt.GATT_SUCCESS) return
+            _uiState.update {
+                it.copy(
+                    connectionRssi = rssi,
+                    connectionRssiUpdatedAtMillis = System.currentTimeMillis(),
+                )
             }
         }
 
@@ -1371,8 +1453,8 @@ class BleClient(context: Context) {
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
         pendingWrite = bytes
-        val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        if (result != BluetoothStatusCodes.SUCCESS) {
+        val result = writeCharacteristicCompat(current, characteristic, bytes)
+        if (result != GATT_WRITE_SUCCESS) {
             writeInProgress = false
             handleWriteFailure(result)
         }
@@ -1620,6 +1702,7 @@ class BleClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun closeCurrentGatt() {
+        stopRssiMonitor()
         val current = gatt
         gatt = null
         current?.disconnect()
@@ -1686,7 +1769,8 @@ class BleClient(context: Context) {
 
     companion object {
         private const val TAG = "TestDplsBle"
-        private const val SCAN_DURATION_MS = 20_000L
+        private const val SCAN_DURATION_MS = 60_000L
+        private const val RSSI_READ_INTERVAL_MS = 2_000L
         private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val PAIRING_POLL_MS = 250L
         private const val COMMAND_TIMEOUT_MS = 3_000L
@@ -1717,6 +1801,8 @@ class BleClient(context: Context) {
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
         private const val MANUFACTURER_ID = 0x0B01
+        private const val GATT_WRITE_SUCCESS = 0
+        private const val GATT_WRITE_FAILED = -1
         val SERVICE_UUID: UUID = UUID.fromString("7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001")
         val RX_UUID: UUID = UUID.fromString("7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001")
         val TX_UUID: UUID = UUID.fromString("7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001")
