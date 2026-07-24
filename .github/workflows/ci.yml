@@ -66,6 +66,35 @@ jobs:
       - name: Unit tests
         working-directory: TestDPLS
         run: ./gradlew --no-daemon testDebugUnitTest
+      - name: JaCoCo coverage
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon jacocoTestReport
+      - name: Coverage summary
+        shell: python
+        run: |
+          import os
+          import xml.etree.ElementTree as ET
+          report = "TestDPLS/app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+          root = ET.parse(report).getroot()
+          counters = {item.attrib["type"]: item.attrib for item in root.findall("counter")}
+          def metric(kind):
+              covered = int(counters[kind]["covered"])
+              missed = int(counters[kind]["missed"])
+              total = covered + missed
+              percent = covered * 100.0 / total if total else 100.0
+              return covered, total, percent
+          line = metric("LINE")
+          branch = metric("BRANCH")
+          instruction = metric("INSTRUCTION")
+          text = (
+              f"## Android unit-test coverage\n\n"
+              f"- Lines: **{line[2]:.2f}%** ({line[0]}/{line[1]})\n"
+              f"- Branches: **{branch[2]:.2f}%** ({branch[0]}/{branch[1]})\n"
+              f"- Instructions: **{instruction[2]:.2f}%** ({instruction[0]}/{instruction[1]})\n"
+          )
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(text)
       - name: Android lint
         working-directory: TestDPLS
         run: ./gradlew --no-daemon lintDebug
@@ -95,5 +124,6 @@ jobs:
           if-no-files-found: warn
           path: |
             TestDPLS/app/build/reports/tests/
+            TestDPLS/app/build/reports/jacoco/
             TestDPLS/app/build/reports/lint-results-*.html
             TestDPLS/app/build/reports/lint-results-*.xml
