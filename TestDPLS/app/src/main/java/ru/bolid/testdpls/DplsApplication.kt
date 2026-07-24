@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
-import android.os.Build
+import androidx.core.content.ContextCompat
 import ru.bolid.testdpls.ble.BleClient
 
 class DplsApplication : Application() {
@@ -66,12 +66,12 @@ class DplsApplication : Application() {
             addAction(ACTION_E2E_SET_PASSWORD)
             addAction(ACTION_E2E_DROP_LINK)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(e2eReceiver, filter, RECEIVER_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(e2eReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            e2eReceiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED,
+        )
     }
 
     companion object {
