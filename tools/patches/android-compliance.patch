@@ -1,0 +1,393 @@
+diff --git a/TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt b/TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+index 52430e6..1111111 100644
+--- a/TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
++++ b/TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+@@ -11,7 +11,6 @@ import android.bluetooth.BluetoothGattCharacteristic
+ import android.bluetooth.BluetoothGattDescriptor
+ import android.bluetooth.BluetoothManager
+ import android.bluetooth.BluetoothProfile
+-import android.bluetooth.BluetoothStatusCodes
+ import android.bluetooth.le.ScanCallback
+ import android.bluetooth.le.ScanFilter
+ import android.bluetooth.le.ScanResult
+@@ -20,6 +19,7 @@ import android.content.Context
+ import android.content.Intent
+ import android.content.IntentFilter
++import android.os.Build
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.ParcelUuid
+@@ -139,6 +139,102 @@ class BleClient(context: Context) {
+     private var reconnectRunnable: Runnable? = null
+     private var pairingTimeoutRunnable: Runnable? = null
+     private var pairingPollRunnable: Runnable? = null
++    private var connectionTimeoutRunnable: Runnable? = null
++    private var identifySecondsRemaining = 0
++    private var authLockoutSeconds = 0
++
++    private val identifyTicker = object : Runnable {
++        override fun run() {
++            if (!_uiState.value.identifyActive || ! _uiState.value.identifyLedLive) {
++                stopIdentifyCountdown()
++                return
++            }
++            identifySecondsRemaining--
++            if (identifySecondsRemaining <= 0) {
++                identifyAfterConnect = false
++                pendingIdentifyAck = false
++                _uiState.update {
++                    it.copy(
++                        identifyActive = false,
++                        identifyLedLive = false,
++                        identifyRemainingSeconds = 0,
++                    )
++                }
++                if (gatt != null && rx != null) sendPriority(DplsProtocol.Type.IDENTIFY_STOP)
++                return
++            }
++            _uiState.update { it.copy(identifyRemainingSeconds = identifySecondsRemaining) }
++            handler.postDelayed(this, 1_000L)
++        }
++    }
++
++    private val authLockoutTicker = object : Runnable {
++        override fun run() {
++            authLockoutSeconds--
++            if (authLockoutSeconds <= 0) {
++                authLockoutSeconds = 0
++                _uiState.update {
++                    it.copy(
++                        authLockoutSeconds = 0,
++                        phase = ConnectionPhase.AUTHENTICATING,
++                        statusText = "Можно повторить ввод пароля",
++                        error = null,
++                    )
++                }
++                return
++            }
++            _uiState.update { it.copy(authLockoutSeconds = authLockoutSeconds) }
++            handler.postDelayed(this, 1_000L)
++        }
++    }
++
++    private val rssiReader = object : Runnable {
++        @SuppressLint("MissingPermission")
++        override fun run() {
++            val current = gatt ?: return
++            current.readRemoteRssi()
++            if (gatt === current) handler.postDelayed(this, RSSI_READ_INTERVAL_MS)
++        }
++    }
++
++    private fun startIdentifyCountdown() {
++        handler.removeCallbacks(identifyTicker)
++        identifySecondsRemaining = IDENTIFY_DURATION_SECONDS
++        _uiState.update { it.copy(identifyRemainingSeconds = identifySecondsRemaining) }
++        handler.postDelayed(identifyTicker, 1_000L)
++    }
++
++    private fun stopIdentifyCountdown() {
++        handler.removeCallbacks(identifyTicker)
++        identifySecondsRemaining = 0
++        _uiState.update { it.copy(identifyRemainingSeconds = 0) }
++    }
++
++    private fun startAuthLockout(seconds: Int) {
++        handler.removeCallbacks(authLockoutTicker)
++        authLockoutSeconds = seconds.coerceAtLeast(0)
++        _uiState.update { it.copy(authLockoutSeconds = authLockoutSeconds) }
++        if (authLockoutSeconds > 0) handler.postDelayed(authLockoutTicker, 1_000L)
++    }
++
++    private fun stopAuthLockout() {
++        handler.removeCallbacks(authLockoutTicker)
++        authLockoutSeconds = 0
++        _uiState.update { it.copy(authLockoutSeconds = 0) }
++    }
++
++    private fun scheduleConnectionTimeout() {
++        cancelConnectionTimeout()
++        connectionTimeoutRunnable = Runnable {
++            connectionTimeoutRunnable = null
++            if (_uiState.value.phase in CONNECTING_PHASES) {
++                fail("Не удалось подключиться к устройству за 10 секунд")
++                closeCurrentGatt()
++            }
++        }.also { handler.postDelayed(it, CONNECTION_TIMEOUT_MS) }
++    }
++
++    private fun cancelConnectionTimeout() {
++        connectionTimeoutRunnable?.let(handler::removeCallbacks)
++        connectionTimeoutRunnable = null
++    }
++
++    private fun startRssiMonitor() {
++        handler.removeCallbacks(rssiReader)
++        handler.post(rssiReader)
++    }
++
++    private fun stopRssiMonitor() {
++        handler.removeCallbacks(rssiReader)
++    }
++
+     private var e2eModeTarget: DplsMode? = null
+     private var e2eModePhase = E2eModePhase.DONE
+     private var e2eModeDeadlineMs = 0L
+@@ -192,7 +288,7 @@ class BleClient(context: Context) {
+         @SuppressLint("MissingPermission")
+         override fun onReceive(context: Context?, intent: Intent?) {
+             when (intent?.action) {
+                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+-                    val device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) ?: return
++                    val device = intent.bluetoothDeviceExtra() ?: return
+                     if (device.address != selectedAddress) return
+                     when (device.bondState) {
+@@ -224,15 +320,32 @@ class BleClient(context: Context) {
+         val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply {
+             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+         }
+-        appContext.registerReceiver(
+-            bluetoothReceiver,
+-            filter,
+-            // Bond and adapter state are emitted by Android's Bluetooth
+-            // process, not by this application.
+-            Context.RECEIVER_EXPORTED,
+-        )
++        registerBluetoothReceiver(filter)
++    }
++
++    private fun registerBluetoothReceiver(filter: IntentFilter) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            appContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
++        } else {
++            @Suppress("DEPRECATION")
++            appContext.registerReceiver(bluetoothReceiver, filter)
++        }
++    }
++
++    private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
++        } else {
++            @Suppress("DEPRECATION")
++            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
++        }
++
++    @Suppress("DEPRECATION")
++    @SuppressLint("MissingPermission")
++    private fun writeDescriptorCompat(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, value: ByteArray): Int {
++        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            gatt.writeDescriptor(descriptor, value)
++        } else {
++            descriptor.value = value
++            if (gatt.writeDescriptor(descriptor)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
++        }
++    }
++
++    @Suppress("DEPRECATION")
++    @SuppressLint("MissingPermission")
++    private fun writeCharacteristicCompat(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray): Int {
++        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            gatt.writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
++        } else {
++            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
++            characteristic.value = value
++            if (gatt.writeCharacteristic(characteristic)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
++        }
+     }
+@@ -287,6 +400,7 @@ class BleClient(context: Context) {
+         val connection = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+         gatt = connection
++        scheduleConnectionTimeout()
+         Log.i(TAG, "connectGatt address=$address attempt=$reconnectAttempt")
+     }
+@@ -307,6 +421,7 @@ class BleClient(context: Context) {
+     fun stopIdentify() {
+         identifyAfterConnect = false
+         pendingIdentifyAck = false
++        stopIdentifyCountdown()
+         _uiState.update { it.copy(identifyActive = false, identifyLedLive = false) }
+         if (gatt != null && rx != null) sendPriority(DplsProtocol.Type.IDENTIFY_STOP, byteArrayOf())
+     }
+@@ -366,7 +481,11 @@ class BleClient(context: Context) {
+     }
+ 
+     fun authenticate(password: CharArray) {
+-        if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
++        if (_uiState.value.authLockoutSeconds > 0) {
++            password.fill('\u0000')
++            return
++        }
++        if (!isValidDplsPassword(password.concatToString())) return fail("Пароль: не менее 8 символов, только латинские буквы и цифры")
+         handler.removeCallbacks(preAuthKeepAlive)
+@@ -378,7 +497,7 @@ class BleClient(context: Context) {
+ 
+     fun setup(deviceName: String, password: CharArray) {
+         if (deviceName.isBlank()) return fail("Введите имя устройства")
+-        if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
++        if (!isValidDplsPassword(password.concatToString())) return fail("Пароль: не менее 8 символов, только латинские буквы и цифры")
+         val salt = ByteArray(16).also(random::nextBytes)
+@@ -459,10 +578,10 @@ class BleClient(context: Context) {
+     }
+ 
+     fun changePassword(current: CharArray, new: CharArray) {
+-        if (new.size < 8) {
++        if (!isValidDplsPassword(new.concatToString())) {
+             current.fill('\u0000'); new.fill('\u0000')
+-            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Пароль должен содержать не менее 8 символов") }
++            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Пароль: не менее 8 символов, только латинские буквы и цифры") }
+             return
+         }
+@@ -727,6 +846,7 @@ class BleClient(context: Context) {
+             lastKnownBondState = current.device.bondState
+             Log.i(TAG, "Connection state status=$status state=$newState bond=${current.device.bondState}")
+             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
++                startRssiMonitor()
+                 when (current.device.bondState) {
+@@ -743,6 +863,8 @@ class BleClient(context: Context) {
+                 }
+             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
++                cancelConnectionTimeout()
++                stopRssiMonitor()
+                 val phase = _uiState.value.phase
+@@ -797,8 +919,9 @@ class BleClient(context: Context) {
+             if (status != BluetoothGatt.GATT_SUCCESS || rx == null || tx == null) return fail("Служба Test-DPLS не найдена")
+             _uiState.update { it.copy(phase = ConnectionPhase.SUBSCRIBING, statusText = "Подключение…") }
+             if (!gatt.setCharacteristicNotification(tx, true)) return fail("Не удалось включить уведомления")
+             val cccd = tx!!.getDescriptor(CCCD_UUID) ?: return fail("Дескриптор уведомлений не найден")
+-            val result = gatt.writeDescriptor(cccd, byteArrayOf(0x03, 0x00))
+-            if (result != BluetoothStatusCodes.SUCCESS) fail("Не удалось подписаться: $result")
++            val result = writeDescriptorCompat(gatt, cccd, byteArrayOf(0x03, 0x00))
++            if (result != GATT_WRITE_SUCCESS) fail("Не удалось подписаться: $result")
+         }
+@@ -811,6 +934,7 @@ class BleClient(context: Context) {
+             ) return
+             Log.i(TAG, "CCCD written status=$status")
+             if (status != BluetoothGatt.GATT_SUCCESS) return fail("Подписка на BLE-события отклонена")
++            cancelConnectionTimeout()
+             clientNonce = ByteArray(16).also(random::nextBytes)
+@@ -826,13 +950,31 @@ class BleClient(context: Context) {
+             }
+         }
+ 
++        @Suppress("DEPRECATION")
++        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
++            handleCharacteristicValue(gatt, characteristic, characteristic.value ?: return)
++        }
++
+         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
++            handleCharacteristicValue(gatt, characteristic, value)
++        }
++
++        private fun handleCharacteristicValue(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+             if (gatt !== this@BleClient.gatt || characteristic.uuid != TX_UUID) return
+             Log.i(TAG, "RX indication bytes=${value.size}")
+             val frame = value.copyOf()
+             if (_uiState.value.logProgress != null) {
+                 handler.post { handleFrame(frame) }
+             } else {
+                 handleFrame(frame)
+             }
+         }
++
++        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
++            if (gatt !== this@BleClient.gatt || status != BluetoothGatt.GATT_SUCCESS) return
++            _uiState.update {
++                it.copy(connectionRssi = rssi, connectionRssiUpdatedAtMillis = System.currentTimeMillis())
++            }
++        }
+@@ -852,6 +994,7 @@ class BleClient(context: Context) {
+             if (pendingIdentifyAck) {
+                 pendingIdentifyAck = false
+                 _uiState.update { it.copy(identifyLedLive = true) }
++                startIdentifyCountdown()
+                 Log.i(TAG, "E2E identify led live")
+@@ -980,6 +1123,7 @@ class BleClient(context: Context) {
+                     _uiState.update { it.copy(awaitingUserPassword = true) }
+                     if (retryAfter > 0) {
++                        startAuthLockout(retryAfter)
+                         Log.i(TAG, "E2E auth blocked seconds=$retryAfter")
+@@ -988,6 +1132,7 @@ class BleClient(context: Context) {
+                     return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
+                 }
++                stopAuthLockout()
+                 clearInterruptedVerifier()
+@@ -1367,8 +1512,8 @@ class BleClient(context: Context) {
+         writeInProgress = true
+         pendingWrite = bytes
+-        val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+-        if (result != BluetoothStatusCodes.SUCCESS) {
++        val result = writeCharacteristicCompat(current, characteristic, bytes)
++        if (result != GATT_WRITE_SUCCESS) {
+             writeInProgress = false
+@@ -1511,6 +1656,10 @@ class BleClient(context: Context) {
+         handler.removeCallbacks(keepAlive)
+         handler.removeCallbacks(stateRefresh)
++        cancelConnectionTimeout()
++        stopRssiMonitor()
++        stopIdentifyCountdown()
++        stopAuthLockout()
+         cancelPairingTimeout()
+@@ -1605,6 +1754,10 @@ class BleClient(context: Context) {
+         handler.removeCallbacks(keepAlive)
+         handler.removeCallbacks(stateRefresh)
++        cancelConnectionTimeout()
++        stopRssiMonitor()
++        stopIdentifyCountdown()
++        stopAuthLockout()
+         cancelPairingTimeout()
+@@ -1624,6 +1777,8 @@ class BleClient(context: Context) {
+     @SuppressLint("MissingPermission")
+     private fun closeCurrentGatt() {
++        cancelConnectionTimeout()
++        stopRssiMonitor()
+         val current = gatt
+@@ -1689,7 +1844,10 @@ class BleClient(context: Context) {
+     companion object {
+         private const val TAG = "TestDplsBle"
+-        private const val SCAN_DURATION_MS = 20_000L
++        private const val SCAN_DURATION_MS = 60_000L
++        private const val CONNECTION_TIMEOUT_MS = 10_000L
++        private const val RSSI_READ_INTERVAL_MS = 2_000L
++        private const val IDENTIFY_DURATION_SECONDS = 60
+         private const val PAIRING_TIMEOUT_MS = 45_000L
+@@ -1717,6 +1875,14 @@ class BleClient(context: Context) {
+         private const val PREFERRED_MTU = 247
+         private const val MANUFACTURER_ID = 0x0B01
++        private const val GATT_WRITE_SUCCESS = 0
++        private const val GATT_WRITE_FAILED = -1
++        private val CONNECTING_PHASES = setOf(
++            ConnectionPhase.CONNECTING,
++            ConnectionPhase.PAIRING,
++            ConnectionPhase.NEGOTIATING_MTU,
++            ConnectionPhase.DISCOVERING,
++            ConnectionPhase.SUBSCRIBING,
++        )
+         val SERVICE_UUID: UUID = UUID.fromString("7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001")
+diff --git a/TestDPLS/app/src/main/java/ru/bolid/testdpls/ui/DplsScreen.kt b/TestDPLS/app/src/main/java/ru/bolid/testdpls/ui/DplsScreen.kt
+index 6024b24..2222222 100644
+--- a/TestDPLS/app/src/main/java/ru/bolid/testdpls/ui/DplsScreen.kt
++++ b/TestDPLS/app/src/main/java/ru/bolid/testdpls/ui/DplsScreen.kt
+@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.ColumnScope
+ import androidx.compose.foundation.layout.Row
+@@ -678,7 +679,7 @@ private fun Screen(
+     title: String,
+     back: (() -> Unit)? = null,
+     scroll: Boolean = true,
+-    content: @Composable Column.() -> Unit,
++    content: @Composable ColumnScope.() -> Unit,
+ ) {
+@@ -708,7 +709,7 @@ private fun Screen(
+ }
+ 
+ @Composable
+-private fun SectionCard(content: @Composable Column.() -> Unit) {
++private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
+@@ -722,7 +723,7 @@ private fun SectionCard(content: @Composable Column.() -> Unit) {
+ }
+ 
+ @Composable
+-private fun ErrorCard(message: String, actions: @Composable (() -> Unit)? = null) {
++private fun ErrorCard(message: String, actions: (@Composable () -> Unit)? = null) {
