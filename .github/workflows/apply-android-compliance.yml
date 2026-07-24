@@ -1,4 +1,4 @@
-name: Apply Android compliance patch
+name: Apply Android compliance migration
 
 on:
   push:
@@ -18,13 +18,12 @@ jobs:
         with:
           ref: agent/android-tz-compliance
           fetch-depth: 0
-      - name: Apply staged patch
+      - name: Apply deterministic source migration
         shell: bash
         run: |
           set -euo pipefail
-          test -f tools/patches/android-compliance.patch
-          git apply --check tools/patches/android-compliance.patch
-          git apply tools/patches/android-compliance.patch
+          python3 tools/apply_android_compliance.py
+          git rm tools/apply_android_compliance.py
           git rm tools/patches/android-compliance.patch
           git rm .github/workflows/apply-android-compliance.yml
           git diff --check
