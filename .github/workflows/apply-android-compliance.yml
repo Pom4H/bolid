@@ -3,6 +3,8 @@ name: Apply Android compliance patch
 on:
   push:
     branches: [agent/android-tz-compliance]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
