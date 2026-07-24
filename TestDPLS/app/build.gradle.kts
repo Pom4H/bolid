@@ -1,9 +1,17 @@
 import java.util.Properties
+import org.gradle.api.tasks.testing.Test
+import org.gradle.testing.jacoco.plugins.JacocoTaskExtension
+import org.gradle.testing.jacoco.tasks.JacocoReport
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    jacoco
+}
+
+jacoco {
+    toolVersion = "0.8.12"
 }
 
 val keystoreProperties = Properties().apply {
@@ -70,6 +78,50 @@ android {
     lint {
         abortOnError = true
         checkReleaseBuilds = true
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    extensions.configure<JacocoTaskExtension> {
+        isIncludeNoLocationClasses = true
+        excludes = listOf("jdk.internal.*")
+    }
+}
+
+val coverageExclusions = listOf(
+    "**/R.class",
+    "**/R\$*.class",
+    "**/BuildConfig.*",
+    "**/Manifest*.*",
+    "**/*Preview*.*",
+)
+
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+        csv.required.set(false)
+    }
+
+    val buildDirFile = layout.buildDirectory.get().asFile
+    classDirectories.setFrom(
+        fileTree("$buildDirFile/tmp/kotlin-classes/debug") {
+            exclude(coverageExclusions)
+        },
+    )
+    sourceDirectories.setFrom(files("src/main/java", "src/main/kotlin"))
+    executionData.setFrom(
+        fileTree(buildDirFile) {
+            include("jacoco/testDebugUnitTest.exec")
+        },
+    )
+
+    doFirst {
+        check(executionData.files.any { it.exists() }) {
+            "JaCoCo execution data was not produced by testDebugUnitTest"
+        }
     }
 }
 
