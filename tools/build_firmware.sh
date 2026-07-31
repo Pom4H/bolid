@@ -11,8 +11,9 @@
 #   DPLS_ADC=0 tools/build_firmware.sh tmp/test-dpls-adcoff.hex      # without ADC
 #
 # The committed adapter keeps ADC sampling off (DPLS_ADC_SAMPLING 0). DPLS_ADC=1
-# applies the two checked SDK 3.1.2 ADC changes to the working-tree copy for the
-# build and restores the source afterwards; DPLS_ADC=0 builds the source as-is.
+# flips that define on the working-tree copy for the build and restores the
+# source afterwards; DPLS_ADC=0 builds the source as-is. Sequential single-channel
+# ADC kicks and hal_adc_start(INTERRUPT_MODE) are already in the committed source.
 #
 # Activate Firmware/targets/phy6252/vcpkg-configuration.json first, or run the
 # GitHub Actions target workflow which does that automatically.
@@ -47,9 +48,9 @@ for tool in cbuild fromelf python3; do
     fi
 done
 
-# DPLS_ADC=1: enable ADC sampling by applying the two checked 3.1.2 API changes
-# to the working-tree copy only, restoring the source even when compilation
-# fails. DPLS_ADC=0: build the committed source unchanged (ADC off).
+# DPLS_ADC=1: enable ADC sampling by flipping DPLS_ADC_SAMPLING on the
+# working-tree copy only, restoring the source even when compilation fails.
+# DPLS_ADC=0: build the committed source unchanged (ADC off).
 if [ "$DPLS_ADC" = "1" ]; then
     echo "ADC sampling: ENABLED"
     APP_BACKUP="$(mktemp)"

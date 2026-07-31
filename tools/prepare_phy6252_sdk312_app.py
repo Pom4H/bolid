@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Apply the two source-level API changes required by PHY62XX SDK 3.1.2.
+"""Enable ADC sampling in the PHY6252 adapter for a target build.
 
-The migration branch keeps the production adapter shared with main while the
-new SDK is being validated. The build script applies this transformation to the
-working-tree copy and restores the original file through a shell trap.
+The committed adapter keeps DPLS_ADC_SAMPLING at 0 so a bare kit build without
+this step stays safe (floating P20/P23 read as low reserve). Product builds with
+DPLS_ADC=1 flip the define on a working-tree copy; the build script restores the
+file afterwards.
 
-Every replacement is exact and count-checked: if the shared source changes,
-the target build fails rather than silently producing a partially migrated
-image.
+SDK 3.1.2 API usage (hal_adc_start(INTERRUPT_MODE)) and sequential single-channel
+kicks live in the committed source — this script only toggles the enable flag.
 """
 from __future__ import annotations
 
@@ -35,19 +35,6 @@ def main() -> None:
         "#define DPLS_ADC_SAMPLING 0",
         "#define DPLS_ADC_SAMPLING 1",
         "enable ADC sampling",
-    )
-
-    text = replace_once(
-        text,
-        "    hal_adc_start();\n",
-        """    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
-        /* Configuration has already claimed the analog pins and ADCC power
-         * lock. Release both if the 3.1.2 start operation is rejected. */
-        (void)hal_adc_stop();
-        adc_busy = false;
-    }
-""",
-        "adapt hal_adc_start API",
     )
 
     path.write_text(text, encoding="utf-8")

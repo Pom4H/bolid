@@ -73,10 +73,14 @@ DPLS_ADC=1 tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex  # с ADC
 DPLS_ADC=0 tools/build_firmware.sh tmp/test-dpls-adcoff.hex     # без ADC
 ```
 
-При `DPLS_ADC=1` скрипт `tools/prepare_phy6252_sdk312_app.py` применяет к
-рабочей копии `dpls_phy6252_app.c` два проверенных изменения (включение
-сэмплирования и `hal_adc_start(INTERRUPT_MODE)` API 3.1.2) и откатывает файл
-после сборки. CI (`firmware-target.yml`) собирает оба образа одним артефактом.
+При `DPLS_ADC=1` скрипт `tools/prepare_phy6252_sdk312_app.py` включает
+`DPLS_ADC_SAMPLING` в рабочей копии `dpls_phy6252_app.c` и откатывает файл
+после сборки. Каналы P20/P23 опрашиваются **по одному** за преобразование —
+вендорный ISR SDK 3.1.2 обрабатывает IRQ только при `status == all_channels`,
+и одновременный dual-channel kick может зависнуть при неодновременном
+завершении (см. `tests/test_adc_irq_model.c`). API
+`hal_adc_start(INTERRUPT_MODE)` уже в исходниках. CI (`firmware-target.yml`)
+собирает оба образа одним артефактом.
 
 Образ **без ADC** нужен для голого PB-03F-Kit: там входы P20/P23 висят в
 воздухе, резерв читается как «низкий», и защита мгновенно снимает любой

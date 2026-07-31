@@ -50,19 +50,16 @@
  * ≤0.5 mA budget. */
 #define DPLS_ADC_DECIMATE 5u
 #define DPLS_ADC_WINDOW 8u
-/* ADC sampling. The ISR was reworked to be minimal (raw copy + task wake) with
- * all scaling/calibration moved to the OSAL task — the correct structure and a
- * prerequisite for enabling this. BUT a hardware soak (2026-07-14) showed the
- * watchdog reset loop persists even with the minimal ISR: ~9 resets in 45 s the
- * moment sampling is enabled. That rules out the heavy-ISR hypothesis and points
- * at ADC↔radio/clock coexistence in adc_kick (hal_adc_config_channel/
- * hal_adc_start re-touching CLKHF/DLL each kick), which needs PHY62xx-specific
- * investigation (init the ADC clock once, gate sampling to BLE-idle windows, or
- * an alternate clock source). Kept DISABLED so the device stays stable; the
- * STATE_REPORT validity mask (stage 1) then honestly reports "not measured".
- * The improved ISR/task split above is retained for when the clock issue is
- * fixed. See docs/bring-up-checklist.md §3. */
+/* ADC sampling (line P20 + reserve P23). Default off in the committed source so
+ * a bare PB-03F-Kit build without the prepare step stays safe; the product
+ * image enables it via DPLS_ADC=1 / tools/prepare_phy6252_sdk312_app.py.
+ * Channels are kicked one at a time — PHY62XX SDK 3.1.2 only drains the IRQ
+ * when status == all_channels, so a dual-channel staggered completion can wedge
+ * the handler. See Firmware/tests/test_adc_irq_model.c and
+ * docs/bring-up-checklist.md §3. */
 #define DPLS_ADC_SAMPLING 0
+#define DPLS_ADC_NEED_LINE 0x01u
+#define DPLS_ADC_NEED_VCAP 0x02u
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
  * from its reserve (also true while it is shorting the line in a KZ mode). */
@@ -168,6 +165,7 @@ static uint8_t vcap_window_count, vcap_window_pos;
 static volatile uint16_t cached_line_mv;
 static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
+static uint8_t adc_pending; /* DPLS_ADC_NEED_* bits still owed this cycle */
 static uint8_t adc_decimate;
 static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
@@ -461,12 +459,22 @@ static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t siz
 static void adc_kick(void)
 {
     adc_Cfg_t cfg;
-    if (adc_busy) return;
+    uint8_t channel;
+    uint8_t claim;
+    if (adc_busy || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
-    /* Single-ended P20 (line) and P23 (reserve), standard resolution: the
-     * high-resolution path tops out near 0.8 V, but the dividers keep both pins
-     * near or below ~1 V at full scale. */
-    cfg.channel = ADC_BIT(ADC_CH3P_P20) | ADC_BIT(ADC_CH1P_P23);
+    /* One channel per conversion. Dual-channel kicks hit the vendor
+     * status == all_channels equality check and can leave a pending IRQ uncleared
+     * when P20/P23 complete out of lockstep. Standard resolution: high-res tops
+     * out near 0.8 V, while the dividers keep both pins near or below ~1 V. */
+    if (adc_pending & DPLS_ADC_NEED_LINE) {
+        channel = ADC_BIT(ADC_CH3P_P20);
+        claim = DPLS_ADC_NEED_LINE;
+    } else {
+        channel = ADC_BIT(ADC_CH1P_P23);
+        claim = DPLS_ADC_NEED_VCAP;
+    }
+    cfg.channel = channel;
     cfg.is_continue_mode = FALSE;
     cfg.is_differential_mode = 0u;
     cfg.is_high_resolution = 0u;
@@ -475,7 +483,14 @@ static void adc_kick(void)
         adc_busy = false;
         return;
     }
-    hal_adc_start();
+    /* SDK 3.1.2: INTERRUPT_MODE arms NVIC; plain hal_adc_start() is gone. */
+    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
+        /* Configuration already claimed the analog pins and ADCC power lock. */
+        (void)hal_adc_stop();
+        adc_busy = false;
+        return;
+    }
+    adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
 }
 #endif /* DPLS_ADC_SAMPLING */
 
@@ -492,6 +507,9 @@ void dpls_phy6252_process_adc(void)
         process_adc_channel(ADC_CH1, vcap_raw, vcap_raw_size, &vcap_calib,
                             vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
     }
+    /* Start the sibling channel from task context once the previous one-shot
+     * has released adc_busy (never from the ISR). */
+    adc_kick();
 #endif
 }
 
@@ -1038,6 +1056,7 @@ void dpls_phy6252_tick(void)
 #if DPLS_ADC_SAMPLING
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
+        adc_pending = (uint8_t)(DPLS_ADC_NEED_LINE | DPLS_ADC_NEED_VCAP);
         adc_kick();
     }
 #endif
