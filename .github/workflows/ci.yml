@@ -57,14 +57,19 @@ jobs:
 
           grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P11' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' Firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_STATUS_LED GPIO_P07' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' Firmware/phy6252/dpls_board.h
           grep -q 'ADC_CH3P_P20' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'ADC_CH3N_P15' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_CH2N_P24' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'ADC_CH1P_P23' Firmware/phy6252/dpls_phy6252_app.c
+          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_PIN_LED_GREEN, on ? 1 : 0' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_ADC_NEED_ALL' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
@@ -81,6 +86,8 @@ jobs:
           test ! -f docs/behavior-sim.html
           test ! -f tools/apply_four_channel_adc_release.py
           test ! -f .github/workflows/apply-four-channel-adc.yml
+          test ! -f tools/apply_rgb_preserving_pinout.py
+          test ! -f .github/workflows/apply-rgb-preserving-pinout.yml
           test ! -f tools/patches/android-compliance.patch
           test ! -f tools/apply_android_compliance.py
           test ! -f .github/workflows/apply-android-compliance.yml
@@ -93,6 +100,9 @@ jobs:
           grep -q 'DPLS_PIN_PORT2_ADC' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_PORT_T_ADC' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_VCAP_ADC' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_LED_RED' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_LED_GREEN' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_LED_BLUE' /tmp/test-dpls-behavior-sim.html
 
   android:
     name: Android tests + minified release
