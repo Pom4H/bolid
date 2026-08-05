@@ -50,26 +50,14 @@ jobs:
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
 
-      - name: Build ADC-enabled firmware
+      - name: Build firmware
         shell: bash
-        env:
-          DPLS_ADC: "1"
         run: |
           set -o pipefail
           mkdir -p tmp
-          bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex 2>&1 | tee tmp/ac6-build-adc.log
+          bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex 2>&1 | tee tmp/ac6-build.log
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls-sdk-3.1.2.axf
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls-sdk-3.1.2.map
-
-      - name: Build ADC-disabled firmware
-        shell: bash
-        env:
-          DPLS_ADC: "0"
-        run: |
-          set -o pipefail
-          bash tools/build_firmware.sh tmp/test-dpls-adcoff.hex 2>&1 | tee tmp/ac6-build-noadc.log
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls-adcoff.axf
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls-adcoff.map
 
       - name: Upload target artifacts and build logs
         if: always()
@@ -77,12 +65,8 @@ jobs:
         with:
           name: test-dpls-phy6252-sdk-3.1.2
           path: |
-            tmp/ac6-build-adc.log
-            tmp/ac6-build-noadc.log
+            tmp/ac6-build.log
             tmp/test-dpls-sdk-3.1.2.hex
             tmp/test-dpls-sdk-3.1.2.axf
             tmp/test-dpls-sdk-3.1.2.map
-            tmp/test-dpls-adcoff.hex
-            tmp/test-dpls-adcoff.axf
-            tmp/test-dpls-adcoff.map
           if-no-files-found: error
