@@ -544,6 +544,18 @@ static uint16_t voltage_mv(void *context)
     return cached_line_mv;
 }
 
+static uint16_t port1_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_line_mv;
+}
+
+static uint16_t reserve_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_vcap_mv;
+}
+
 static dpls_power_t power_source(void *context)
 {
     (void)context;
@@ -699,6 +711,7 @@ static void device_info(void *context, dpls_device_info_t *out)
     out->hw_revision = DPLS_HW_REVISION;
     out->capabilities = 0u;
     out->capabilities |= DPLS_CAP_ADC_PRESENT;
+    out->capabilities |= DPLS_CAP_MULTI_VOLTAGE_REPORT;
     if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
     /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
 }
@@ -950,6 +963,8 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.hardware_apply_mode = apply_mode;
     hal.hardware_safe_normal = safe_normal;
     hal.voltage_mv = voltage_mv;
+    hal.port1_voltage_mv = port1_voltage_mv;
+    hal.reserve_voltage_mv = reserve_voltage_mv;
     hal.power_source = power_source;
     hal.reserve_low = reserve_low;
     hal.measurement_validity = measurement_validity;

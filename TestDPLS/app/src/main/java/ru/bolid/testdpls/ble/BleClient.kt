@@ -1208,6 +1208,7 @@ class BleClient(context: Context) {
             adcPresent = (caps and 0x01) != 0,
             hardwareReadback = (caps and 0x02) != 0,
             adcCalibrated = (caps and 0x04) != 0,
+            multiVoltageReport = (caps and 0x08) != 0,
             userName = name,
         )
         _uiState.update { st ->
@@ -1244,6 +1245,13 @@ class BleClient(context: Context) {
         // with ADC sampling disabled, so its 0 mV / LINE values are fabricated —
         // treating them as valid would resurrect the fake readings.
         val validity = if (payload.remaining() >= 1) payload.u8() else 0x00
+        // Firmware 1.1.2+ appends +1, +2, +T and reserve voltages in mV while
+        // retaining the original 17-byte prefix for older clients.
+        val extendedVoltages = payload.remaining() >= 8
+        val port1Voltage = if (extendedVoltages) payload.u16() else voltage
+        val port2Voltage = if (extendedVoltages) payload.u16() else 0
+        val portTVoltage = if (extendedVoltages) payload.u16() else 0
+        val reserveVoltage = if (extendedVoltages) payload.u16() else 0
         val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
         val state = DeviceState(
             mode = mode,
@@ -1260,6 +1268,14 @@ class BleClient(context: Context) {
             powerValid = (validity and 0x04) != 0,
             autoIsoValid = (validity and 0x08) != 0,
             adcCalibrated = (validity and 0x10) != 0,
+            port1VoltageMv = port1Voltage,
+            port2VoltageMv = port2Voltage,
+            portTVoltageMv = portTVoltage,
+            reserveVoltageMv = reserveVoltage,
+            port1VoltageValid = (validity and 0x01) != 0,
+            port2VoltageValid = extendedVoltages && (validity and 0x20) != 0,
+            portTVoltageValid = extendedVoltages && (validity and 0x40) != 0,
+            reserveVoltageValid = extendedVoltages && (validity and 0x02) != 0,
         )
         _uiState.update {
             it.copy(
@@ -1556,8 +1572,7 @@ class BleClient(context: Context) {
         handler.removeCallbacks(stateRefresh)
         if (_uiState.value.logProgress != null) return
         val state = _uiState.value
-        val mode = state.state?.mode
-        if (state.authenticated && !state.commandInProgress && mode != null && mode != DplsMode.NORMAL && gatt != null) {
+        if (state.authenticated && !state.commandInProgress && state.state != null && gatt != null) {
             handler.postDelayed(stateRefresh, STATE_REFRESH_MS)
         }
     }
@@ -1566,7 +1581,7 @@ class BleClient(context: Context) {
         override fun run() {
             val current = _uiState.value
             if (current.logProgress != null) return
-            if (current.authenticated && current.state?.mode != DplsMode.NORMAL && gatt != null) {
+            if (current.authenticated && !current.commandInProgress && current.state != null && gatt != null) {
                 send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
                 handler.postDelayed(this, STATE_REFRESH_MS)
             }

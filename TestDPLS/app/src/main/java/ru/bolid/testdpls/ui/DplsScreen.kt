@@ -488,9 +488,13 @@ private fun OperationScreen(
             Text("Текущий режим", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(device?.mode?.title ?: "Состояние не получено", fontSize = 28.sp, fontWeight = FontWeight.Bold)
             if (state.staleState) Text("Данные устарели: связь восстанавливается", color = MaterialTheme.colorScheme.error)
-            InfoRow("Напряжение ДПЛС", if (device?.lineVoltageValid == true) "%.2f В".format(device.voltageMv / 1000.0) else "Нет данных")
+            Text("Напряжения · обновление каждую секунду", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            InfoRow("Клемма +1", formatVoltage(device?.port1VoltageMv, device?.port1VoltageValid == true))
+            InfoRow("Клемма +2", formatVoltage(device?.port2VoltageMv, device?.port2VoltageValid == true))
+            InfoRow("Клемма +Т", formatVoltage(device?.portTVoltageMv, device?.portTVoltageValid == true))
+            InfoRow("Резерв", formatVoltage(device?.reserveVoltageMv, device?.reserveVoltageValid == true))
             InfoRow("Питание", if (device?.powerValid == true) device.powerSource.title else "Нет данных")
-            InfoRow("Резерв", if (device?.reserveValid == true) if (device.reserveLow) "Низкий заряд" else "Норма" else "Нет данных")
+            InfoRow("Состояние резерва", if (device?.reserveValid == true) if (device.reserveLow) "Низкий заряд" else "Норма" else "Нет данных")
             InfoRow("Автовозврат", device?.automaticReturnSeconds?.let(::formatDuration) ?: "—")
             InfoRow(
                 "Связь",
@@ -701,6 +705,7 @@ private fun DeviceAbout(info: DeviceInfo?) {
             InfoRow("Версия протокола", info.protocolVersion.toString())
             InfoRow("ADC", if (info.adcPresent) "Есть" else "Нет")
             InfoRow("Калибровка ADC", if (info.adcCalibrated) "Выполнена" else "Не выполнена")
+            InfoRow("Телеметрия +1/+2/+Т/резерв", if (info.multiVoltageReport) "Поддерживается" else "Нет")
             InfoRow("Обратная связь выходов", if (info.hardwareReadback) "Есть" else "Нет")
         }
     }
@@ -886,6 +891,9 @@ private fun RssiBars(rssi: Int) {
         }
     }
 }
+
+private fun formatVoltage(millivolts: Int?, valid: Boolean): String =
+    if (valid && millivolts != null) "%.2f В".format(millivolts / 1000.0) else "Нет данных"
 
 private fun formatDuration(seconds: Int): String =
     "%d:%02d".format(seconds.coerceAtLeast(0) / 60, seconds.coerceAtLeast(0) % 60)
