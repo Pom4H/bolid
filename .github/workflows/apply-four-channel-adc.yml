@@ -1,0 +1,70 @@
+name: Apply four-channel ADC release migration
+
+on:
+  push:
+    branches:
+      - release/v1.1.3-rc.1
+    paths:
+      - tools/apply_four_channel_adc_release.py
+      - .github/workflows/apply-four-channel-adc.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-four-channel-adc-release
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: release/v1.1.3-rc.1
+          fetch-depth: 0
+
+      - name: Apply migration
+        run: python3 tools/apply_four_channel_adc_release.py
+
+      - name: Verify source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P11' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
+          grep -q 'ADC_CH3N_P15' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_FW_VERSION_PATCH 3u' Firmware/include/dpls_server.h
+          grep -q 'versionName = "1.1.2"' TestDPLS/app/build.gradle.kts
+          python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
+          grep -q '"firmware":"1.1.3"' /tmp/test-dpls-behavior-sim.html
+
+      - name: Run portable firmware tests and lint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+          bash tools/lint_firmware.sh
+
+      - name: Commit migrated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm tools/apply_four_channel_adc_release.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Firmware/phy6252/dpls_board.h \
+                  Firmware/phy6252/dpls_phy6252_app.c \
+                  Firmware/include/dpls_server.h \
+                  Firmware/README.md \
+                  TestDPLS/app/build.gradle.kts \
+                  docs/live-voltage-requirements.md \
+                  tools/generate_behavior_sim.py \
+                  tools/apply_four_channel_adc_release.py
+          git commit -m 'feat: scan +1 +2 +T and reserve through PHY6252 ADC'
+          git push origin HEAD:release/v1.1.3-rc.1
