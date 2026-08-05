@@ -13,7 +13,7 @@
  * behaviour changes visible to the operator app. */
 #define DPLS_FW_VERSION_MAJOR 1u
 #define DPLS_FW_VERSION_MINOR 1u
-#define DPLS_FW_VERSION_PATCH 0u
+#define DPLS_FW_VERSION_PATCH 1u
 /* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
  * features the hardware/firmware does not actually provide. */
 enum {
@@ -56,8 +56,8 @@ typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
 
 /* Validity mask carried in STATE_REPORT byte 16. A zero measurement is a real
  * value (0 V is a legitimate reading), so the client must not treat it as
- * "measured" unless the matching bit is set. With ADC sampling disabled every
- * bit is 0 and the app shows "—" / "Не определён" instead of fabricated data. */
+ * "measured" unless the matching bit is set. Before the first conversion lands
+ * every bit is 0 and the app shows "—" / "Не определён" instead of a default. */
 enum {
     DPLS_STATE_LINE_VOLTAGE_VALID = 1u << 0,
     DPLS_STATE_RESERVE_VALID      = 1u << 1,
