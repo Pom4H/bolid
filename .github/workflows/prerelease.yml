@@ -41,6 +41,21 @@ jobs:
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
 
+      - name: Verify target pinout
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' Firmware/phy6252/dpls_board.h
+          grep -q 'ADC_CH2N_P24' Firmware/phy6252/dpls_phy6252_app.c
+          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+
       - name: Build firmware
         shell: bash
         run: |
@@ -140,12 +155,14 @@ jobs:
 
           ## Главное
 
-          - PHY6252 последовательно измеряет четыре физических канала один раз в секунду: +1 на P20, +2 на P15, +Т на P11 и резерв на P23;
+          - PHY6252 последовательно измеряет четыре физических канала один раз в секунду: +1 на P20, +2 на P15, +Т на P24 и резерв на P23;
           - внешний ADC и внешний аналоговый мультиплексор не требуются;
-          - для +1/+2/+Т нужны три отдельных входных делителя/защиты 0-30 В на плате hardware revision 2;
+          - для +1/+2/+Т нужны три отдельных входных делителя и защиты 0-30 В на плате hardware revision 2;
           - STATE_REPORT передаёт четыре независимых значения с отдельными validity-флагами; подстановка одного канала в другой запрещена;
           - приложение обновляет показания во всех режимах, включая «Норма»;
-          - целевая распиновка возвращена к архитектуре: KZ_1=P14, STATUS_LED=P7; P11/P15 освобождены от отладочных индикаторов и используются как ADC;
+          - RGB-индикация сохранена: P7 — красный, P11 — зелёный, P18 — синий; идентификация выполняется зелёными вспышками;
+          - P24 отдан под ADC клеммы +Т, поэтому физический сброс настроек перенесён на P34;
+          - KZ_1 остаётся на P14; P15 используется только как ADC клеммы +2;
           - общий raw-буфер сохраняет SRAM при четырёхканальном опросе;
           - Android version 1.1.2, versionCode 5, только minified release без debug-сборки.
 
