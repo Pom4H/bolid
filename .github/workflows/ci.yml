@@ -49,6 +49,8 @@ jobs:
           grep -q 'SCAN_DURATION_MS = 60_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
           grep -q 'CONNECTION_TIMEOUT_MILLIS = 10_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
           grep -q 'IDENTIFY_DURATION_SECONDS = 60' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
+          grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
+          grep -q 'isShrinkResources = true' TestDPLS/app/build.gradle.kts
           test -f TestDPLS/BUILD.md
           test -f docs/android-compliance.md
           test -f docs/android-pmi.md
@@ -59,7 +61,7 @@ jobs:
           test ! -f .github/workflows/apply-android-compliance.yml
 
   android:
-    name: Android build, tests and lint
+    name: Android tests + minified release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,27 +106,24 @@ jobs:
           print(text)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write(text)
-      - name: Android lint
+      - name: Lint release
         working-directory: TestDPLS
-        run: ./gradlew --no-daemon lintDebug
-      - name: Assemble debug APK
-        working-directory: TestDPLS
-        run: ./gradlew --no-daemon assembleDebug
-      - name: Assemble release APK
+        run: ./gradlew --no-daemon lintRelease
+      - name: Assemble minified release APK
         working-directory: TestDPLS
         run: ./gradlew --no-daemon assembleRelease
-      - name: Bundle release AAB
+      - name: Bundle minified release AAB
         working-directory: TestDPLS
         run: ./gradlew --no-daemon bundleRelease
-      - name: Upload Android packages
+      - name: Upload Android release packages
         uses: actions/upload-artifact@v4
         with:
-          name: test-dpls-android-${{ github.sha }}
+          name: test-dpls-android-release-${{ github.sha }}
           if-no-files-found: error
           path: |
-            TestDPLS/app/build/outputs/apk/debug/*.apk
             TestDPLS/app/build/outputs/apk/release/*.apk
             TestDPLS/app/build/outputs/bundle/release/*.aab
+            TestDPLS/app/build/outputs/mapping/release/*
       - name: Upload Android reports
         if: always()
         uses: actions/upload-artifact@v4
