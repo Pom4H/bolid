@@ -9,7 +9,6 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -18,6 +17,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -64,6 +64,13 @@ class BleClient(context: Context) {
     private var deviceNonce = ByteArray(16)
     private var authSalt = ByteArray(16)
     private var cachedVerifier: ByteArray? = null
+    // A password change interrupted before its SETTINGS_RESULT: the firmware
+    // commits the new password unconditionally on receiving PASSWORD_SET, so the
+    // device may already be on the new password while we still hold the old
+    // verifier. Stash the new verifier and try it once if the old one is rejected
+    // on the reconnect, instead of dead-ending the user on "wrong password".
+    private var interruptedNewVerifier: ByteArray? = null
+    private var triedInterruptedVerifier = false
     private var pendingSetupName: String? = null
 
     /** One in-flight settings change. Typed so a NAME_SET result can never be
@@ -95,6 +102,12 @@ class BleClient(context: Context) {
         pendingSettings = null
     }
 
+    private fun clearInterruptedVerifier() {
+        interruptedNewVerifier?.fill(0)
+        interruptedNewVerifier = null
+        triedInterruptedVerifier = false
+    }
+
     private fun armPendingSettings(op: PendingSettings) {
         clearPendingSettings()
         pendingSettings = op
@@ -124,6 +137,25 @@ class BleClient(context: Context) {
     private var reconnectRunnable: Runnable? = null
     private var pairingTimeoutRunnable: Runnable? = null
     private var pairingPollRunnable: Runnable? = null
+
+    private val rssiReader = object : Runnable {
+        @SuppressLint("MissingPermission")
+        override fun run() {
+            val current = gatt ?: return
+            current.readRemoteRssi()
+            if (gatt === current) handler.postDelayed(this, RSSI_READ_INTERVAL_MS)
+        }
+    }
+
+    private fun startRssiMonitor() {
+        handler.removeCallbacks(rssiReader)
+        handler.post(rssiReader)
+    }
+
+    private fun stopRssiMonitor() {
+        handler.removeCallbacks(rssiReader)
+    }
+
     private var e2eModeTarget: DplsMode? = null
     private var e2eModePhase = E2eModePhase.DONE
     private var e2eModeDeadlineMs = 0L
@@ -176,7 +208,7 @@ class BleClient(context: Context) {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    val device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) ?: return
+                    val device = intent.bluetoothDeviceExtra() ?: return
                     if (device.address != selectedAddress) return
                     when (device.bondState) {
                         BluetoothDevice.BOND_BONDED -> {
@@ -210,13 +242,47 @@ class BleClient(context: Context) {
         val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply {
             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
         }
-        appContext.registerReceiver(
-            bluetoothReceiver,
-            filter,
-            // Bond and adapter state are emitted by Android's Bluetooth
-            // process, not by this application.
-            Context.RECEIVER_EXPORTED,
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            appContext.registerReceiver(bluetoothReceiver, filter)
+        }
+    }
+
+    private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun writeDescriptorCompat(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        value: ByteArray,
+    ): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeDescriptor(descriptor, value)
+    } else {
+        descriptor.value = value
+        if (gatt.writeDescriptor(descriptor)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun writeCharacteristicCompat(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+    ): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeCharacteristic(characteristic, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+    } else {
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        characteristic.value = value
+        if (gatt.writeCharacteristic(characteristic)) GATT_WRITE_SUCCESS else GATT_WRITE_FAILED
     }
 
     @SuppressLint("MissingPermission")
@@ -342,9 +408,20 @@ class BleClient(context: Context) {
         handler.post { changePassword(current.toCharArray(), new.toCharArray()) }
     }
 
+    /** DEBUG-only: рвёт ТОЛЬКО текущий GATT-линк (BT остаётся включён, процесс
+     * жив, cachedVerifier сохраняется) — детерминированно воспроизводит потерю
+     * линка на GATT-133 в окне смены пароля для e2e-теста рассинхрона. */
+    @SuppressLint("MissingPermission")
+    fun dropLinkForE2e() {
+        handler.post { gatt?.disconnect() }
+    }
+
     fun authenticate(password: CharArray) {
         if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
         handler.removeCallbacks(preAuthKeepAlive)
+        // The user supplied a password explicitly — any stashed interrupted-change
+        // verifier is no longer relevant.
+        clearInterruptedVerifier()
         val verifier = deriveVerifier(password, authSalt)
         password.fill('\u0000')
         cachedVerifier = verifier
@@ -659,6 +736,7 @@ class BleClient(context: Context) {
         selectedAddress = null
         cachedVerifier?.fill(0)
         cachedVerifier = null
+        clearInterruptedVerifier()
         disconnectGatt(clearSelection = true)
         _uiState.value = DplsUiState()
     }
@@ -700,6 +778,7 @@ class BleClient(context: Context) {
             lastKnownBondState = current.device.bondState
             Log.i(TAG, "Connection state status=$status state=$newState bond=${current.device.bondState}")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                startRssiMonitor()
                 when (current.device.bondState) {
                     BluetoothDevice.BOND_BONDED -> beginGattNegotiation()
                     BluetoothDevice.BOND_BONDING -> {
@@ -716,6 +795,7 @@ class BleClient(context: Context) {
                     }
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                stopRssiMonitor()
                 val phase = _uiState.value.phase
                 val wasLoadingLog = _uiState.value.logProgress != null
                 current.close()
@@ -723,6 +803,7 @@ class BleClient(context: Context) {
                 if (selectedAddress == null) {
                     cachedVerifier?.fill(0)
                     cachedVerifier = null
+                    clearInterruptedVerifier()
                 }
                 if (wasLoadingLog) {
                     handler.removeCallbacks(logLoadTimeout)
@@ -769,8 +850,8 @@ class BleClient(context: Context) {
             _uiState.update { it.copy(phase = ConnectionPhase.SUBSCRIBING, statusText = "Подключение…") }
             if (!gatt.setCharacteristicNotification(tx, true)) return fail("Не удалось включить уведомления")
             val cccd = tx!!.getDescriptor(CCCD_UUID) ?: return fail("Дескриптор уведомлений не найден")
-            val result = gatt.writeDescriptor(cccd, byteArrayOf(0x03, 0x00))
-            if (result != BluetoothStatusCodes.SUCCESS) fail("Не удалось подписаться: $result")
+            val result = writeDescriptorCompat(gatt, cccd, byteArrayOf(0x03, 0x00))
+            if (result != GATT_WRITE_SUCCESS) fail("Не удалось подписаться: $result")
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -791,7 +872,24 @@ class BleClient(context: Context) {
             }
         }
 
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            handleCharacteristicValue(gatt, characteristic, characteristic.value ?: return)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            handleCharacteristicValue(gatt, characteristic, value)
+        }
+
+        private fun handleCharacteristicValue(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
             if (gatt !== this@BleClient.gatt || characteristic.uuid != TX_UUID) return
             Log.i(TAG, "RX indication bytes=${value.size}")
             val frame = value.copyOf()
@@ -799,6 +897,16 @@ class BleClient(context: Context) {
                 handler.post { handleFrame(frame) }
             } else {
                 handleFrame(frame)
+            }
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (gatt !== this@BleClient.gatt || status != BluetoothGatt.GATT_SUCCESS) return
+            _uiState.update {
+                it.copy(
+                    connectionRssi = rssi,
+                    connectionRssiUpdatedAtMillis = System.currentTimeMillis(),
+                )
             }
         }
 
@@ -925,6 +1033,26 @@ class BleClient(context: Context) {
                     return
                 }
                 if (!ok) {
+                    // The old verifier was rejected but a password change was
+                    // interrupted before its confirmation: the device may already
+                    // be on the new password. Try the stashed new verifier once
+                    // before surfacing an error, so a link drop mid-change doesn't
+                    // lock the user out of a device that did accept the change.
+                    val stash = interruptedNewVerifier
+                    if (retryAfter == 0 && stash != null && !triedInterruptedVerifier) {
+                        triedInterruptedVerifier = true
+                        interruptedNewVerifier = null
+                        Log.w(TAG, "Auth rejected with old verifier; retrying interrupted new-password verifier")
+                        cachedVerifier?.fill(0)
+                        cachedVerifier = stash
+                        // Pace past the firmware's min auth interval so this second
+                        // proof on the same challenge isn't dropped as too-soon.
+                        handler.postDelayed({
+                            if (gatt != null && !_uiState.value.authenticated) sendAuthProof(stash)
+                        }, AUTH_RETRY_INTERVAL_MS)
+                        return
+                    }
+                    clearInterruptedVerifier()
                     _uiState.update { it.copy(awaitingUserPassword = true) }
                     if (retryAfter > 0) {
                         Log.i(TAG, "E2E auth blocked seconds=$retryAfter")
@@ -933,6 +1061,7 @@ class BleClient(context: Context) {
                     }
                     return fail(if (retryAfter > 0) "Аутентификация заблокирована на $retryAfter с" else "Неверный пароль")
                 }
+                clearInterruptedVerifier()
                 if (payload.remaining() >= 8) payload.get(sessionToken)
                 _uiState.update {
                     it.copy(
@@ -1324,8 +1453,8 @@ class BleClient(context: Context) {
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
         pendingWrite = bytes
-        val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-        if (result != BluetoothStatusCodes.SUCCESS) {
+        val result = writeCharacteristicCompat(current, characteristic, bytes)
+        if (result != GATT_WRITE_SUCCESS) {
             writeInProgress = false
             handleWriteFailure(result)
         }
@@ -1472,6 +1601,7 @@ class BleClient(context: Context) {
         sessionToken.fill(0)
         cachedVerifier?.fill(0)
         cachedVerifier = null
+        clearInterruptedVerifier()
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.RECONNECTING,
@@ -1494,10 +1624,16 @@ class BleClient(context: Context) {
         sessionToken.fill(0)
         // A settings change that never got its SETTINGS_RESULT is void: drop it
         // so a later operation's result can't be misattributed (e.g. a NAME_SET
-        // result adopting a stale password verifier). If the device did save a
-        // new password before the link died, auto-reauth with the old verifier
-        // fails and the user is simply asked for the password again.
+        // result adopting a stale password verifier). But a PASSWORD_SET may have
+        // reached the device (which commits unconditionally) before the link
+        // died, so stash its new verifier: if auto-reauth with the old verifier
+        // is rejected on the reconnect, we try the new one before giving up.
         if (pendingSettings != null) {
+            (pendingSettings as? PendingSettings.Password)?.let { op ->
+                interruptedNewVerifier?.fill(0)
+                interruptedNewVerifier = op.newVerifier.copyOf()
+                triedInterruptedVerifier = false
+            }
             clearPendingSettings()
             _uiState.update { st ->
                 if (st.settingsOp == SettingsOp.IN_PROGRESS)
@@ -1566,6 +1702,7 @@ class BleClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun closeCurrentGatt() {
+        stopRssiMonitor()
         val current = gatt
         gatt = null
         current?.disconnect()
@@ -1632,7 +1769,8 @@ class BleClient(context: Context) {
 
     companion object {
         private const val TAG = "TestDplsBle"
-        private const val SCAN_DURATION_MS = 20_000L
+        private const val SCAN_DURATION_MS = 60_000L
+        private const val RSSI_READ_INTERVAL_MS = 2_000L
         private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val PAIRING_POLL_MS = 250L
         private const val COMMAND_TIMEOUT_MS = 3_000L
@@ -1651,6 +1789,9 @@ class BleClient(context: Context) {
         private const val MAX_INITIAL_RECONNECT_ATTEMPTS = 3
         private const val MAX_BOND_RECOVERY = 3
         private const val PRE_AUTH_GATT133_RECOVERY_THRESHOLD = 2
+        // Pace the interrupted-change verifier retry past the firmware's minimum
+        // auth interval (DPLS_AUTH_MIN_INTERVAL_MS ≈ 1 s) so it isn't dropped.
+        private const val AUTH_RETRY_INTERVAL_MS = 1_300L
         private const val BOND_CLEAR_WAIT_MS = 6_000L
         private const val BOND_CLEAR_POLL_MS = 200L
         // 17 = ATT_ERR_INSUFFICIENT_RESOURCES: the device's RX queue is full and
@@ -1660,6 +1801,8 @@ class BleClient(context: Context) {
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
         private const val MANUFACTURER_ID = 0x0B01
+        private const val GATT_WRITE_SUCCESS = 0
+        private const val GATT_WRITE_FAILED = -1
         val SERVICE_UUID: UUID = UUID.fromString("7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001")
         val RX_UUID: UUID = UUID.fromString("7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001")
         val TX_UUID: UUID = UUID.fromString("7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001")

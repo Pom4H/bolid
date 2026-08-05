@@ -2,15 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/android-tz-compliance]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   firmware-host-tests:
-    # Portable DPLS core (protocol, server, LED, calibration) built with the
-    # system compiler and exercised by ctest. The target PHY6252 image is built
-    # separately with the proprietary ARM Compiler (tools/build_firmware.sh) and
-    # is out of scope for hosted CI.
     name: Firmware host tests
     runs-on: ubuntu-latest
     steps:
@@ -22,8 +21,36 @@ jobs:
       - name: Test
         run: ctest --test-dir Firmware/build --output-on-failure
 
+  android-contract:
+    name: Android requirements contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'minSdk = 26' TestDPLS/app/build.gradle.kts
+          grep -q 'screenOrientation="portrait"' TestDPLS/app/src/main/AndroidManifest.xml
+          grep -q 'allowBackup="false"' TestDPLS/app/src/main/AndroidManifest.xml
+          grep -q 'androidx.core.content.FileProvider' TestDPLS/app/src/main/AndroidManifest.xml
+          grep -q 'FLAG_SECURE' TestDPLS/app/src/main/java/ru/bolid/testdpls/MainActivity.kt
+          grep -q 'Build.VERSION_CODES.S' TestDPLS/app/src/main/java/ru/bolid/testdpls/MainActivity.kt
+          grep -q 'readRemoteRssi' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'SCAN_DURATION_MS = 60_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'CONNECTION_TIMEOUT_MILLIS = 10_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
+          grep -q 'IDENTIFY_DURATION_SECONDS = 60' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
+          test -f TestDPLS/BUILD.md
+          test -f docs/android-compliance.md
+          test -f docs/android-pmi.md
+          test -f docs/android-operator-guide.md
+          test -f docs/oss-register.md
+          test ! -f tools/patches/android-compliance.patch
+          test ! -f tools/apply_android_compliance.py
+          test ! -f .github/workflows/apply-android-compliance.yml
+
   android:
-    name: Android build + unit tests
+    name: Android build, tests and lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,12 +60,70 @@ jobs:
           java-version: "17"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+      - name: Clean
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon clean
       - name: Unit tests
         working-directory: TestDPLS
-        run: ./gradlew testDebugUnitTest
-      - name: Lint
+        run: ./gradlew --no-daemon testDebugUnitTest
+      - name: JaCoCo coverage
         working-directory: TestDPLS
-        run: ./gradlew lintDebug
+        run: ./gradlew --no-daemon jacocoTestReport
+      - name: Coverage summary
+        shell: python
+        run: |
+          import os
+          import xml.etree.ElementTree as ET
+          report = "TestDPLS/app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+          root = ET.parse(report).getroot()
+          counters = {item.attrib["type"]: item.attrib for item in root.findall("counter")}
+          def metric(kind):
+              covered = int(counters[kind]["covered"])
+              missed = int(counters[kind]["missed"])
+              total = covered + missed
+              percent = covered * 100.0 / total if total else 100.0
+              return covered, total, percent
+          line = metric("LINE")
+          branch = metric("BRANCH")
+          instruction = metric("INSTRUCTION")
+          text = (
+              f"## Android unit-test coverage\n\n"
+              f"- Lines: **{line[2]:.2f}%** ({line[0]}/{line[1]})\n"
+              f"- Branches: **{branch[2]:.2f}%** ({branch[0]}/{branch[1]})\n"
+              f"- Instructions: **{instruction[2]:.2f}%** ({instruction[0]}/{instruction[1]})\n"
+          )
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(text)
+      - name: Android lint
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon lintDebug
       - name: Assemble debug APK
         working-directory: TestDPLS
-        run: ./gradlew assembleDebug
+        run: ./gradlew --no-daemon assembleDebug
+      - name: Assemble release APK
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon assembleRelease
+      - name: Bundle release AAB
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon bundleRelease
+      - name: Upload Android packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-dpls-android-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            TestDPLS/app/build/outputs/apk/debug/*.apk
+            TestDPLS/app/build/outputs/apk/release/*.apk
+            TestDPLS/app/build/outputs/bundle/release/*.aab
+      - name: Upload Android reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-dpls-android-reports-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            TestDPLS/app/build/reports/tests/
+            TestDPLS/app/build/reports/jacoco/
+            TestDPLS/app/build/reports/lint-results-*.html
+            TestDPLS/app/build/reports/lint-results-*.xml
