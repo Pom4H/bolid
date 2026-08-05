@@ -31,7 +31,7 @@ jobs:
           if-no-files-found: warn
 
   android-contract:
-    name: Android requirements contract
+    name: Source and documentation contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,9 +56,17 @@ jobs:
           test -f docs/android-pmi.md
           test -f docs/android-operator-guide.md
           test -f docs/oss-register.md
+          test -f tools/generate_behavior_sim.py
+          test ! -f docs/behavior-sim.html
           test ! -f tools/patches/android-compliance.patch
           test ! -f tools/apply_android_compliance.py
           test ! -f .github/workflows/apply-android-compliance.yml
+      - name: Validate documentation introspection
+        run: |
+          python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
+          test -s /tmp/test-dpls-behavior-sim.html
+          grep -q 'FW 1.1.1' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_LINE_ADC' /tmp/test-dpls-behavior-sim.html
 
   android:
     name: Android tests + minified release
