@@ -14,6 +14,8 @@
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
+#include "mcu.h"
+#include "mcu_phy_bumbee.h"
 
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
@@ -101,6 +103,18 @@ static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
     }
 }
 
+/* P16/P17 are the module's XTAL_32K_IN/OUT pads, but this board carries no
+ * 32.768 kHz crystal — the two pins are the KZ_2 and KZ_T shunt outputs. The
+ * SDK selects CLK_32K_RCOSC (main.c) and then, outside the XOSC_PIN_ALLOW
+ * guard we do not define, still runs "turn on 32kxtal" (clock.c), leaving the
+ * crystal oscillator biased on two digital outputs for the whole run. Clearing
+ * PMCTL0[28] puts the field back to the 0x05 the RCOSC branch itself
+ * programmed; nothing else in the build reads a 32 kHz crystal. */
+static void disable_32k_xtal(void)
+{
+    subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00);
+}
+
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
 static gapBondCBs_t bond_callbacks = { NULL, bond_pair_state_cb };
 
@@ -128,6 +142,13 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
+    /* hal_init() has already run by now, so undo its 32k-crystal bias here and
+     * re-assert it on every wake — the AON domain survives sleep, but the ROM
+     * wake path reprograms the 32 kHz source, so do not assume it stays off.
+     * MOD_USR2, not MOD_USR1: registering USR1 would turn the deliberate no-op
+     * hal_pwrmgr_lock(MOD_USR1) in dpls_phy6252_app.c into a real sleep lock. */
+    disable_32k_xtal();
+    (void)hal_pwrmgr_register(MOD_USR2, NULL, disable_32k_xtal);
     /* The pristine SDK 3.1.2 main.c retains only SRAM0 (0x1fff0000-0x1fff7fff)
      * across sleep, but our scatter places the ER_IROM1 tail past 0x1fff8000
      * (SRAM1) and ER_IROM2 at 0x1fffc000 (SRAM2). With those banks unpowered
