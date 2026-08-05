@@ -24,9 +24,15 @@ jobs:
       - name: Apply source migration
         run: |
           set -euo pipefail
-          python3 tools/apply_live_voltage_release.py
-          rm tools/apply_live_voltage_release.py
-          rm .github/workflows/apply-live-voltage.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path("tools/apply_live_voltage_release.py")
+          source = script.read_text(encoding="utf-8")
+          marker = '\nreplace_all_checked(\n    ".github/workflows/ci.yml",'
+          source = source[:source.index(marker)] + '\nprint("source migration applied")\n'
+          scope = {"__file__": str(script.resolve()), "__name__": "__main__"}
+          exec(compile(source, str(script), "exec"), scope)
+          PY
           git diff --check
 
       - name: Commit source changes
@@ -34,6 +40,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add Firmware TestDPLS docs/live-voltage-requirements.md
           git commit -m "Add real-time multi-voltage telemetry"
           git push origin HEAD:release/v1.1.2-rc.1
