@@ -17,7 +17,7 @@ jobs:
     name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install firmware lint tools
         run: sudo apt-get update && sudo apt-get install -y cppcheck
       - name: Build, test and lint firmware
@@ -34,7 +34,7 @@ jobs:
     name: Source and documentation contracts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Verify required source contracts
         shell: bash
         run: |
@@ -65,14 +65,14 @@ jobs:
         run: |
           python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
           test -s /tmp/test-dpls-behavior-sim.html
-          grep -q 'FW 1.1.1' /tmp/test-dpls-behavior-sim.html
+          grep -q '"firmware":"1.1.1"' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_LINE_ADC' /tmp/test-dpls-behavior-sim.html
 
   android:
     name: Android tests + minified release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
