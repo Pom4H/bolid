@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тест-ДПЛС · интерактивная модель поведения прошивки</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f0f2f5;
+  --ink: #14171c;
+  --ink-dim: #5b6472;
+  --line: #d8dde5;
+  --accent: #2f6fd0;
+  --hot: #d97a12;          /* служебный слой: сигнал активен */
+  --hot-soft: rgba(217, 122, 18, .14);
+  --danger: #c8452f;       /* только проблемы */
+  --ok: #2e8b57;
+  --alt: #7a5bd0;          /* переназначенные выводы — не авария */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --panel: #1b1f26;
+    --panel-2: #22272f;
+    --ink: #e6e9ee;
+    --ink-dim: #93a0b1;
+    --line: #2e353f;
+    --accent: #66a3ff;
+    --hot: #ffa53d;
+    --hot-soft: rgba(255, 165, 61, .18);
+    --danger: #ff7a63;
+    --ok: #5fd39a;
+    --alt: #b39bff;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.wrap { max-width: 1280px; margin: 0 auto; padding: 0 18px 60px; }
+h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+h2 { font-size: 12px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); font-weight: 600; }
+p { margin: 0 0 8px; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: .88em; }
+summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); font-weight: 600; padding: 4px 0; }
+summary::marker { color: var(--ink-dim); }
+
+/* ---------- Зона A: липкая шапка управления ---------- */
+.sticky {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .06);
+}
+.sticky-in { max-width: 1280px; margin: 0 auto; padding: 10px 18px 12px; }
+.headline {
+  font-size: 15px; line-height: 1.45;
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline;
+}
+.headline b { font-weight: 600; }
+.headline .sep { color: var(--line); }
+.hl-dim { color: var(--ink-dim); font-size: 13px; font-family: var(--mono); }
+
+/* ---------- элементы ---------- */
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 14px; }
+.panel.sim { background: transparent; border-style: dashed; }
+.grid { display: grid; gap: 14px; }
+@media (min-width: 1040px) { .grid-2 { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); } }
+.row { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.row + .row { margin-top: 8px; }
+button {
+  font: inherit; font-size: 13px; padding: 6px 11px;
+  border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--ink); cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button kbd { font: 10px var(--mono); opacity: .6; margin-left: 5px; }
+button[aria-pressed="true"] kbd { opacity: .85; }
+.btn-mode { min-width: 96px; }
+
+/* Две дорожки управления: кто действует — оператор из приложения или стенд. */
+.lane { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 8px 0; }
+.lane + .lane { border-top: 1px solid var(--line); }
+.lane-tag {
+  font: 600 10.5px var(--mono); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--ink-dim); width: 92px; flex: 0 0 auto;
+}
+/* Дорожка стенда отделена фоном и цветом метки: это не орган управления прибором. */
+.lane-bench {
+  background: color-mix(in srgb, var(--alt) 7%, transparent);
+  border-radius: 10px; padding: 8px 10px; margin-top: 4px;
+}
+.lane-bench .lane-tag { color: var(--alt); }
+.lane + .lane-bench { border-top: 0; }
+.field { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-dim); }
+.field select, .field input {
+  font: inherit; font-size: 12.5px; padding: 5px 7px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+}
+.field input[type=number] { width: 76px; font-family: var(--mono); }
+.seg { display: inline-flex; gap: 0; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 8px 8px 0; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.note { font-size: 12.5px; color: var(--ink-dim); margin-top: 8px; }
+.src { font-size: 12px; color: var(--ink-dim); font-family: var(--mono); }
+
+.result { font-size: 13px; font-family: var(--mono); padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); }
+.result.warn { border-color: var(--danger); color: var(--danger); }
+.result.ok { border-color: var(--ok); color: var(--ok); }
+
+/* ---------- индикация: физический слой (цвет = цвет светодиода) ---------- */
+.led-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 700px) { .led-grid { grid-template-columns: minmax(0, 1fr); } }
+.led-card {
+  display: flex; align-items: center; gap: 11px;
+  border: 1px solid var(--line); border-left: 4px solid currentColor;
+  border-radius: 10px; padding: 8px 11px; background: var(--panel-2);
+  opacity: .5;
+}
+.led-card.lit { opacity: 1; background: var(--panel); }
+.led-dot {
+  width: 20px; height: 20px; border-radius: 50%; flex: 0 0 auto;
+  background: transparent; border: 2px solid currentColor;
+}
+.led-card.lit .led-dot {
+  width: 26px; height: 26px;
+  background: currentColor;
+  box-shadow: 0 0 0 1px rgba(90, 90, 90, .55), 0 0 16px 3px currentColor;
+}
+.led-meta { min-width: 0; }
+.led-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.led-sub { font-size: 11.5px; color: var(--ink-dim); font-family: var(--mono); }
+.led-lvl { margin-left: auto; font: 600 12px var(--mono); color: var(--ink-dim); }
+.led-card.lit .led-lvl { color: var(--hot); }
+
+/* ---------- таблицы ---------- */
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--ink-dim); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+td.mono, th.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.matrix td, .matrix th { text-align: center; padding: 4px 6px; }
+.matrix td:first-child, .matrix th:first-child { text-align: left; white-space: nowrap; }
+.matrix tr.cur { background: var(--hot-soft); }
+.matrix tr.cur td:first-child { font-weight: 600; }
+.matrix .one { color: var(--hot); font-weight: 700; font-family: var(--mono); }
+.matrix .zero { color: var(--ink-dim); font-family: var(--mono); opacity: .5; }
+.lvl-table td:first-child { font-family: var(--mono); font-size: 12px; }
+
+/* ---------- состояние / журнал ---------- */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; margin: 0; }
+.kv dt { color: var(--ink-dim); }
+.kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; }
+#log { max-height: 220px; overflow-y: auto; font-family: var(--mono); font-size: 12px; white-space: pre; }
+#log div { padding: 1px 0; border-bottom: 1px solid var(--line); }
+#log .r { color: var(--danger); }
+#log .g { color: var(--ok); }
+
+/* ---------- SVG платы ---------- */
+svg { display: block; width: 100%; height: auto; }
+#board { max-width: 900px; margin: 0 auto; }
+.pin-body { fill: var(--panel-2); stroke: var(--line); }
+.pin-body.hi { fill: var(--hot); stroke: var(--hot); }
+.pin-body.io { fill: var(--panel-2); stroke: var(--ink-dim); stroke-dasharray: 3 2; }
+.pin-label { font: 11px var(--mono); fill: var(--ink-dim); }
+.pin-name { font: 600 11.5px var(--mono); fill: var(--ink); }
+.pin-name.hi { fill: var(--hot); }
+.pin-name.on-hi { fill: #1b1f26; }
+.pin-name.dim { fill: var(--ink-dim); }
+.chip { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; }
+.chip-text { font: 600 13px var(--mono); fill: var(--ink-dim); }
+.alt-mark { stroke: var(--alt); stroke-width: 1.3; stroke-dasharray: 4 3; fill: none; }
+.alt-text { font: 10.5px var(--mono); fill: var(--alt); }
+
+/* ---------- врезки ---------- */
+.callout { border-left: 3px solid var(--line); padding: 7px 12px; font-size: 13px; margin-top: 8px; }
+.callout.live { border-color: var(--danger); color: var(--danger); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-dim); }
+.legend i { font-style: normal; display: inline-flex; align-items: center; gap: 5px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<!-- ================= A. Липкая шапка: команда и её результат ================= -->
+<div class="sticky">
+  <div class="sticky-in">
+    <div class="headline" id="headline"></div>
+
+    <div class="lane">
+      <span class="lane-tag">приложение</span>
+      <span id="modes" class="row" style="gap:6px"></span>
+      <button id="btn-ident" aria-pressed="false">поиск прибора</button>
+      <span id="cmd-result" class="result">—</span>
+    </div>
+
+    <div class="lane lane-bench">
+      <span class="lane-tag">стенд</span>
+      <label class="field">связь
+        <select id="sel-link">
+          <option value="poll">сессия, приложение опрашивает</option>
+          <option value="idle">сессия без опроса</option>
+          <option value="anon">подключён, не авторизован</option>
+          <option value="off">отключён</option>
+        </select>
+      </label>
+      <button id="btn-poke" title="разовый STATE_REQUEST продлевает сессию">STATE_REQUEST</button>
+      <label class="field">линия
+        <select id="sel-line"></select>
+        <input type="number" id="num-line" min="0" max="30000" step="100" title="мВ на линии">
+      </label>
+      <label class="field">ионистор
+        <select id="sel-vcap"></select>
+        <input type="number" id="num-vcap" min="0" max="6000" step="50" title="мВ на ионисторе">
+      </label>
+      <span class="seg" id="speed-seg">
+        <button class="speed" data-s="1" aria-pressed="true">×1</button>
+        <button class="speed" data-s="10" aria-pressed="false">×10</button>
+        <button class="speed" data-s="60" aria-pressed="false">×60</button>
+        <button id="btn-pause" aria-pressed="false">пауза</button>
+      </span>
+      <button id="btn-reset">BOOT</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+<div class="panel" style="margin-top:14px">
+  <div class="row" style="justify-content:space-between">
+    <h1>Тест-ДПЛС — модель поведения прошивки</h1>
+    <span class="src" id="stamp"></span>
+  </div>
+  <p class="note" style="margin-top:6px">
+    Логика снята с исходников: режимы и выводы — <code>phy6252/dpls_board.h</code> и
+    <code>dpls_phy6252_app.c</code>, автовозвраты — <code>src/dpls_server.c</code>.
+    Модель, а не эмулятор: тики 200 мс и опрос ADC воспроизведены, BLE-стек, флеш и радио — нет.
+    Расхождение с платой = баг в модели <em>или</em> в прошивке.
+  </p>
+</div>
+
+<!-- ================= B. Что должно быть на плате ================= -->
+<div class="grid grid-2">
+  <div>
+    <div class="panel" style="margin-top:0">
+      <h2>Индикация на плате</h2>
+      <div id="leds" class="led-grid"></div>
+      <div class="note" id="led-note"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Активные уровни</h2>
+      <table class="lvl-table"><tbody id="levels"></tbody></table>
+      <div class="note">
+        Изоляторы (ISO_*) нормально замкнуты — «1» рвёт канал; шунты (KZ_*) нормально
+        разомкнуты — «1» замыкает порт. Одновременно активен максимум один:
+        <code>apply_mode()</code> сначала сбрасывает всё в безопасный уровень
+        (break-before-make) и только потом поднимает нужный.
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" style="margin-top:0">
+      <h2>Состояние</h2>
+      <dl class="kv" id="state"></dl>
+      <div id="live-warn"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Журнал событий</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= D. Матрица режимов ================= -->
+<div class="panel">
+  <h2>Режим → выводы</h2>
+  <table class="matrix"><thead id="matrix-head"></thead><tbody id="matrix-body"></tbody></table>
+  <div class="note">
+    Шпаргалка для щупа: активная «1» = 3,3 В. Текущая строка подсвечена. КЗ +1 поднимает
+    один вывод на два назначения — P07 одновременно силовой выход и красный канал LED1.
+  </div>
+</div>
+
+<!-- ================= F. Справочники ================= -->
+<details class="panel" open>
+  <summary>Цоколёвка модуля PB-03F</summary>
+  <svg id="board" viewBox="0 0 900 470" role="img" aria-label="Цоколёвка модуля PB-03F с текущими уровнями"></svg>
+  <div class="legend" style="margin-top:6px">
+    <i><span class="swatch" style="background:var(--hot)"></span> выход в «1»</i>
+    <i><span class="swatch" style="border:1.5px dashed var(--ink-dim)"></span> вход / аналог</i>
+    <i><span class="swatch" style="border:1.5px dashed var(--alt)"></span> вывод переназначен с кварца 32 кГц</i>
+  </div>
+  <div class="note">
+    Стороны — по цоколёвке модуля (схема кита, U1): выводы 1–8 слева, 9–13 снизу
+    (14 — NC), 15–22 справа. P16/P17 штатно являются ногами XTAL_32K_IN/OUT; кварц не
+    установлен, генератор погашен, выводы отданы под КЗ +2 и КЗ +Т.
+    P24 опрашивается каждые 200 мс, удержание 5 с = сброс пароля.
+  </div>
+</details>
+
+<details class="panel">
+  <summary>Соответствие коду</summary>
+  <table>
+    <thead><tr><th>Правило в модели</th><th>Символ</th><th>Файл</th></tr></thead>
+    <tbody id="srcmap"></tbody>
+  </table>
+  <div class="note" id="srcmap-note"></div>
+</details>
+
+<details class="panel">
+  <summary>Заметки по чтению кода</summary>
+  <div id="notes"></div>
+</details>
+
+</div>
+
+<script>
+"use strict";
+
+/* ================================================================== *
+ * Константы — зеркало заголовков прошивки. Менять только вместе с ними.
+ * ================================================================== */
+const K = {
+  LED_IDENTIFY_HALF_MS: 500,
+  MODE_MAX_MS: 300000, SESSION_TIMEOUT_MS: 10000, IDENTIFY_MAX_MS: 60000,
+  LINE_PRESENT_MV: 4000, LINE_ABSENT_MV: 3000,
+  RESERVE_LOW_MV: 3700, RESERVE_OK_MV: 4000,
+  AUTOISO_TRIP_MV: 3000, AUTOISO_CLEAR_MV: 4500,
+  TICK_MS: 200, ADC_DECIMATE: 5, ADC_WINDOW: 8,
+  LINE_DIVIDER: 31            /* делитель линии ~1/31 (dpls_calib: gain 1/31) */
+};
+const BUILD = { commit: "011cdf0", date: "2026-07-14" };
+
+const MODES = [
+  { id: 0, key: "NORMAL",    label: "Норма",            out: [] },
+  { id: 1, key: "OPEN_T",    label: "Обрыв +Т",         out: ["ISO_T", "LED_OPEN_T"] },
+  { id: 2, key: "OPEN_MAIN", label: "Обрыв магистрали", out: ["ISO_2", "LED_OPEN_MAIN"] },
+  { id: 3, key: "SHORT_1",   label: "КЗ +1",            out: ["KZ_1"] },
+  { id: 4, key: "SHORT_2",   label: "КЗ +2",            out: ["KZ_2", "LED_SHORT_2"] },
+  { id: 5, key: "SHORT_T",   label: "КЗ +Т",            out: ["KZ_T", "LED_SHORT_T"] }
+];
+
+const RETURN_REASON = ["оператор", "таймаут режима", "таймаут сессии", "разрыв связи",
+                       "разряжен резерв", "внутренняя ошибка", "старт", "автоизоляция"];
+const EVT = { 1:"BOOT", 2:"BLE_CONNECTED", 3:"BLE_DISCONNECTED", 4:"AUTH_SUCCESS", 5:"AUTH_FAILURE",
+              6:"AUTH_BLOCKED", 7:"MODE_CHANGED", 8:"MODE_AUTO_RETURN", 9:"IDENTIFY_START",
+              10:"IDENTIFY_STOP", 11:"PASSWORD_SET", 12:"POWER_CHANGED", 13:"RESERVE_LOW",
+              14:"AUTO_ISOLATION" };
+
+/* Сигналы: вывод, что делает, физический смысл активного уровня. */
+const SIGNALS = {
+  ISO_1:         { pin: "P31", what: "изолятор +1",        on: "канал +1 разорван",   unused: true },
+  ISO_2:         { pin: "P32", what: "изолятор магистрали", on: "магистраль разорвана" },
+  ISO_T:         { pin: "P33", what: "изолятор ответвления", on: "ответвление разорвано" },
+  KZ_1:          { pin: "P07", what: "шунт +1",            on: "порт +1 закорочен" },
+  KZ_2:          { pin: "P16", what: "шунт +2",            on: "порт +2 закорочен" },
+  KZ_T:          { pin: "P17", what: "шунт +Т",            on: "порт +Т закорочен" },
+  LED_OPEN_T:    { pin: "P00", what: "LED3 тёплый белый",  on: "горит «Обрыв +Т»" },
+  LED_OPEN_MAIN: { pin: "P34", what: "LED2 холодный белый", on: "горит «Обрыв магистрали»" },
+  LED_SHORT_2:   { pin: "P11", what: "LED1 зелёный",       on: "горит «КЗ +2»" },
+  LED_SHORT_T:   { pin: "P18", what: "LED1 синий",         on: "горит «КЗ +Т»" },
+  STATUS_LED:    { pin: "P14", what: "поиск прибора",      on: "мигает 1 Гц" }
+};
+
+/* Цоколёвка модуля (схема кита, U1): 1–8 слева, 9–13 снизу, 15–22 справа. */
+const PIN_INFO = {
+  P15: { sig: "—",             note: "зарезервирован (на ките — кнопка Restore)" },
+  P11: { sig: "LED_SHORT_2",   note: "зелёный канал LED1" },
+  P31: { sig: "ISO_1",         note: "разрыв +1, режимами не используется" },
+  P07: { sig: "KZ_1",          note: "шунт КЗ +1 и красный канал LED1" },
+  P32: { sig: "ISO_2",         note: "разрыв магистрали" },
+  P33: { sig: "ISO_T",         note: "разрыв ответвления" },
+  P14: { sig: "STATUS_LED",    note: "поиск прибора, светодиод внешний" },
+  VDD: { sig: "3V3",           note: "питание модуля", io: true },
+  P16: { sig: "KZ_2",          note: "шунт КЗ +2", alt: true },
+  P17: { sig: "KZ_T",          note: "шунт КЗ +Т", alt: true },
+  P18: { sig: "LED_SHORT_T",   note: "синий канал LED1" },
+  P00: { sig: "LED_OPEN_T",    note: "LED3, тёплый белый" },
+  P34: { sig: "LED_OPEN_MAIN", note: "LED2, холодный белый" },
+  TXD: { sig: "UART TX",       note: "вывод P09, отладка", io: true },
+  RXD: { sig: "UART RX",       note: "вывод P10, отладка", io: true },
+  P24: { sig: "FACTORY_RESET", note: "сброс пароля, вход с подтяжкой вниз", io: true },
+  P23: { sig: "VCAP_ADC",      note: "ионистор", io: true, analog: "vcap" },
+  P20: { sig: "LINE_ADC",      note: "линия через делитель ~1/31", io: true, analog: "line" },
+  P03: { sig: "SWD_CLK",       note: "отладка и прошивка", io: true },
+  P02: { sig: "SWD_IO",        note: "отладка и прошивка", io: true },
+  GND: { sig: "GND",           note: "общий", io: true }
+};
+const CHIP_LEFT = ["P15", "P11", "P31", "P07", "P32", "P33", "P14", "VDD"];
+const CHIP_BOTTOM = ["P16", "P17", "P18", "P00", "P34"];
+const CHIP_RIGHT = ["TXD", "RXD", "P24", "P23", "P20", "P03", "P02", "GND"];
+
+/* Светодиоды кита и их реальные цвета (схема, лист 13). LED1 — один корпус
+ * RGB5050 с общим катодом: P7 = R, P11 = G, P18 = B, каждый канал через 470 Ом. */
+const LED_CARDS = [
+  { sig: "KZ_1",          name: "КЗ +1",             sub: "LED1 · канал R · красный",  color: "#e8402a" },
+  { sig: "LED_SHORT_2",   name: "КЗ +2",             sub: "LED1 · канал G · зелёный",  color: "#2fa84f" },
+  { sig: "LED_SHORT_T",   name: "КЗ +Т",             sub: "LED1 · канал B · синий",    color: "#3a7bd5" },
+  { sig: "LED_OPEN_MAIN", name: "Обрыв магистрали",  sub: "LED2 · холодный белый",     color: "#dfe9f7" },
+  { sig: "LED_OPEN_T",    name: "Обрыв +Т",          sub: "LED3 · тёплый белый",       color: "#f7e6cd" },
+  { sig: "STATUS_LED",    name: "Поиск прибора",     sub: "внешний · 1 Гц, авто-стоп 60 с", color: "#c8ccd2" }
+];
+
+const MATRIX_SIGNALS = ["ISO_2", "ISO_T", "KZ_1", "KZ_2", "KZ_T",
+                        "LED_OPEN_MAIN", "LED_OPEN_T", "LED_SHORT_2", "LED_SHORT_T"];
+
+/* ================================================================== *
+ * Порт dpls_led.c: светодиод умеет только мигание идентификации
+ * ================================================================== */
+function ledLevel(identify, elapsed) {
+  if (!identify) return false;
+  return (elapsed % (2 * K.LED_IDENTIFY_HALF_MS)) < K.LED_IDENTIFY_HALF_MS;
+}
+
+/* ================================================================== *
+ * Состояние устройства
+ * ================================================================== */
+let S;
+function boot(keep) {
+  const c = keep ? { connected: S.connected, authenticated: S.authenticated, poll: S.poll,
+                     lineMv: S.lineMv, vcapMv: S.vcapMv, speed: S.speed, paused: S.paused }
+                 : { connected: true, authenticated: true, poll: true,
+                     lineMv: 24000, vcapMv: 4800, speed: 1, paused: false };
+  S = {
+    t: 0, speed: c.speed, paused: c.paused,
+    connected: c.connected, authenticated: c.authenticated, poll: c.poll,
+    lineMv: c.lineMv, vcapMv: c.vcapMv,
+
+    /* ADC как в адаптере: опрос каждый 5-й тик, окно из 8 отсчётов */
+    adcDecimate: 0,
+    lineWin: [], vcapWin: [],
+    cachedLineMv: 0, cachedVcapMv: 0,
+    powerReserve: false, reserveLow: false, autoIso: false, lineEstablished: false,
+
+    mode: 0, modeDeadline: 0, lastActivity: 0,
+    identifyActive: false, identifyDeadline: 0,
+    lastPowerReserve: null, lastReserveLow: null, lastRealShort: false,
+    lastResult: { text: "—", cls: "" }, lastReturn: null,
+
+    ledIdentify: false, cycleStart: 0,
+    seq: 1, log: []
+  };
+  logEvent(1, 6);
+}
+
+function logEvent(type, param, cls) {
+  S.log.unshift({ seq: S.seq++, t: S.t, type, param, cls });
+  if (S.log.length > 80) S.log.pop();
+}
+
+/* Окно усреднения: реальные 8 отсчётов, чтобы validity и фронты были честными. */
+function fold(win, value) {
+  win.push(value);
+  if (win.length > K.ADC_WINDOW) win.shift();
+  return Math.round(win.reduce((a, b) => a + b, 0) / win.length);
+}
+
+/* update_power_state() — гистерезис, автоизоляция только в «Норме». */
+function updatePowerState() {
+  if (S.lineWin.length) {
+    const line = S.cachedLineMv;
+    if (!S.powerReserve && line < K.LINE_ABSENT_MV) S.powerReserve = true;
+    else if (S.powerReserve && line > K.LINE_PRESENT_MV) S.powerReserve = false;
+    if (line > K.LINE_PRESENT_MV) S.lineEstablished = true;
+    if (S.lineEstablished && S.mode === 0) {
+      if (!S.autoIso && line < K.AUTOISO_TRIP_MV) S.autoIso = true;
+      else if (S.autoIso && line > K.AUTOISO_CLEAR_MV) S.autoIso = false;
+    }
+  }
+  if (S.vcapWin.length) {
+    const vcap = S.cachedVcapMv;
+    if (!S.reserveLow && vcap < K.RESERVE_LOW_MV) S.reserveLow = true;
+    else if (S.reserveLow && vcap > K.RESERVE_OK_MV) S.reserveLow = false;
+  }
+}
+
+function forceNormal(reason) {
+  if (S.mode === 0) return;
+  S.mode = 0; S.modeDeadline = 0;
+  S.lastReturn = reason;
+  logEvent(8, reason, "r");
+  setResult("MODE_AUTO_RETURN · " + RETURN_REASON[reason], "warn");
+}
+
+/* dpls_server_tick() */
+function serverTick() {
+  if (S.lastPowerReserve === null) { S.lastPowerReserve = S.powerReserve; S.lastReserveLow = S.reserveLow; }
+  else {
+    if (S.powerReserve !== S.lastPowerReserve) { S.lastPowerReserve = S.powerReserve; logEvent(12, S.powerReserve ? 1 : 0); }
+    if (S.reserveLow !== S.lastReserveLow) { S.lastReserveLow = S.reserveLow; logEvent(13, S.reserveLow ? 1 : 0); }
+  }
+  if (S.autoIso !== S.lastRealShort) { S.lastRealShort = S.autoIso; logEvent(14, S.autoIso ? 1 : 0); }
+  if (S.autoIso && S.mode !== 0) forceNormal(7);
+  else if (S.mode !== 0 && S.modeDeadline && S.t >= S.modeDeadline) forceNormal(1);
+  else if (S.mode !== 0 && (!S.authenticated || S.t >= S.lastActivity + K.SESSION_TIMEOUT_MS)) forceNormal(2);
+  else if (S.mode !== 0 && S.reserveLow) forceNormal(4);
+  if (S.identifyActive && S.t >= S.identifyDeadline) { S.identifyActive = false; logEvent(10, 0); }
+}
+
+/* Тик приложения: ADC → питание → ядро. */
+function appTick() {
+  if (++S.adcDecimate >= K.ADC_DECIMATE) {
+    S.adcDecimate = 0;
+    S.cachedLineMv = fold(S.lineWin, S.lineMv);
+    S.cachedVcapMv = fold(S.vcapWin, S.vcapMv);
+  }
+  /* Клиент опрашивает состояние — сессия живёт, как на реальном стенде. */
+  if (S.poll && S.connected && S.authenticated) S.lastActivity = S.t;
+  updatePowerState();
+  serverTick();
+}
+
+
+function setResult(text, cls) { S.lastResult = { text, cls: cls || "" }; }
+
+/* handle_mode() */
+function setMode(id) {
+  if (!S.connected || !S.authenticated) { logEvent(5, 2, "r"); setResult("ERROR 2 · нет сессии", "warn"); return; }
+  S.lastActivity = S.t;
+  if (id !== 0 && S.autoIso) { setResult("COMMAND_RESULT status=5 · блокировано автоизоляцией", "warn"); return; }
+  const prev = S.mode;
+  S.mode = id;
+  S.modeDeadline = id === 0 ? 0 : S.t + K.MODE_MAX_MS;
+  if (id !== prev) { logEvent(7, id, "g"); S.lastReturn = null; }
+  setResult("COMMAND_RESULT status=0 · " + MODES[id].label +
+            (id === 0 ? "" : " · остаток " + K.MODE_MAX_MS / 1000 + " с"), "ok");
+}
+
+function pinLevels() {
+  const hi = new Set(MODES[S.mode].out);
+  if (S.mode === 3) hi.add("KZ_1");          /* лампа КЗ +1 = тот же вывод */
+  if (statusLedOn()) hi.add("STATUS_LED");
+  return hi;
+}
+
+/* dpls_led_set_identify(): период отсчитывается от момента включения. */
+function statusLedOn() {
+  if (S.identifyActive !== S.ledIdentify) {
+    S.ledIdentify = S.identifyActive;
+    S.cycleStart = S.t;
+  }
+  return ledLevel(S.ledIdentify, S.t - S.cycleStart);
+}
+
+/* ================================================================== *
+ * Отрисовка
+ * ================================================================== */
+const $ = (id) => document.getElementById(id);
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(name, attrs, text) {
+  const n = document.createElementNS(SVGNS, name);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+const pinVolts = (mv, div) => (mv / div / 1000).toFixed(2).replace(".", ",");
+const sec = (ms) => Math.max(0, Math.ceil(ms / 1000));
+
+function drawHeadline() {
+  const hi = pinLevels();
+  const lit = LED_CARDS.filter(c => hi.has(c.sig) && c.sig !== "STATUS_LED");
+  const outs = MODES[S.mode].out.filter(s => !s.startsWith("LED_"));
+  const parts = [];
+  parts.push('<b>Режим: ' + MODES[S.mode].label + "</b>");
+  parts.push('<span class="hl-dim">' + (outs.length
+    ? outs.map(s => SIGNALS[s].pin + " = 1").join(" · ")
+    : "все выходы 0") + "</span>");
+  parts.push('<span class="hl-dim">' + (lit.length
+    ? "горит " + lit.map(c => c.sub.split(" · ").pop()).join(", ") + " (" + lit.map(c => SIGNALS[c.sig].pin).join(", ") + ")"
+    : "лампы режимов погашены") + "</span>");
+  if (S.mode !== 0)
+    parts.push('<span class="hl-dim">автовозврат ' + sec(S.modeDeadline - S.t) + " с</span>");
+  if (S.identifyActive)
+    parts.push('<span class="hl-dim">поиск прибора ' + sec(S.identifyDeadline - S.t) + " с</span>");
+  parts.push('<span class="hl-dim">' + (S.powerReserve ? "питание: резерв" : "питание: линия") +
+    (S.reserveLow ? ", резерв разряжен" : "") + (S.autoIso ? ", автоизоляция" : "") + "</span>");
+  $("headline").innerHTML = parts.join('<span class="sep">│</span>');
+}
+
+function drawLeds() {
+  const hi = pinLevels();
+  $("leds").innerHTML = LED_CARDS.map(c => {
+    const lit = hi.has(c.sig);
+    const s = SIGNALS[c.sig];
+    return '<div class="led-card' + (lit ? " lit" : "") + '" style="color:' + c.color + '">' +
+      '<span class="led-dot"></span><span class="led-meta">' +
+      '<div class="led-name">' + c.name + '</div>' +
+      '<div class="led-sub">' + s.pin + " · " + c.sub + '</div></span>' +
+      '<span class="led-lvl">' + (lit ? "1" : "0") + '</span></div>';
+  }).join("");
+  $("led-note").innerHTML = "КЗ-режимы — три канала одного корпуса LED1 (RGB5050, общий катод, " +
+    "470 Ом на канал): светится одна точка разными цветами, поэтому «не тот цвет» = не тот режим. " +
+    "Светодиод поиска на P14 схемой кита не разведён — цвет зависит от того, что воткнули в J2.";
+}
+
+function drawLevels() {
+  const hi = pinLevels();
+  const rows = [...hi].filter(s => SIGNALS[s]).map(s =>
+    "<tr><td>" + SIGNALS[s].pin + "</td><td>" + s + "</td><td>" + SIGNALS[s].on + "</td></tr>");
+  $("levels").innerHTML = rows.length
+    ? rows.join("")
+    : '<tr><td colspan="3" style="color:var(--ink-dim)">Все выходы в нуле — безопасное состояние «Норма».</td></tr>';
+}
+
+function drawMatrix() {
+  $("matrix-head").innerHTML = "<tr><th>Режим</th>" +
+    MATRIX_SIGNALS.map(s => '<th class="mono">' + SIGNALS[s].pin + "</th>").join("") + "</tr>";
+  $("matrix-body").innerHTML = MODES.map(m => {
+    const hi = new Set(m.out);
+    if (m.id === 3) hi.add("KZ_1");
+    return '<tr class="' + (m.id === S.mode ? "cur" : "") + '"><td>' + m.label + "</td>" +
+      MATRIX_SIGNALS.map(s => hi.has(s)
+        ? '<td class="one">1</td>' : '<td class="zero">0</td>').join("") + "</tr>";
+  }).join("");
+}
+
+function drawState() {
+  const validity = [];
+  if (S.lineWin.length) validity.push("LINE_VOLTAGE", "POWER", "AUTOISO");
+  if (S.vcapWin.length) validity.push("RESERVE");
+  const rows = [
+    ["время модели", (S.t / 1000).toFixed(1) + " с" + (S.paused ? " · пауза" : " · ×" + S.speed)],
+    ["режим", MODES[S.mode].label + " (id " + S.mode + ")"],
+    ["до автовозврата", S.mode === 0 ? "—" : sec(S.modeDeadline - S.t) + " с из 300"],
+    ["до таймаута сессии", S.mode === 0 ? "—" :
+      (S.poll ? "не истечёт — приложение опрашивает" : sec(S.lastActivity + K.SESSION_TIMEOUT_MS - S.t) + " с из 10")],
+    ["линия (усреднённая)", S.lineWin.length ? S.cachedLineMv + " мВ · окно " + S.lineWin.length + "/8" : "нет отсчётов"],
+    ["резерв (усреднённый)", S.vcapWin.length ? S.cachedVcapMv + " мВ · окно " + S.vcapWin.length + "/8" : "нет отсчётов"],
+    ["питание", S.powerReserve ? "от резерва" : "от линии"],
+    ["резерв разряжен", S.reserveLow ? "да" : "нет"],
+    ["автоизоляция", S.autoIso ? "активна" : "нет"],
+    ["маска validity", validity.length ? validity.join(" | ") : "0 — «не измерено»"],
+    ["последний автовозврат", S.lastReturn === null ? "—" : RETURN_REASON[S.lastReturn]]
+  ];
+  $("state").innerHTML = rows.map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+
+  const warn = [];
+  if (S.reserveLow)
+    warn.push('<div class="callout live">Резерв разряжен: защита ядра снимает любой тестовый режим ' +
+      "(причина 4). На стенде это чаще всего означает не разряд, а не подключённое резервное питание — " +
+      "висящий вход P23 читается как низкий.</div>");
+  if (S.autoIso)
+    warn.push('<div class="callout live">Автоизоляция активна: попытки задать режим будут отвечать ' +
+      "COMMAND_RESULT status=5, пока линия не поднимется выше 4500 мВ.</div>");
+  $("live-warn").innerHTML = warn.join("");
+}
+
+function drawLog() {
+  $("log").innerHTML = S.log.map(e => {
+    let extra = "";
+    if (e.type === 8) extra = " · " + RETURN_REASON[e.param];
+    else if (e.type === 7) extra = " · " + MODES[e.param].label;
+    else if (e.type === 1) extra = " · " + RETURN_REASON[e.param];
+    else if (e.type === 12) extra = e.param ? " · от резерва" : " · от линии";
+    else if (e.type === 13 || e.type === 14) extra = e.param ? " · включилось" : " · снялось";
+    const t = (e.t / 1000).toFixed(1).padStart(7);
+    return '<div class="' + (e.cls || "") + '">#' + String(e.seq).padStart(3, "0") +
+      "  " + t + " с  " + EVT[e.type] + extra + "</div>";
+  }).join("");
+}
+
+/* Цоколёвка: 1–8 слева, 9–13 снизу, 15–22 справа. */
+function drawBoard() {
+  const svg = $("board");
+  svg.textContent = "";
+  const hi = pinLevels();
+
+  const X0 = 336, W = 228, TOP = 62, STEP = 34, PAD_W = 34, PAD_H = 18;
+  const H = CHIP_LEFT.length * STEP + 12;
+  const leftPad = X0 - PAD_W, rightPad = X0 + W;
+  const bottomY = TOP + H - 12;
+
+  svg.appendChild(el("rect", { x: X0, y: TOP - 14, width: W, height: H, rx: 10, class: "chip" }));
+  svg.appendChild(el("text", { x: X0 + W / 2, y: TOP + 96, "text-anchor": "middle", class: "chip-text" }, "PB-03F"));
+  svg.appendChild(el("text", { x: X0 + W / 2, y: TOP + 114, "text-anchor": "middle", class: "chip-text" }, "PHY6252"));
+  svg.appendChild(el("text", { x: X0 + W / 2, y: TOP + 142, "text-anchor": "middle", class: "pin-label" },
+    "режим: " + MODES[S.mode].label));
+
+  const info = (id) => {
+    const p = PIN_INFO[id];
+    const isHi = hi.has(p.sig);
+    let note = p.note;
+    if (p.analog === "line") note = "линия " + pinVolts(S.lineMv, 1000) + " В → на выводе ≈ " + pinVolts(S.lineMv, K.LINE_DIVIDER) + " В";
+    if (p.analog === "vcap") note = "ионистор " + pinVolts(S.vcapMv, 1000) + " В, напрямую";
+    return { p, isHi, note, cls: p.io ? " io" : isHi ? " hi" : "" };
+  };
+
+  const side = (id, i, left) => {
+    const { p, isHi, note, cls } = info(id);
+    const y = TOP + i * STEP;
+    const px = left ? leftPad : rightPad;
+    const tx = left ? leftPad - 10 : rightPad + PAD_W + 10;
+    const anchor = left ? "end" : "start";
+    const g = el("g", {});
+    g.appendChild(el("rect", { x: px, y: y - PAD_H / 2, width: PAD_W, height: PAD_H, rx: 3, class: "pin-body" + cls }));
+    g.appendChild(el("text", { x: px + PAD_W / 2, y: y + 4, "text-anchor": "middle",
+      class: "pin-name" + (isHi ? " on-hi" : p.io ? " dim" : "") }, id));
+    g.appendChild(el("text", { x: left ? X0 + 6 : X0 + W - 6, y: y + 4,
+      "text-anchor": left ? "start" : "end", class: "pin-label" }, left ? i + 1 : 22 - i));
+    g.appendChild(el("text", { x: tx, y: y - 1, "text-anchor": anchor,
+      class: "pin-name" + (isHi ? " hi" : p.io ? " dim" : "") }, p.sig));
+    g.appendChild(el("text", { x: tx, y: y + 12, "text-anchor": anchor, class: "pin-label" }, note));
+    svg.appendChild(g);
+  };
+  CHIP_LEFT.forEach((id, i) => side(id, i, true));
+  CHIP_RIGHT.forEach((id, i) => side(id, i, false));
+
+  const step = W / (CHIP_BOTTOM.length + 1);
+  CHIP_BOTTOM.forEach((id, i) => {
+    const { p, isHi, cls } = info(id);
+    const cx = X0 + step * (i + 1);
+    svg.appendChild(el("rect", { x: cx - PAD_H / 2, y: bottomY, width: PAD_H, height: PAD_W, rx: 3,
+      class: "pin-body" + cls }));
+    svg.appendChild(el("text", { x: cx, y: bottomY - 6, "text-anchor": "middle", class: "pin-label" }, i + 9));
+    const ly = bottomY + PAD_W + 12;
+    svg.appendChild(el("text", { x: cx + 5, y: ly, "text-anchor": "start",
+      class: "pin-name" + (isHi ? " hi" : ""), transform: "rotate(90 " + (cx + 5) + " " + ly + ")" }, id));
+    svg.appendChild(el("text", { x: cx - 7, y: ly, "text-anchor": "start", class: "pin-label",
+      transform: "rotate(90 " + (cx - 7) + " " + ly + ")" }, p.sig));
+    if (p.alt)
+      svg.appendChild(el("rect", { x: cx - PAD_H / 2 - 3, y: bottomY - 3, width: PAD_H + 6,
+        height: PAD_W + 6, rx: 5, class: "alt-mark" }));
+  });
+  /* 14-я площадка — NC, рисуем серой, чтобы счёт выводов сходился глазами */
+  const ncx = X0 + W + 6;
+  svg.appendChild(el("rect", { x: ncx, y: bottomY, width: PAD_H, height: PAD_W, rx: 3, class: "pin-body io" }));
+  svg.appendChild(el("text", { x: ncx + PAD_H / 2, y: bottomY - 6, "text-anchor": "middle", class: "pin-label" }, "14"));
+  svg.appendChild(el("text", { x: ncx + PAD_H / 2 + 4, y: bottomY + PAD_W + 12, "text-anchor": "start",
+    class: "pin-label", transform: "rotate(90 " + (ncx + PAD_H / 2 + 4) + " " + (bottomY + PAD_W + 12) + ")" }, "NC"));
+
+  /* Подпись ниже вертикальных ярлыков; высоту viewBox держим по фактическому bbox. */
+  svg.appendChild(el("text", { x: 450, y: bottomY + PAD_W + 130, "text-anchor": "middle", class: "alt-text" },
+    "P16/P17 — ноги XTAL_32K_IN/OUT, переназначены под КЗ: кварц не установлен, генератор погашен"));
+  const box = svg.getBBox ? svg.getBBox() : null;
+  if (box) svg.setAttribute("viewBox", "0 0 900 " + Math.ceil(box.y + box.height + 12));
+}
+
+const SRCMAP = [
+  ["Режим → один выход, break-before-make", "apply_mode(), mode_outputs_off()", "phy6252/dpls_phy6252_app.c"],
+  ["Лампа режима зажигается вместе с выходом", "apply_mode()", "phy6252/dpls_phy6252_app.c"],
+  ["Соответствие вывод → сигнал", "DPLS_PIN_*", "phy6252/dpls_board.h"],
+  ["Автовозвраты и их причины", "dpls_server_tick(), force_normal()", "src/dpls_server.c"],
+  ["Коды причин возврата", "dpls_return_reason_t", "include/dpls_server.h"],
+  ["Блокировка режима при автоизоляции (status 5)", "handle_mode()", "src/dpls_server.c"],
+  ["Таймаут режима 300 с, сессии 10 с, identify 60 с", "DPLS_MODE_MAX_MS, DPLS_SESSION_TIMEOUT_MS, DPLS_IDENTIFY_MAX_MS", "include/dpls_server.h"],
+  ["Гистерезис питания, резерва, автоизоляции", "update_power_state()", "phy6252/dpls_phy6252_app.c"],
+  ["Пороги 4000/3000, 3700/4000, 3000/4500 мВ", "DPLS_LINE_*, DPLS_RESERVE_*, DPLS_AUTOISO_*", "phy6252/dpls_phy6252_app.c"],
+  ["Опрос ADC раз в ~1 с, окно из 8 отсчётов", "DPLS_ADC_DECIMATE, DPLS_ADC_WINDOW, adc_kick()", "phy6252/dpls_phy6252_app.c"],
+  ["Каналы P20/P23 опрашиваются по одному (иначе виснет IRQ)", "DPLS_ADC_NEED_*, adc_kick()", "phy6252/dpls_phy6252_app.c"],
+  ["Маска validity", "measurement_validity()", "phy6252/dpls_phy6252_app.c"],
+  ["Сцена светодиода и её приоритет", "dpls_phy6252_led_tick()", "phy6252/dpls_phy6252_app.c"],
+  ["Мигание идентификации 1 Гц, вне неё светодиод погашен", "dpls_led_tick(), dpls_led_set_identify()", "src/dpls_led.c"],
+  ["Тик приложения 200 мс", "SBP_DPLS_TICK_EVT", "targets/phy6252/source/dplsBLEPeripheral.c"]
+];
+
+const NOTES = [
+  "Причина возврата 7 «автоизоляция» недостижима: флаг взводится только в «Норме» " +
+  "(гейт <code>hardware_mode == DPLS_MODE_NORMAL</code> в <code>update_power_state()</code>), " +
+  "а вход в режим при взведённом флаге приложение получает как COMMAND_RESULT status=5. " +
+  "Ветка <code>force_normal(DPLS_RETURN_AUTO_ISOLATION)</code> — страховка на случай HAL, " +
+  "который сообщал бы о реальном КЗ в любом режиме.",
+  "ISO_1 (P31) не поднимается ни одним режимом: «обрыв магистрали» рвёт канал +2, " +
+  "«обрыв ответвления» — канал +Т. Вывод разведён и инициализирован, но команды для него нет.",
+  "P07 несёт два назначения сразу: силовой шунт КЗ +1 и красный канал LED1. " +
+  "Разделить их на стенде нельзя — это одна нога.",
+  "Лампы режимов сидят на светодиодах отладочного кита (P0/P34/P11/P18 и красный канал P07). " +
+  "На серийной плате их нет — там один световод корпуса."
+];
+
+/* ================================================================== *
+ * Управление
+ * ================================================================== */
+/* Пресеты подобраны по порогам прошивки — цифры на них видны сразу. */
+const LINE_PRESETS = [[24000, "24,0 В · норма"], [5000, "5,0 В · минимум ТЗ"],
+                      [4500, "4,5 В · снятие автоизоляции"], [3900, "3,9 В · просадка"],
+                      [2900, "2,9 В · КЗ"], [0, "0 В · обрыв"]];
+const VCAP_PRESETS = [[4800, "4,8 В · заряжен"], [4100, "4,1 В · снятие «низкого»"],
+                      [3600, "3,6 В · разряжен"], [3000, "3,0 В · дно"]];
+/* Состояние связи одним выбором вместо трёх независимых тумблеров. */
+const LINK_STATES = {
+  poll: { connected: true, authenticated: true, poll: true },
+  idle: { connected: true, authenticated: true, poll: false },
+  anon: { connected: true, authenticated: false, poll: false },
+  off:  { connected: false, authenticated: false, poll: false }
+};
+function linkState() {
+  if (!S.connected) return "off";
+  if (!S.authenticated) return "anon";
+  return S.poll ? "poll" : "idle";
+}
+
+function buildControls() {
+  MODES.forEach(m => {
+    const b = document.createElement("button");
+    b.className = "btn-mode";
+    b.innerHTML = m.label + "<kbd>" + m.id + "</kbd>";
+    b.dataset.mode = m.id;
+    b.onclick = () => { setMode(m.id); sync(); };
+    $("modes").appendChild(b);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    const n = Number(e.key);
+    if (!Number.isNaN(n) && n >= 0 && n <= 5) { setMode(n); sync(); }
+    if (e.key === " ") { e.preventDefault(); S.paused = !S.paused; sync(); }
+  });
+
+  $("btn-ident").onclick = () => {
+    if (!S.connected || !S.authenticated) { setResult("identify требует авторизованной сессии", "warn"); sync(); return; }
+    S.identifyActive = !S.identifyActive;
+    if (S.identifyActive) { S.identifyDeadline = S.t + K.IDENTIFY_MAX_MS; logEvent(9, 0); setResult("IDENTIFY_START · 1 Гц, авто-стоп 60 с", "ok"); }
+    else { logEvent(10, 0); setResult("IDENTIFY_STOP", ""); }
+    S.lastActivity = S.t;
+    sync();
+  };
+
+  $("sel-link").onchange = (e) => {
+    const was = S.connected;
+    const next = LINK_STATES[e.target.value];
+    S.connected = next.connected;
+    S.authenticated = next.authenticated;
+    S.poll = next.poll;
+    if (!S.connected && was) {
+      S.identifyActive = false;
+      forceNormal(3);
+      logEvent(3, 0);
+    } else if (S.connected && !was) {
+      logEvent(2, 0);
+      if (S.authenticated) logEvent(4, 0, "g");
+    }
+    if (S.authenticated) S.lastActivity = S.t;
+    sync();
+  };
+  $("btn-poke").onclick = () => { S.lastActivity = S.t; setResult("STATE_REQUEST · сессия продлена", ""); sync(); };
+  $("btn-pause").onclick = () => { S.paused = !S.paused; sync(); };
+  $("btn-reset").onclick = () => { boot(true); sync(); };
+  document.querySelectorAll(".speed").forEach(b => {
+    b.onclick = () => {
+      S.speed = Number(b.dataset.s);
+      S.paused = false;
+      sync();
+    };
+  });
+
+  const fill = (id, list) => {
+    $(id).innerHTML = list.map(([v, label]) => '<option value="' + v + '">' + label + "</option>").join("") +
+      '<option value="">своё, мВ →</option>';
+  };
+  fill("sel-line", LINE_PRESETS);
+  fill("sel-vcap", VCAP_PRESETS);
+  $("sel-line").onchange = (e) => { if (e.target.value !== "") S.lineMv = Number(e.target.value); sync(); };
+  $("sel-vcap").onchange = (e) => { if (e.target.value !== "") S.vcapMv = Number(e.target.value); sync(); };
+  $("num-line").oninput = (e) => { S.lineMv = Number(e.target.value) || 0; sync(); };
+  $("num-vcap").oninput = (e) => { S.vcapMv = Number(e.target.value) || 0; sync(); };
+
+  $("srcmap").innerHTML = SRCMAP.map(([r, sym, f]) =>
+    "<tr><td>" + r + '</td><td class="mono">' + sym + '</td><td class="mono">' + f + "</td></tr>").join("");
+  $("srcmap-note").textContent = "Ссылки даны символами, а не номерами строк: номера протухают при " +
+    "первой же правке. Страница описывает состояние на коммит " + BUILD.commit + " от " + BUILD.date + ".";
+  $("notes").innerHTML = NOTES.map(n => '<div class="callout">' + n + "</div>").join("");
+  $("stamp").textContent = "коммит " + BUILD.commit + " · " + BUILD.date;
+}
+
+function sync() {
+  $("sel-link").value = linkState();
+  $("btn-poke").disabled = !S.authenticated || S.poll;
+  $("btn-pause").setAttribute("aria-pressed", String(S.paused));
+  $("btn-ident").setAttribute("aria-pressed", String(S.identifyActive));
+  document.querySelectorAll(".speed").forEach(b =>
+    b.setAttribute("aria-pressed", String(!S.paused && Number(b.dataset.s) === S.speed)));
+  /* Селект показывает пресет, если значение совпало, иначе — «своё». */
+  const pick = (sel, num, mv) => {
+    const opt = [...$(sel).options].find(o => o.value !== "" && Number(o.value) === mv);
+    $(sel).value = opt ? opt.value : "";
+    if (Number($(num).value) !== mv) $(num).value = mv;
+  };
+  pick("sel-line", "num-line", S.lineMv);
+  pick("sel-vcap", "num-vcap", S.vcapMv);
+  document.querySelectorAll("#modes button").forEach(b =>
+    b.setAttribute("aria-pressed", String(Number(b.dataset.mode) === S.mode)));
+  $("cmd-result").textContent = S.lastResult.text;
+  $("cmd-result").className = "result " + S.lastResult.cls;
+  boardSig = ledSig = logSig = "";
+  repaint(true);
+}
+
+let boardSig = "", ledSig = "", logSig = "", stateAcc = 0;
+function repaint(force) {
+  const hi = pinLevels();
+  const key = [S.mode, hi.has("STATUS_LED"), S.lineMv, S.vcapMv].join("|");
+  if (force || key !== ledSig) {
+    ledSig = key;
+    drawHeadline(); drawLeds(); drawLevels(); drawMatrix();
+  }
+  if (force || key !== boardSig) { boardSig = key; drawBoard(); }
+  const ls = S.seq + "|" + S.lastResult.text;
+  if (force || ls !== logSig) {
+    logSig = ls;
+    drawLog();
+    $("cmd-result").textContent = S.lastResult.text;
+    $("cmd-result").className = "result " + S.lastResult.cls;
+  }
+}
+
+let last = null, tickAcc = 0;
+function frame(ts) {
+  if (last === null) last = ts;
+  const dtReal = Math.min(ts - last, 250);
+  last = ts;
+  if (!S.paused) {
+    const dt = dtReal * S.speed;
+    S.t += dt;
+    tickAcc += dt;
+    while (tickAcc >= K.TICK_MS) { tickAcc -= K.TICK_MS; appTick(); }
+  }
+  repaint(false);
+  stateAcc += dtReal;
+  if (stateAcc >= 100) { stateAcc = 0; drawState(); drawHeadline(); }
+  requestAnimationFrame(frame);
+}
+
+boot(false);
+buildControls();
+sync();
+drawState();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
