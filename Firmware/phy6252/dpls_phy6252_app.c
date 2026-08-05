@@ -36,7 +36,7 @@
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
-#define DPLS_HW_REVISION 1u /* PB-03F-based Test-DPLS opytny obrazets rev.1 */
+#define DPLS_HW_REVISION 2u /* four independent voltage inputs: +1, +2, +T, reserve */
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
@@ -52,8 +52,12 @@
  * IRQ when status == all_channels, so a dual-channel kick whose conversions
  * finish out of lockstep can leave a pending interrupt uncleared and starve the
  * OSAL loop. Reproduced by tests/test_adc_irq_model.c. */
-#define DPLS_ADC_NEED_LINE 0x01u
-#define DPLS_ADC_NEED_VCAP 0x02u
+#define DPLS_ADC_NEED_PORT1 0x01u
+#define DPLS_ADC_NEED_PORT2 0x02u
+#define DPLS_ADC_NEED_PORT_T 0x04u
+#define DPLS_ADC_NEED_VCAP 0x08u
+#define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
+                           DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
  * from its reserve (also true while it is shorting the line in a KZ mode). */
@@ -153,10 +157,16 @@ static uint8_t journal_cached_block = 0xffu;
 static dpls_calib_t line_calib;
 static dpls_calib_t vcap_calib;
 static uint16_t line_window[DPLS_ADC_WINDOW];
+static uint16_t port2_window[DPLS_ADC_WINDOW];
+static uint16_t port_t_window[DPLS_ADC_WINDOW];
 static uint16_t vcap_window[DPLS_ADC_WINDOW];
 static uint8_t line_window_count, line_window_pos;
+static uint8_t port2_window_count, port2_window_pos;
+static uint8_t port_t_window_count, port_t_window_pos;
 static uint8_t vcap_window_count, vcap_window_pos;
 static volatile uint16_t cached_line_mv;
+static volatile uint16_t cached_port2_mv;
+static volatile uint16_t cached_port_t_mv;
 static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
 static uint8_t adc_pending; /* DPLS_ADC_NEED_* bits still owed this cycle */
@@ -325,11 +335,6 @@ static void mode_outputs_off(void)
     hal_gpio_write(DPLS_PIN_KZ_1, 0);
     hal_gpio_write(DPLS_PIN_KZ_2, 0);
     hal_gpio_write(DPLS_PIN_KZ_T, 0);
-    hal_gpio_write(DPLS_PIN_LED_OPEN_T, 0);
-    hal_gpio_write(DPLS_PIN_LED_OPEN_MAIN, 0);
-    hal_gpio_write(DPLS_PIN_LED_SHORT_1, 0);
-    hal_gpio_write(DPLS_PIN_LED_SHORT_2, 0);
-    hal_gpio_write(DPLS_PIN_LED_SHORT_T, 0);
 }
 
 static void safe_normal(void *context)
@@ -356,23 +361,18 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     case DPLS_MODE_NORMAL: break;
     case DPLS_MODE_OPEN_T:
         hal_gpio_write(DPLS_PIN_ISO_T, 1);
-        hal_gpio_write(DPLS_PIN_LED_OPEN_T, 1);
         break;
     case DPLS_MODE_OPEN_MAIN:
         hal_gpio_write(DPLS_PIN_ISO_2, 1);
-        hal_gpio_write(DPLS_PIN_LED_OPEN_MAIN, 1);
         break;
     case DPLS_MODE_SHORT_1:
         hal_gpio_write(DPLS_PIN_KZ_1, 1);
-        hal_gpio_write(DPLS_PIN_LED_SHORT_1, 1); /* same pad as KZ_1 */
         break;
     case DPLS_MODE_SHORT_2:
         hal_gpio_write(DPLS_PIN_KZ_2, 1);
-        hal_gpio_write(DPLS_PIN_LED_SHORT_2, 1);
         break;
     case DPLS_MODE_SHORT_T:
         hal_gpio_write(DPLS_PIN_KZ_T, 1);
-        hal_gpio_write(DPLS_PIN_LED_SHORT_T, 1);
         break;
     default: return false;
     }
@@ -415,11 +415,13 @@ static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint
     return (uint16_t)(sum / *count);
 }
 
-/* Raw samples captured by the ISR, drained by the OSAL task. */
-static volatile uint16_t line_raw[MAX_ADC_SAMPLE_SIZE];
-static volatile uint16_t vcap_raw[MAX_ADC_SAMPLE_SIZE];
-static volatile uint8_t line_raw_size, vcap_raw_size;
-static volatile bool line_raw_ready, vcap_raw_ready;
+/* A single raw buffer is enough because channels are converted strictly
+ * one at a time. This saves SRAM compared with one MAX_ADC_SAMPLE_SIZE buffer
+ * per voltage input. */
+static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
+static volatile uint8_t adc_raw_size;
+static volatile adc_CH_t adc_raw_channel;
+static volatile bool adc_raw_ready;
 
 /* ADC completion ISR: copy the raw samples, flag the channel and wake the task.
  * No float, no averaging loop, no flash, no BLE here — the previous version did
@@ -433,15 +435,10 @@ static void adc_evt(adc_Evt_t *event)
         return;
     }
     n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
-    if (event->ch == ADC_CH9) {
-        for (i = 0; i < n; ++i) line_raw[i] = event->data[i];
-        line_raw_size = n;
-        line_raw_ready = true;
-    } else if (event->ch == ADC_CH1) {
-        for (i = 0; i < n; ++i) vcap_raw[i] = event->data[i];
-        vcap_raw_size = n;
-        vcap_raw_ready = true;
-    }
+    for (i = 0; i < n; ++i) adc_raw[i] = event->data[i];
+    adc_raw_size = n;
+    adc_raw_channel = event->ch;
+    adc_raw_ready = true;
     /* One-shot mode: the ADC IRQ handler stops the converter after the last
      * channel callback returns, so we only clear our re-entrancy guard. */
     adc_busy = false;
@@ -464,14 +461,20 @@ static void adc_kick(void)
     adc_Cfg_t cfg;
     uint8_t channel;
     uint8_t claim;
-    if (adc_busy || adc_pending == 0u) return;
+    if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
-    /* One channel per conversion — see DPLS_ADC_NEED_*. Single-ended P20 (line)
-     * and P23 (reserve), standard resolution: the high-resolution path tops out
-     * near 0.8 V, but the dividers keep both pins near or below ~1 V. */
-    if (adc_pending & DPLS_ADC_NEED_LINE) {
+    /* One channel per conversion. P20/P15/P11 are the independent +1/+2/+T
+     * voltage paths, P23 is the reserve accumulator. Standard resolution is
+     * used because every divider keeps its ADC pin close to or below 1 V. */
+    if (adc_pending & DPLS_ADC_NEED_PORT1) {
         channel = ADC_BIT(ADC_CH3P_P20);
-        claim = DPLS_ADC_NEED_LINE;
+        claim = DPLS_ADC_NEED_PORT1;
+    } else if (adc_pending & DPLS_ADC_NEED_PORT2) {
+        channel = ADC_BIT(ADC_CH3N_P15);
+        claim = DPLS_ADC_NEED_PORT2;
+    } else if (adc_pending & DPLS_ADC_NEED_PORT_T) {
+        channel = ADC_BIT(ADC_CH1N_P11);
+        claim = DPLS_ADC_NEED_PORT_T;
     } else {
         channel = ADC_BIT(ADC_CH1P_P23);
         claim = DPLS_ADC_NEED_VCAP;
@@ -486,8 +489,6 @@ static void adc_kick(void)
         return;
     }
     if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
-        /* Configuration has already claimed the analog pins and ADCC power
-         * lock. Release both if the 3.1.2 start operation is rejected. */
         (void)hal_adc_stop();
         adc_busy = false;
         return;
@@ -497,18 +498,37 @@ static void adc_kick(void)
 
 void dpls_phy6252_process_adc(void)
 {
-    if (line_raw_ready) {
-        line_raw_ready = false;
-        process_adc_channel(ADC_CH9, line_raw, line_raw_size, &line_calib,
-                            line_window, &line_window_count, &line_window_pos, &cached_line_mv);
+    if (adc_raw_ready) {
+        adc_CH_t ch = adc_raw_channel;
+        uint8_t size = adc_raw_size;
+        adc_raw_ready = false;
+        switch (ch) {
+        case ADC_CH9:
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                line_window, &line_window_count, &line_window_pos,
+                                &cached_line_mv);
+            break;
+        case ADC_CH4:
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                port2_window, &port2_window_count, &port2_window_pos,
+                                &cached_port2_mv);
+            break;
+        case ADC_CH0:
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                port_t_window, &port_t_window_count, &port_t_window_pos,
+                                &cached_port_t_mv);
+            break;
+        case ADC_CH1:
+            process_adc_channel(ch, adc_raw, size, &vcap_calib,
+                                vcap_window, &vcap_window_count, &vcap_window_pos,
+                                &cached_vcap_mv);
+            break;
+        default:
+            break;
+        }
     }
-    if (vcap_raw_ready) {
-        vcap_raw_ready = false;
-        process_adc_channel(ADC_CH1, vcap_raw, vcap_raw_size, &vcap_calib,
-                            vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
-    }
-    /* Start the sibling channel from task context once the previous one-shot
-     * has released adc_busy (never from the ISR). */
+    /* Start the next channel from task context after consuming the shared raw
+     * buffer. A complete four-channel cycle is still initiated every second. */
     adc_kick();
 }
 
@@ -550,6 +570,18 @@ static uint16_t port1_voltage_mv(void *context)
     return cached_line_mv;
 }
 
+static uint16_t port2_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_port2_mv;
+}
+
+static uint16_t port_t_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_port_t_mv;
+}
+
 static uint16_t reserve_voltage_mv(void *context)
 {
     (void)context;
@@ -584,10 +616,14 @@ static uint8_t measurement_validity(void *context)
     uint8_t flags = 0;
     (void)context;
     if (line_window_count != 0u)
-        flags |= DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID |
+        flags |= DPLS_STATE_PORT_1_VALID | DPLS_STATE_POWER_VALID |
                  DPLS_STATE_AUTOISO_VALID;
+    if (port2_window_count != 0u)
+        flags |= DPLS_STATE_PORT_2_VALID;
+    if (port_t_window_count != 0u)
+        flags |= DPLS_STATE_PORT_T_VALID;
     if (vcap_window_count != 0u)
-        flags |= DPLS_STATE_RESERVE_VALID;
+        flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
     if (line_calib_from_nv)
         flags |= DPLS_STATE_ADC_CALIBRATED;
     return flags;
@@ -910,11 +946,6 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_OPEN_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_OPEN_MAIN, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_1, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_2, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_T, OEN);
     hal_gpio_pin_init(DPLS_PIN_STATUS_LED, OEN);
     /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
      * through sleep only while it is registered for AON retention, and the
@@ -928,19 +959,18 @@ void dpls_phy6252_init(uint8 new_task_id)
     (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
     (void)hal_gpioretention_register(DPLS_PIN_KZ_2);
     (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_OPEN_T);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_OPEN_MAIN);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_1);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_2);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_T);
     (void)hal_gpioretention_register(DPLS_PIN_STATUS_LED);
     mode_outputs_off();
     hal_gpio_write(DPLS_PIN_STATUS_LED, 0);
     hardware_mode = DPLS_MODE_NORMAL;
     dpls_led_init(&status_led, status_led_output, NULL, now_ms());
     line_window_count = line_window_pos = 0;
+    port2_window_count = port2_window_pos = 0;
+    port_t_window_count = port_t_window_pos = 0;
     vcap_window_count = vcap_window_pos = adc_decimate = 0;
-    cached_line_mv = cached_vcap_mv = 0;
+    cached_line_mv = cached_port2_mv = cached_port_t_mv = cached_vcap_mv = 0;
+    adc_pending = 0u;
+    adc_raw_ready = false;
     power_state = DPLS_POWER_LINE;
     reserve_low_state = false;
     auto_isolation_active = false;
@@ -964,6 +994,8 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.hardware_safe_normal = safe_normal;
     hal.voltage_mv = voltage_mv;
     hal.port1_voltage_mv = port1_voltage_mv;
+    hal.port2_voltage_mv = port2_voltage_mv;
+    hal.port_t_voltage_mv = port_t_voltage_mv;
     hal.reserve_voltage_mv = reserve_voltage_mv;
     hal.power_source = power_source;
     hal.reserve_low = reserve_low;
@@ -1096,7 +1128,7 @@ void dpls_phy6252_tick(void)
     }
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
-        adc_pending = (uint8_t)(DPLS_ADC_NEED_LINE | DPLS_ADC_NEED_VCAP);
+        adc_pending = (uint8_t)DPLS_ADC_NEED_ALL;
         adc_kick();
     }
     update_power_state();

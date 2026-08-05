@@ -45,7 +45,10 @@ PIN_LABELS: Final = {
     "DPLS_PIN_LED_SHORT_1": "лампа · КЗ +1",
     "DPLS_PIN_LED_SHORT_2": "лампа · КЗ +2",
     "DPLS_PIN_LED_SHORT_T": "лампа · КЗ T",
-    "DPLS_PIN_LINE_ADC": "ADC · напряжение ДПЛС",
+    "DPLS_PIN_LINE_ADC": "ADC · +1 (legacy)",
+    "DPLS_PIN_PORT1_ADC": "ADC · напряжение +1",
+    "DPLS_PIN_PORT2_ADC": "ADC · напряжение +2",
+    "DPLS_PIN_PORT_T_ADC": "ADC · напряжение +Т",
     "DPLS_PIN_VCAP_ADC": "ADC · резерв",
     "DPLS_PIN_FACTORY_RESET": "сброс пароля",
     "DPLS_PIN_STATUS_LED": "статус · идентификация",
@@ -129,8 +132,8 @@ def extract_model(root: Path) -> dict[str, object]:
         if mode_name == "DPLS_MODE_NORMAL":
             controls = []
             indicators = []
-        elif not controls or not indicators:
-            die(f"{mode_name} must expose both control and indicator writes; got {writes}")
+        elif not controls:
+            die(f"{mode_name} must expose a control write; got {writes}")
         mode_rows.append({
             "id": mode_name,
             "value": int(value),
