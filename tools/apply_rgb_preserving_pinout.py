@@ -110,8 +110,8 @@ replace_once(
 )
 text = read(app)
 count = text.count("DPLS_PIN_STATUS_LED")
-if count != 5:
-    raise RuntimeError(f"expected 5 status LED references, got {count}")
+if count != 4:
+    raise RuntimeError(f"expected 4 remaining status LED references, got {count}")
 text = text.replace("DPLS_PIN_STATUS_LED", "DPLS_PIN_LED_GREEN")
 write(app, text)
 replace_once(
@@ -142,7 +142,6 @@ replace_once(
     hal_gpio_write(DPLS_PIN_LED_BLUE, 0);''',
 )
 
-# Generated pin map labels.
 gen = "tools/generate_behavior_sim.py"
 replace_once(
     gen,
@@ -154,7 +153,6 @@ replace_once(
     "DPLS_PIN_LED_BLUE": "RGB · синий",''',
 )
 
-# Requirements: preserve RGB and use P24 for +T.
 req = "docs/live-voltage-requirements.md"
 replace_once(req, "| +Т | P11 | ADC_CH0 |", "| +Т | P24 | ADC_CH2 |")
 replace_once(
