@@ -86,7 +86,7 @@ jobs:
           test -n "$aab" && test -f "$aab"
           cp "$apk" out/test-dpls-app-1.1.0-rc.1-minified-unsigned.apk
           cp "$aab" out/test-dpls-app-1.1.0-rc.1-minified-unsigned.aab
-          find TestDPLS/app/build/outputs/mapping/release -type f -maxdepth 1 -exec cp {} out/ \; 2>/dev/null || true
+          find TestDPLS/app/build/outputs/mapping/release -maxdepth 1 -type f -exec cp {} out/ \; 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -111,6 +111,9 @@ jobs:
           name: prerelease-android-minified
           path: dist/android
 
+      - name: Generate interactive documentation from firmware sources
+        run: python3 tools/generate_behavior_sim.py --output dist/release/test-dpls-behavior-sim-1.1.1-rc.1.html
+
       - name: Prepare release artifacts
         shell: bash
         run: |
@@ -118,8 +121,7 @@ jobs:
           mkdir -p dist/release dist/docs
           cp dist/firmware/* dist/release/
           cp dist/android/* dist/release/
-          cp docs/behavior-sim.html dist/release/test-dpls-behavior-sim-1.1.1-rc.1.html
-          cp docs/behavior-sim.html dist/docs/index.html
+          cp dist/release/test-dpls-behavior-sim-1.1.1-rc.1.html dist/docs/index.html
           cp docs/bring-up-checklist.md dist/docs/
           cp docs/android-operator-guide.md dist/docs/
           cp docs/android-pmi.md dist/docs/
@@ -140,7 +142,7 @@ jobs:
           - статусный светодиод используется только для идентификации устройства;
           - актуальные Android-изменения по ТЗ и восстановление после обрыва при смене пароля;
           - Android публикуется только как minified release, без debug-сборки;
-          - интерактивная модель поведения включена отдельным HTML-файлом и в архив документации;
+          - интерактивный HTML генерируется интроспекцией текущих исходников и существует только как release artifact;
           - firmware host tests дополнены cppcheck.
 
           ## Артефакты
@@ -148,7 +150,7 @@ jobs:
           - `test-dpls-fw-1.1.1-rc.1-adc.hex` — прошивка с ADC;
           - `test-dpls-app-1.1.0-rc.1-minified-unsigned.apk` — minified release APK;
           - `test-dpls-app-1.1.0-rc.1-minified-unsigned.aab` — minified release AAB;
-          - `test-dpls-behavior-sim-1.1.1-rc.1.html` — интерактивная документация;
+          - `test-dpls-behavior-sim-1.1.1-rc.1.html` — сгенерированная интерактивная документация;
           - `test-dpls-documentation-1.1.1-rc.1.zip` — комплект документации;
           - `mapping.txt` — карта R8/ProGuard для расшифровки стеков;
           - `SHA256SUMS.txt` — контрольные суммы.
