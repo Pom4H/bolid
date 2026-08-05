@@ -349,18 +349,21 @@ int main(void) {
 
     /* Power-source and reserve-low transitions are journaled once per edge. */
     dpls_event_t ev;
+    bool event_read;
     uint32_t base = 80 + DPLS_IDENTIFY_MAX_MS;
     uint32_t seq = server.next_event_sequence;
     fake.power_src = DPLS_POWER_RESERVE;
     dpls_server_tick(&server, base + 10);
     assert(server.next_event_sequence == seq + 1);
-    assert(storage_read(&fake, server.next_event_sequence - 1, &ev));
+    event_read = storage_read(&fake, server.next_event_sequence - 1, &ev);
+    assert(event_read);
     assert(ev.event_type == 12 && ev.parameter == DPLS_POWER_RESERVE);
     seq = server.next_event_sequence;
     fake.low_reserve = true;
     dpls_server_tick(&server, base + 20);
     assert(server.next_event_sequence == seq + 1);
-    assert(storage_read(&fake, server.next_event_sequence - 1, &ev));
+    event_read = storage_read(&fake, server.next_event_sequence - 1, &ev);
+    assert(event_read);
     assert(ev.event_type == 13 && ev.parameter == 1);
     seq = server.next_event_sequence;      /* steady state logs nothing new */
     dpls_server_tick(&server, base + 30);
@@ -379,15 +382,20 @@ int main(void) {
     assert(server.real_short);
     assert(server.mode == DPLS_MODE_NORMAL);
     assert(server.next_event_sequence == seq + 2);
-    assert(storage_read(&fake, seq, &ev) && ev.event_type == 14 && ev.parameter == 1);
-    assert(storage_read(&fake, seq + 1, &ev) && ev.event_type == 8 &&
-           ev.parameter == DPLS_RETURN_AUTO_ISOLATION);
+    event_read = storage_read(&fake, seq, &ev);
+    assert(event_read);
+    assert(ev.event_type == 14 && ev.parameter == 1);
+    event_read = storage_read(&fake, seq + 1, &ev);
+    assert(event_read);
+    assert(ev.event_type == 8 && ev.parameter == DPLS_RETURN_AUTO_ISOLATION);
     seq = server.next_event_sequence;
     fake.short_active = false;             /* short cleared -> one event, param 0 */
     dpls_server_tick(&server, base + 60);
     assert(!server.real_short);
     assert(server.next_event_sequence == seq + 1);
-    assert(storage_read(&fake, seq, &ev) && ev.event_type == 14 && ev.parameter == 0);
+    event_read = storage_read(&fake, seq, &ev);
+    assert(event_read);
+    assert(ev.event_type == 14 && ev.parameter == 0);
 
     test_auth_lockout();
     test_setup_window();

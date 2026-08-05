@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, agent/android-tz-compliance]
+    branches:
+      - main
+      - "release/**"
   pull_request:
 
 permissions:
@@ -10,16 +12,23 @@ permissions:
 
 jobs:
   firmware-host-tests:
-    name: Firmware host tests
+    # Portable DPLS core is built, exercised by ctest and checked with cppcheck.
+    # The target PHY6252 image and third-party SDK are checked separately.
+    name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S Firmware -B Firmware/build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build Firmware/build
-      - name: Test
-        run: ctest --test-dir Firmware/build --output-on-failure
+      - name: Install firmware lint tools
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Build, test and lint firmware
+        run: bash tools/lint_firmware.sh
+      - name: Upload cppcheck report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-cppcheck
+          path: tmp/cppcheck.txt
+          if-no-files-found: warn
 
   android-contract:
     name: Android requirements contract
