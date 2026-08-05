@@ -115,6 +115,14 @@ data class DeviceState(
     val powerValid: Boolean = true,
     val autoIsoValid: Boolean = true,
     val adcCalibrated: Boolean = false,
+    val port1VoltageMv: Int = voltageMv,
+    val port2VoltageMv: Int = 0,
+    val portTVoltageMv: Int = 0,
+    val reserveVoltageMv: Int = 0,
+    val port1VoltageValid: Boolean = lineVoltageValid,
+    val port2VoltageValid: Boolean = false,
+    val portTVoltageValid: Boolean = false,
+    val reserveVoltageValid: Boolean = false,
 )
 
 data class EventRecord(
@@ -135,6 +143,7 @@ data class DeviceInfo(
     val hardwareReadback: Boolean,
     val adcCalibrated: Boolean,
     val userName: String,
+    val multiVoltageReport: Boolean = false,
 ) {
     /** Stable short id shown to the operator, e.g. "DPLS-1FE3D5C3". */
     val shortId: String get() = "DPLS-%08X".format(deviceId)

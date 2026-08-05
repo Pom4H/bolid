@@ -13,13 +13,14 @@
  * behaviour changes visible to the operator app. */
 #define DPLS_FW_VERSION_MAJOR 1u
 #define DPLS_FW_VERSION_MINOR 1u
-#define DPLS_FW_VERSION_PATCH 0u
+#define DPLS_FW_VERSION_PATCH 2u
 /* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
  * features the hardware/firmware does not actually provide. */
 enum {
-    DPLS_CAP_ADC_PRESENT    = 1u << 0,
-    DPLS_CAP_HW_READBACK    = 1u << 1, /* power-stage feedback (false until stage 6) */
-    DPLS_CAP_ADC_CALIBRATED = 1u << 2,
+    DPLS_CAP_ADC_PRESENT           = 1u << 0,
+    DPLS_CAP_HW_READBACK           = 1u << 1, /* power-stage feedback (false until stage 6) */
+    DPLS_CAP_ADC_CALIBRATED        = 1u << 2,
+    DPLS_CAP_MULTI_VOLTAGE_REPORT  = 1u << 3,
 };
 #ifndef DPLS_EVENT_CAPACITY
 #define DPLS_EVENT_CAPACITY 200u
@@ -64,7 +65,11 @@ enum {
     DPLS_STATE_POWER_VALID        = 1u << 2,
     DPLS_STATE_AUTOISO_VALID      = 1u << 3,
     DPLS_STATE_ADC_CALIBRATED     = 1u << 4,
+    DPLS_STATE_PORT_2_VALID       = 1u << 5,
+    DPLS_STATE_PORT_T_VALID       = 1u << 6,
 };
+#define DPLS_STATE_PORT_1_VALID DPLS_STATE_LINE_VOLTAGE_VALID
+#define DPLS_STATE_RESERVE_VOLTAGE_VALID DPLS_STATE_RESERVE_VALID
 typedef enum {
     DPLS_SETTINGS_EMPTY = 0,
     DPLS_SETTINGS_VALID = 1,
@@ -102,7 +107,14 @@ typedef struct {
     bool (*link_encrypted)(void *context);
     bool (*hardware_apply_mode)(void *context, dpls_mode_t mode);
     void (*hardware_safe_normal)(void *context);
+    /* Legacy DPLS voltage remains in STATE_REPORT bytes 2..3. Firmware 1.1.2+
+     * also appends four explicitly labelled live voltages. Missing physical
+     * channels return 0 and keep their validity bits clear. */
     uint16_t (*voltage_mv)(void *context);
+    uint16_t (*port1_voltage_mv)(void *context);
+    uint16_t (*port2_voltage_mv)(void *context);
+    uint16_t (*port_t_voltage_mv)(void *context);
+    uint16_t (*reserve_voltage_mv)(void *context);
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
     /* Optional: validity mask (DPLS_STATE_*_VALID bits) for the measured

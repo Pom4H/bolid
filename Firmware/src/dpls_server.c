@@ -248,18 +248,32 @@ static void send_auth_result(dpls_server_t *s, uint8_t status, uint16_t retry_se
 }
 
 static void send_state(dpls_server_t *s) {
-    uint8_t p[17]; memset(p, 0, sizeof(p));
+    uint8_t p[25];
+    uint16_t legacy_voltage;
+    uint16_t port1_voltage;
+    memset(p, 0, sizeof(p));
+    legacy_voltage = s->hal.voltage_mv ? s->hal.voltage_mv(s->hal.context) : 0u;
+    port1_voltage = s->hal.port1_voltage_mv ?
+        s->hal.port1_voltage_mv(s->hal.context) : legacy_voltage;
     p[0] = (uint8_t)s->mode; p[1] = (uint8_t)s->hal.power_source(s->hal.context);
-    wr16(p + 2, s->hal.voltage_mv(s->hal.context));
+    wr16(p + 2, legacy_voltage);
     if (s->mode != DPLS_MODE_NORMAL && !elapsed(s->now_ms, s->mode_deadline_ms))
         wr16(p + 4, (uint16_t)((s->mode_deadline_ms - s->now_ms + 999u) / 1000u));
     p[6] = s->hal.reserve_low(s->hal.context) ? 1u : 0u;
     /* p[7] is a flag byte: bit0 = connected, bit1 = real-short auto-isolation. */
     p[7] = (uint8_t)((s->connected ? 0x01u : 0u) | (s->real_short ? 0x02u : 0u));
     wr32(p + 8, s->now_ms / 1000u); wr32(p + 12, s->state_revision);
-    /* p[16]: measurement-validity mask. Legacy clients read only 16 bytes and
-     * ignore this; new clients hide unmeasured fields when a bit is clear. */
+    /* p[16]: per-channel measurement-validity mask. */
     p[16] = s->hal.measurement_validity ? s->hal.measurement_validity(s->hal.context) : 0u;
+    /* Firmware 1.1.2+: +1, +2, +T and reserve in mV. The original 17-byte
+     * prefix stays compatible with previous Android clients. */
+    wr16(p + 17, port1_voltage);
+    wr16(p + 19, s->hal.port2_voltage_mv ?
+                       s->hal.port2_voltage_mv(s->hal.context) : 0u);
+    wr16(p + 21, s->hal.port_t_voltage_mv ?
+                       s->hal.port_t_voltage_mv(s->hal.context) : 0u);
+    wr16(p + 23, s->hal.reserve_voltage_mv ?
+                       s->hal.reserve_voltage_mv(s->hal.context) : 0u);
     send_frame(s, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
 }
 
