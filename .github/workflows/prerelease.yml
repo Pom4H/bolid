@@ -1,0 +1,170 @@
+name: Build v1.1.1-rc.1 pre-release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v1.1.1-rc.1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease-v1.1.1-rc.1
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: v1.1.1-rc.1
+
+jobs:
+  firmware:
+    name: Build single ADC firmware
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install AC6 runtime dependencies
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y libpython3.9 libtinfo5
+
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+
+      - name: Activate CMSIS Toolbox and Arm Compiler 6
+        uses: ARM-software/cmsis-actions/vcpkg@v1
+        with:
+          config: Firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-ac6-${{ hashFiles('Firmware/targets/phy6252/vcpkg-configuration.json') }}
+
+      - name: Activate Arm Community license
+        uses: ARM-software/cmsis-actions/armlm@v1
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bash tools/build_firmware.sh out/test-dpls-fw-1.1.1-rc.1-adc.hex 2>&1 | tee out/firmware-build.log
+          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf out/test-dpls-fw-1.1.1-rc.1.axf
+          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map out/test-dpls-fw-1.1.1-rc.1.map
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-firmware
+          if-no-files-found: error
+          path: out/
+
+  android:
+    name: Build minified Android release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test, lint and build minified release only
+        working-directory: TestDPLS
+        run: ./gradlew --no-daemon clean testReleaseUnitTest lintRelease assembleRelease bundleRelease
+
+      - name: Verify and collect release packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
+          grep -q 'isShrinkResources = true' TestDPLS/app/build.gradle.kts
+          mkdir -p out
+          apk="$(find TestDPLS/app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n 1)"
+          aab="$(find TestDPLS/app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' | head -n 1)"
+          test -n "$apk" && test -f "$apk"
+          test -n "$aab" && test -f "$aab"
+          cp "$apk" out/test-dpls-app-1.1.0-rc.1-minified-unsigned.apk
+          cp "$aab" out/test-dpls-app-1.1.0-rc.1-minified-unsigned.aab
+          find TestDPLS/app/build/outputs/mapping/release -type f -maxdepth 1 -exec cp {} out/ \; 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-android-minified
+          if-no-files-found: error
+          path: out/
+
+  publish:
+    name: Publish GitHub pre-release
+    needs: [firmware, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prerelease-firmware
+          path: dist/firmware
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: prerelease-android-minified
+          path: dist/android
+
+      - name: Prepare release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release dist/docs
+          cp dist/firmware/* dist/release/
+          cp dist/android/* dist/release/
+          cp docs/behavior-sim.html dist/release/test-dpls-behavior-sim-1.1.1-rc.1.html
+          cp docs/behavior-sim.html dist/docs/index.html
+          cp docs/bring-up-checklist.md dist/docs/
+          cp docs/android-operator-guide.md dist/docs/
+          cp docs/android-pmi.md dist/docs/
+          cp docs/android-compliance.md dist/docs/
+          cp docs/oss-register.md dist/docs/
+          cp TestDPLS/BUILD.md dist/docs/android-build.md
+          (cd dist/docs && zip -r ../release/test-dpls-documentation-1.1.1-rc.1.zip .)
+          (cd dist/release && sha256sum * > SHA256SUMS.txt)
+          cat > dist/release-notes.md <<'EOF'
+          # Тест-ДПЛС v1.1.1-rc.1
+
+          Предварительная сборка из ветки `release/v1.1.1-rc.1`.
+
+          ## Главное
+
+          - единственный образ прошивки PHY6252 с ADC;
+          - последовательный опрос P20/P23 вместо одновременного запуска каналов;
+          - статусный светодиод используется только для идентификации устройства;
+          - актуальные Android-изменения по ТЗ и восстановление после обрыва при смене пароля;
+          - Android публикуется только как minified release, без debug-сборки;
+          - интерактивная модель поведения включена отдельным HTML-файлом и в архив документации;
+          - firmware host tests дополнены cppcheck.
+
+          ## Артефакты
+
+          - `test-dpls-fw-1.1.1-rc.1-adc.hex` — прошивка с ADC;
+          - `test-dpls-app-1.1.0-rc.1-minified-unsigned.apk` — minified release APK;
+          - `test-dpls-app-1.1.0-rc.1-minified-unsigned.aab` — minified release AAB;
+          - `test-dpls-behavior-sim-1.1.1-rc.1.html` — интерактивная документация;
+          - `test-dpls-documentation-1.1.1-rc.1.zip` — комплект документации;
+          - `mapping.txt` — карта R8/ProGuard для расшифровки стеков;
+          - `SHA256SUMS.txt` — контрольные суммы.
+
+          APK/AAB не подписаны production-ключом: ключ не хранится в репозитории.
+          EOF
+
+      - name: Create or update pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.1-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
+          else
+            gh release create "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.1-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
+          fi
+          gh release upload "$RELEASE_TAG" dist/release/* --clobber
