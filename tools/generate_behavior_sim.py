@@ -14,7 +14,6 @@ import os
 import re
 import sys
 from pathlib import Path
-from string import Template
 from typing import Final
 
 DEFINE_RE: Final = re.compile(r"^\s*#define\s+([A-Z0-9_]+)\s+([^/\r\n]+)", re.MULTILINE)
@@ -185,7 +184,7 @@ def extract_model(root: Path) -> dict[str, object]:
     }
 
 
-HTML_TEMPLATE: Final = Template(r'''<!doctype html>
+HTML_TEMPLATE: Final = r'''<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Тест-ДПЛС · интерактивная интроспекция</title>
 <style>
@@ -200,7 +199,7 @@ HTML_TEMPLATE: Final = Template(r'''<!doctype html>
 <section class="panel"><h2>ADC и гистерезис</h2><div class="controls"><label for="line">Напряжение ДПЛС</label><span class="value" id="lineValue"></span><input id="line" type="range" min="0" max="30000" step="100" value="24000"><span></span><label for="vcap">Напряжение резерва</label><span class="value" id="vcapValue"></span><input id="vcap" type="range" min="0" max="6000" step="50" value="4500"><span></span></div><dl class="state" id="adcState" style="margin-top:14px"></dl></section>
 <section class="panel"><h2>Распиновка</h2><table><thead><tr><th>Символ</th><th>GPIO</th><th>Роль</th><th>Тип</th></tr></thead><tbody id="pins"></tbody></table></section>
 </div><section class="panel"><h2>Источник данных</h2><div id="sources"></div><p class="note">HTML не хранится в репозитории. Он создаётся release workflow из текущих исходников.</p></section>
-</main><script id="model" type="application/json">$MODEL_JSON</script><script>
+</main><script id="model" type="application/json">__MODEL_JSON__</script><script>
 const model=JSON.parse(document.getElementById('model').textContent);let current=model.modes[0];let linePresent=true,reserveLow=false,autoIso=false;const fmtMs=ms=>ms>=60000?`${ms/60000} мин`:`${ms/1000} с`;
 document.getElementById('meta').textContent=`FW ${model.firmware} · commit ${model.commit} · ADC ${model.adc.sequential?'последовательный':'проверь реализацию'}`;const buttons=document.getElementById('modeButtons');model.modes.forEach(m=>{const b=document.createElement('button');b.textContent=m.label;b.onclick=()=>{current=m;renderMode()};b.dataset.id=m.id;buttons.appendChild(b)});
 function renderMode(){[...buttons.children].forEach(b=>b.classList.toggle('active',b.dataset.id===current.id));const deadline=current.value===0?'нет':fmtMs(model.timing.modeTimeoutMs);document.getElementById('state').innerHTML=`<dt>Режим</dt><dd>${current.label}</dd><dt>Код</dt><dd>${current.value}</dd><dt>Автовозврат</dt><dd>${deadline}</dd><dt>Break-before-make</dt><dd>да</dd>`;const names=[...current.controls,...current.indicators];document.getElementById('activePins').innerHTML=model.pins.map(p=>`<span class="chip ${names.includes(p.name)?'on':''}">${p.pin} · ${p.label}</span>`).join('')}
@@ -208,12 +207,12 @@ const timing=[['Режим испытания',model.timing.modeTimeoutMs],['Б�
 document.getElementById('pins').innerHTML=model.pins.map(p=>`<tr><td class="mono">${p.name}</td><td class="mono">${p.pin}</td><td>${p.label}</td><td>${p.kind}</td></tr>`).join('');document.getElementById('sources').innerHTML=model.sources.map(s=>`<div class="source">${s}</div>`).join('');
 function renderAdc(){const line=+document.getElementById('line').value,vcap=+document.getElementById('vcap').value;if(linePresent&&line<model.adc.lineAbsentMv)linePresent=false;else if(!linePresent&&line>model.adc.linePresentMv)linePresent=true;if(!reserveLow&&vcap<model.adc.reserveLowMv)reserveLow=true;else if(reserveLow&&vcap>model.adc.reserveOkMv)reserveLow=false;if(!autoIso&&line<model.adc.autoIsoTripMv&&current.value===0)autoIso=true;else if(autoIso&&line>model.adc.autoIsoClearMv)autoIso=false;document.getElementById('lineValue').textContent=`${(line/1000).toFixed(1)} В`;document.getElementById('vcapValue').textContent=`${(vcap/1000).toFixed(2)} В`;document.getElementById('adcState').innerHTML=`<dt>Источник питания</dt><dd class="${linePresent?'status-ok':'status-bad'}">${linePresent?'линия':'резерв'}</dd><dt>Низкий резерв</dt><dd class="${reserveLow?'status-bad':'status-ok'}">${reserveLow?'да':'нет'}</dd><dt>Автоизоляция КЗ</dt><dd class="${autoIso?'status-bad':'status-ok'}">${autoIso?'активна':'нет'}</dd><dt>Окно усреднения</dt><dd>${model.adc.window} отсчётов</dd><dt>Период запуска</dt><dd>${model.adc.decimate} × системный тик</dd>`}
 document.getElementById('line').oninput=renderAdc;document.getElementById('vcap').oninput=renderAdc;renderMode();renderAdc();
-</script></body></html>''')
+</script></body></html>'''
 
 
 def render(model: dict[str, object]) -> str:
     payload = json.dumps(model, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    return HTML_TEMPLATE.substitute(MODEL_JSON=payload)
+    return HTML_TEMPLATE.replace("__MODEL_JSON__", payload)
 
 
 def main() -> int:
