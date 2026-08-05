@@ -41,10 +41,6 @@
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
-/* Bound the LED re-arming interval: fine enough for a 150 ms flash edge, but
- * still cheap during the long inter-series pauses. */
-#define DPLS_LED_TICK_MIN_MS 10u
-#define DPLS_LED_TICK_MAX_MS 250u
 /* Line-voltage ADC: sample about once a second (every Nth 200 ms tick) and
  * average over a short window against noise, keeping the pulsed draw within the
  * ≤0.5 mA budget. The ISR is deliberately minimal — raw copy plus a task wake —
@@ -1104,15 +1100,10 @@ void dpls_phy6252_tick(void)
 uint32 dpls_phy6252_led_tick(void)
 {
     uint32_t now = now_ms();
-    uint32_t delay;
-    dpls_led_scene_t scene;
-    bool reserve = power_source(NULL) == DPLS_POWER_RESERVE;
-    if (identify_led_active) scene = DPLS_LED_SCENE_IDENTIFY;
-    else if (auto_isolation_active) scene = DPLS_LED_SCENE_AUTO_ISOLATION;
-    else scene = led_scene_for_mode(hardware_mode);
-    dpls_led_set(&status_led, scene, reserve, now);
-    delay = dpls_led_tick(&status_led, now);
-    if (delay < DPLS_LED_TICK_MIN_MS) delay = DPLS_LED_TICK_MIN_MS;
-    if (delay > DPLS_LED_TICK_MAX_MS) delay = DPLS_LED_TICK_MAX_MS;
-    return delay;
+    /* The only job left for this LED is "show on object": mode indication has
+     * its own lamps, and reserve/isolation state is read in the app. The driver
+     * returns the exact time to the next edge (500 ms while blinking, 1 s when
+     * idle), so the timer is re-armed straight from it — no clamping. */
+    dpls_led_set_identify(&status_led, identify_led_active, now);
+    return dpls_led_tick(&status_led, now);
 }
