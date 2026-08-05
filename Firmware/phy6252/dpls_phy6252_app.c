@@ -383,7 +383,11 @@ static bool apply_mode(void *context, dpls_mode_t mode)
 static void status_led_output(void *context, bool on)
 {
     (void)context;
-    hal_gpio_write(DPLS_PIN_STATUS_LED, on ? 1 : 0);
+    /* TЗ: identify is shown by green flashes. Always drive the unused colour
+     * channels low so a retained/stale RGB state cannot mix into the scene. */
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
 }
 
 static void load_calibration(void)
@@ -463,7 +467,7 @@ static void adc_kick(void)
     uint8_t claim;
     if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
-    /* One channel per conversion. P20/P15/P11 are the independent +1/+2/+T
+    /* One channel per conversion. P20/P15/P24 are the independent +1/+2/+T
      * voltage paths, P23 is the reserve accumulator. Standard resolution is
      * used because every divider keeps its ADC pin close to or below 1 V. */
     if (adc_pending & DPLS_ADC_NEED_PORT1) {
@@ -473,7 +477,7 @@ static void adc_kick(void)
         channel = ADC_BIT(ADC_CH3N_P15);
         claim = DPLS_ADC_NEED_PORT2;
     } else if (adc_pending & DPLS_ADC_NEED_PORT_T) {
-        channel = ADC_BIT(ADC_CH1N_P11);
+        channel = ADC_BIT(ADC_CH2N_P24);
         claim = DPLS_ADC_NEED_PORT_T;
     } else {
         channel = ADC_BIT(ADC_CH1P_P23);
@@ -513,7 +517,7 @@ void dpls_phy6252_process_adc(void)
                                 port2_window, &port2_window_count, &port2_window_pos,
                                 &cached_port2_mv);
             break;
-        case ADC_CH0:
+        case ADC_CH2:
             process_adc_channel(ch, adc_raw, size, &line_calib,
                                 port_t_window, &port_t_window_count, &port_t_window_pos,
                                 &cached_port_t_mv);
@@ -894,7 +898,7 @@ static void clear_settings_and_bonds(void)
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
-    hal_gpio_write(DPLS_PIN_STATUS_LED, 1);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 1);
     NVIC_SystemReset();
 }
 
@@ -946,7 +950,9 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_STATUS_LED, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_RED, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_GREEN, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_BLUE, OEN);
     /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
      * through sleep only while it is registered for AON retention, and the
      * wake handler restores just those pins. Without this a mode output goes
@@ -959,9 +965,13 @@ void dpls_phy6252_init(uint8 new_task_id)
     (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
     (void)hal_gpioretention_register(DPLS_PIN_KZ_2);
     (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
-    (void)hal_gpioretention_register(DPLS_PIN_STATUS_LED);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_RED);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
     mode_outputs_off();
-    hal_gpio_write(DPLS_PIN_STATUS_LED, 0);
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hardware_mode = DPLS_MODE_NORMAL;
     dpls_led_init(&status_led, status_led_output, NULL, now_ms());
     line_window_count = line_window_pos = 0;

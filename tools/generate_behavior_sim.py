@@ -51,7 +51,9 @@ PIN_LABELS: Final = {
     "DPLS_PIN_PORT_T_ADC": "ADC · напряжение +Т",
     "DPLS_PIN_VCAP_ADC": "ADC · резерв",
     "DPLS_PIN_FACTORY_RESET": "сброс пароля",
-    "DPLS_PIN_STATUS_LED": "статус · идентификация",
+    "DPLS_PIN_LED_RED": "RGB · красный",
+    "DPLS_PIN_LED_GREEN": "RGB · зелёный / идентификация",
+    "DPLS_PIN_LED_BLUE": "RGB · синий",
 }
 
 
