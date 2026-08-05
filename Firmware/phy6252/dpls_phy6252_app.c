@@ -321,8 +321,10 @@ static bool link_encrypted(void *context)
     return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
 }
 
-/* Drop every mode output to its safe (de-energized) level. Isolation switches
- * conduct and short shunts open, which is the "Norma" state. */
+/* Drop every mode output and its indicator lamp to the safe (de-energized)
+ * level. Isolation switches conduct and short shunts open, which is the "Norma"
+ * state. Every auto-return path (timeout, disconnect, low reserve, real short,
+ * internal error) funnels through here, so a lamp can never outlive its mode. */
 static void mode_outputs_off(void)
 {
     hal_gpio_write(DPLS_PIN_ISO_1, 0);
@@ -331,6 +333,11 @@ static void mode_outputs_off(void)
     hal_gpio_write(DPLS_PIN_KZ_1, 0);
     hal_gpio_write(DPLS_PIN_KZ_2, 0);
     hal_gpio_write(DPLS_PIN_KZ_T, 0);
+    hal_gpio_write(DPLS_PIN_LED_OPEN_T, 0);
+    hal_gpio_write(DPLS_PIN_LED_OPEN_MAIN, 0);
+    hal_gpio_write(DPLS_PIN_LED_SHORT_1, 0);
+    hal_gpio_write(DPLS_PIN_LED_SHORT_2, 0);
+    hal_gpio_write(DPLS_PIN_LED_SHORT_T, 0);
 }
 
 static void safe_normal(void *context)
@@ -355,27 +362,30 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     mode_outputs_off();
     switch (mode) {
     case DPLS_MODE_NORMAL: break;
-    case DPLS_MODE_OPEN_T: hal_gpio_write(DPLS_PIN_ISO_T, 1); break;
-    case DPLS_MODE_OPEN_MAIN: hal_gpio_write(DPLS_PIN_ISO_2, 1); break;
-    case DPLS_MODE_SHORT_1: hal_gpio_write(DPLS_PIN_KZ_1, 1); break;
-    case DPLS_MODE_SHORT_2: hal_gpio_write(DPLS_PIN_KZ_2, 1); break;
-    case DPLS_MODE_SHORT_T: hal_gpio_write(DPLS_PIN_KZ_T, 1); break;
+    case DPLS_MODE_OPEN_T:
+        hal_gpio_write(DPLS_PIN_ISO_T, 1);
+        hal_gpio_write(DPLS_PIN_LED_OPEN_T, 1);
+        break;
+    case DPLS_MODE_OPEN_MAIN:
+        hal_gpio_write(DPLS_PIN_ISO_2, 1);
+        hal_gpio_write(DPLS_PIN_LED_OPEN_MAIN, 1);
+        break;
+    case DPLS_MODE_SHORT_1:
+        hal_gpio_write(DPLS_PIN_KZ_1, 1);
+        hal_gpio_write(DPLS_PIN_LED_SHORT_1, 1); /* same pad as KZ_1 */
+        break;
+    case DPLS_MODE_SHORT_2:
+        hal_gpio_write(DPLS_PIN_KZ_2, 1);
+        hal_gpio_write(DPLS_PIN_LED_SHORT_2, 1);
+        break;
+    case DPLS_MODE_SHORT_T:
+        hal_gpio_write(DPLS_PIN_KZ_T, 1);
+        hal_gpio_write(DPLS_PIN_LED_SHORT_T, 1);
+        break;
     default: return false;
     }
     hardware_mode = mode;
     return true;
-}
-
-static dpls_led_scene_t led_scene_for_mode(dpls_mode_t mode)
-{
-    switch (mode) {
-    case DPLS_MODE_OPEN_T: return DPLS_LED_SCENE_OPEN_T;
-    case DPLS_MODE_OPEN_MAIN: return DPLS_LED_SCENE_OPEN_MAIN;
-    case DPLS_MODE_SHORT_1: return DPLS_LED_SCENE_SHORT_1;
-    case DPLS_MODE_SHORT_2: return DPLS_LED_SCENE_SHORT_2;
-    case DPLS_MODE_SHORT_T: return DPLS_LED_SCENE_SHORT_T;
-    default: return DPLS_LED_SCENE_NORMAL;
-    }
 }
 
 static void status_led_output(void *context, bool on)
@@ -882,7 +892,30 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
     hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_OPEN_T, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_OPEN_MAIN, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_1, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_2, OEN);
+    hal_gpio_pin_init(DPLS_PIN_LED_SHORT_T, OEN);
     hal_gpio_pin_init(DPLS_PIN_STATUS_LED, OEN);
+    /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
+     * through sleep only while it is registered for AON retention, and the
+     * wake handler restores just those pins. Without this a mode output goes
+     * high and then silently collapses at the first sleep window — the pin is
+     * written once on the mode change and never again, so it never comes back
+     * (the LED only survived because its blink rewrites the pad). */
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_1);
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_2);
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_T);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_2);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_OPEN_T);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_OPEN_MAIN);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_1);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_2);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_SHORT_T);
+    (void)hal_gpioretention_register(DPLS_PIN_STATUS_LED);
     mode_outputs_off();
     hal_gpio_write(DPLS_PIN_STATUS_LED, 0);
     hardware_mode = DPLS_MODE_NORMAL;
