@@ -47,6 +47,9 @@ jobs:
           grep -q 'Build.VERSION_CODES.S' TestDPLS/app/src/main/java/ru/bolid/testdpls/MainActivity.kt
           grep -q 'readRemoteRssi' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
           grep -q 'SCAN_DURATION_MS = 60_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'STATE_REFRESH_MS = 1_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'state.authenticated && !state.commandInProgress && state.state != null' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'port2VoltageValid' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
           grep -q 'CONNECTION_TIMEOUT_MILLIS = 10_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
           grep -q 'IDENTIFY_DURATION_SECONDS = 60' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
           grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
@@ -56,6 +59,7 @@ jobs:
           test -f docs/android-pmi.md
           test -f docs/android-operator-guide.md
           test -f docs/oss-register.md
+          test -f docs/live-voltage-requirements.md
           test -f tools/generate_behavior_sim.py
           test ! -f docs/behavior-sim.html
           test ! -f tools/patches/android-compliance.patch
@@ -65,7 +69,7 @@ jobs:
         run: |
           python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
           test -s /tmp/test-dpls-behavior-sim.html
-          grep -q '"firmware":"1.1.1"' /tmp/test-dpls-behavior-sim.html
+          grep -q '"firmware":"1.1.2"' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_LINE_ADC' /tmp/test-dpls-behavior-sim.html
 
   android:
