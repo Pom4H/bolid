@@ -12,8 +12,6 @@ permissions:
 
 jobs:
   firmware-host-tests:
-    # Portable DPLS core is built, exercised by ctest and checked with cppcheck.
-    # The target PHY6252 image and third-party SDK are checked separately.
     name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +38,8 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'minSdk = 26' TestDPLS/app/build.gradle.kts
+          grep -q 'versionCode = 5' TestDPLS/app/build.gradle.kts
+          grep -q 'versionName = "1.1.2"' TestDPLS/app/build.gradle.kts
           grep -q 'screenOrientation="portrait"' TestDPLS/app/src/main/AndroidManifest.xml
           grep -q 'allowBackup="false"' TestDPLS/app/src/main/AndroidManifest.xml
           grep -q 'androidx.core.content.FileProvider' TestDPLS/app/src/main/AndroidManifest.xml
@@ -54,6 +54,23 @@ jobs:
           grep -q 'IDENTIFY_DURATION_SECONDS = 60' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/AndroidComplianceRules.kt
           grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
           grep -q 'isShrinkResources = true' TestDPLS/app/build.gradle.kts
+
+          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P11' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_STATUS_LED GPIO_P07' Firmware/phy6252/dpls_board.h
+          grep -q 'ADC_CH3P_P20' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_CH3N_P15' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_CH1P_P23' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_ADC_NEED_ALL' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_STATE_PORT_2_VALID' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_STATE_PORT_T_VALID' Firmware/phy6252/dpls_phy6252_app.c
+
           test -f TestDPLS/BUILD.md
           test -f docs/android-compliance.md
           test -f docs/android-pmi.md
@@ -62,6 +79,8 @@ jobs:
           test -f docs/live-voltage-requirements.md
           test -f tools/generate_behavior_sim.py
           test ! -f docs/behavior-sim.html
+          test ! -f tools/apply_four_channel_adc_release.py
+          test ! -f .github/workflows/apply-four-channel-adc.yml
           test ! -f tools/patches/android-compliance.patch
           test ! -f tools/apply_android_compliance.py
           test ! -f .github/workflows/apply-android-compliance.yml
@@ -69,8 +88,11 @@ jobs:
         run: |
           python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
           test -s /tmp/test-dpls-behavior-sim.html
-          grep -q '"firmware":"1.1.2"' /tmp/test-dpls-behavior-sim.html
-          grep -q 'DPLS_PIN_LINE_ADC' /tmp/test-dpls-behavior-sim.html
+          grep -q '"firmware":"1.1.3"' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_PORT1_ADC' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_PORT2_ADC' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_PORT_T_ADC' /tmp/test-dpls-behavior-sim.html
+          grep -q 'DPLS_PIN_VCAP_ADC' /tmp/test-dpls-behavior-sim.html
 
   android:
     name: Android tests + minified release
