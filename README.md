@@ -20,16 +20,14 @@ PHY6252 (плата PB-03F-Kit), Android- и iOS-клиенты. Протоко�
 
 ## Прошивка
 
-Собираются два образа — с измерением напряжений (ADC) и без него:
+Образ один — с измерением напряжения ДПЛС (P20) и резерва (P23):
 
-| Образ | Команда сборки | Когда использовать |
-|---|---|---|
-| **С ADC** (основной) | `DPLS_ADC=1 tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex` | Реальная плата с силовой частью: меряет напряжение ДПЛС (P20) и резерва (P23) |
-| **Без ADC** | `DPLS_ADC=0 tools/build_firmware.sh tmp/test-dpls-adcoff.hex` | Голый PB-03F-Kit без силовой части: входы ADC висят в воздухе, «низкий резерв» мгновенно снимал бы тестовые режимы |
+```sh
+tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
+```
 
-`DPLS_ADC=1` — значение по умолчанию. CI (workflow `firmware-target.yml`)
-собирает оба образа и выкладывает их одним artifact'ом
-(`test-dpls-phy6252-sdk-3.1.2`: hex + axf + map на каждый вариант).
+CI (workflow `firmware-target.yml`) собирает его же и выкладывает artifact'ом
+`test-dpls-phy6252-sdk-3.1.2` (hex + axf + map).
 
 ```sh
 # ядро на хосте: сборка + тесты

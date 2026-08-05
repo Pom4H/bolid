@@ -47,22 +47,17 @@
 #define DPLS_LED_TICK_MAX_MS 250u
 /* Line-voltage ADC: sample about once a second (every Nth 200 ms tick) and
  * average over a short window against noise, keeping the pulsed draw within the
- * ≤0.5 mA budget. */
+ * ≤0.5 mA budget. The ISR is deliberately minimal — raw copy plus a task wake —
+ * with all scaling and calibration done in the OSAL task, so a conversion never
+ * competes with the radio inside interrupt context. */
 #define DPLS_ADC_DECIMATE 5u
 #define DPLS_ADC_WINDOW 8u
-/* ADC sampling. The ISR was reworked to be minimal (raw copy + task wake) with
- * all scaling/calibration moved to the OSAL task — the correct structure and a
- * prerequisite for enabling this. BUT a hardware soak (2026-07-14) showed the
- * watchdog reset loop persists even with the minimal ISR: ~9 resets in 45 s the
- * moment sampling is enabled. That rules out the heavy-ISR hypothesis and points
- * at ADC↔radio/clock coexistence in adc_kick (hal_adc_config_channel/
- * hal_adc_start re-touching CLKHF/DLL each kick), which needs PHY62xx-specific
- * investigation (init the ADC clock once, gate sampling to BLE-idle windows, or
- * an alternate clock source). Kept DISABLED so the device stays stable; the
- * STATE_REPORT validity mask (stage 1) then honestly reports "not measured".
- * The improved ISR/task split above is retained for when the clock issue is
- * fixed. See docs/bring-up-checklist.md §3. */
-#define DPLS_ADC_SAMPLING 0
+/* Channels are kicked one at a time: the SDK 3.1.2 ADCC handler only drains the
+ * IRQ when status == all_channels, so a dual-channel kick whose conversions
+ * finish out of lockstep can leave a pending interrupt uncleared and starve the
+ * OSAL loop. Reproduced by tests/test_adc_irq_model.c. */
+#define DPLS_ADC_NEED_LINE 0x01u
+#define DPLS_ADC_NEED_VCAP 0x02u
 /* Power-source detection from the line voltage, with hysteresis so a value near
  * the threshold does not flap. Below the 5 V line minimum the device is running
  * from its reserve (also true while it is shorting the line in a KZ mode). */
@@ -168,6 +163,7 @@ static uint8_t vcap_window_count, vcap_window_pos;
 static volatile uint16_t cached_line_mv;
 static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
+static uint8_t adc_pending; /* DPLS_ADC_NEED_* bits still owed this cycle */
 static uint8_t adc_decimate;
 static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
@@ -411,7 +407,6 @@ static void load_calibration(void)
     }
 }
 
-#if DPLS_ADC_SAMPLING
 /* Fold one sample into a moving-average window and return the current average. */
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
@@ -471,12 +466,21 @@ static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t siz
 static void adc_kick(void)
 {
     adc_Cfg_t cfg;
-    if (adc_busy) return;
+    uint8_t channel;
+    uint8_t claim;
+    if (adc_busy || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
-    /* Single-ended P20 (line) and P23 (reserve), standard resolution: the
-     * high-resolution path tops out near 0.8 V, but the dividers keep both pins
-     * near or below ~1 V at full scale. */
-    cfg.channel = ADC_BIT(ADC_CH3P_P20) | ADC_BIT(ADC_CH1P_P23);
+    /* One channel per conversion — see DPLS_ADC_NEED_*. Single-ended P20 (line)
+     * and P23 (reserve), standard resolution: the high-resolution path tops out
+     * near 0.8 V, but the dividers keep both pins near or below ~1 V. */
+    if (adc_pending & DPLS_ADC_NEED_LINE) {
+        channel = ADC_BIT(ADC_CH3P_P20);
+        claim = DPLS_ADC_NEED_LINE;
+    } else {
+        channel = ADC_BIT(ADC_CH1P_P23);
+        claim = DPLS_ADC_NEED_VCAP;
+    }
+    cfg.channel = channel;
     cfg.is_continue_mode = FALSE;
     cfg.is_differential_mode = 0u;
     cfg.is_high_resolution = 0u;
@@ -485,13 +489,18 @@ static void adc_kick(void)
         adc_busy = false;
         return;
     }
-    hal_adc_start();
+    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
+        /* Configuration has already claimed the analog pins and ADCC power
+         * lock. Release both if the 3.1.2 start operation is rejected. */
+        (void)hal_adc_stop();
+        adc_busy = false;
+        return;
+    }
+    adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
 }
-#endif /* DPLS_ADC_SAMPLING */
 
 void dpls_phy6252_process_adc(void)
 {
-#if DPLS_ADC_SAMPLING
     if (line_raw_ready) {
         line_raw_ready = false;
         process_adc_channel(ADC_CH9, line_raw, line_raw_size, &line_calib,
@@ -502,7 +511,9 @@ void dpls_phy6252_process_adc(void)
         process_adc_channel(ADC_CH1, vcap_raw, vcap_raw_size, &vcap_calib,
                             vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
     }
-#endif
+    /* Start the sibling channel from task context once the previous one-shot
+     * has released adc_busy (never from the ISR). */
+    adc_kick();
 }
 
 /* Derive the power-source and reserve-low flags with hysteresis. Skipped until
@@ -569,9 +580,9 @@ static bool real_short_active(void *context)
 
 /* Which STATE_REPORT fields carry a real measurement. Line-derived fields
  * (voltage, power source, auto-isolation) become valid once the line channel
- * has produced a sample; reserve once the VCAP channel has. With ADC sampling
- * disabled the windows never fill, so this stays 0 and the app hides the
- * fabricated 0 mV / "from line" values behind "—" / "Не определён". */
+ * has produced a sample; reserve once the VCAP channel has. Until the first
+ * conversion lands the mask stays 0 and the app shows "—" / "Не определён"
+ * instead of the cold-cache 0 mV / "from line" defaults. */
 static uint8_t measurement_validity(void *context)
 {
     uint8_t flags = 0;
@@ -703,11 +714,9 @@ static void device_info(void *context, dpls_device_info_t *out)
     out->fw_patch = DPLS_FW_VERSION_PATCH;
     out->hw_revision = DPLS_HW_REVISION;
     out->capabilities = 0u;
-#if DPLS_ADC_SAMPLING
     out->capabilities |= DPLS_CAP_ADC_PRESENT;
     out->capabilities |= DPLS_CAP_MULTI_VOLTAGE_REPORT;
     if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
-#endif
     /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
 }
 
@@ -942,9 +951,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     line_established = false;
     adc_busy = false;
     load_calibration();
-#if DPLS_ADC_SAMPLING
     hal_adc_init();
-#endif
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
     hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     classify_settings();
@@ -1025,12 +1032,20 @@ void dpls_phy6252_connected(uint16 conn_handle)
     connection_handle = conn_handle;
     connected_at_ms = now_ms();
     connection_had_encryption = false;
-    /* Keep the core awake for the whole connection. With sleep enabled the SoC
-     * power-cycles between connection events (~every 30 ms) and a periodic ADC
-     * kick racing those clock transitions eventually freezes the OSAL loop
-     * (observed on SDK 3.1.2 ~90 s into a connected session; on 3.1.1 the same
-     * race surfaced as watchdog resets). The tester is externally powered and
-     * connections are short-lived, so staying awake while connected is cheap. */
+    /* Intended: keep the core awake for the whole connection, because a
+     * periodic ADC kick racing the sleep/wake clock transitions between
+     * connection events eventually freezes the OSAL loop (SDK 3.1.2, ~90 s in;
+     * on 3.1.1 the same race surfaced as watchdog resets).
+     *
+     * NOTE: this lock is currently a no-op — hal_pwrmgr_lock() only takes
+     * effect for a module previously passed to hal_pwrmgr_register(), and
+     * MOD_USR1 is never registered, so the call returns PPlus_ERR_NOT_REGISTED
+     * and sleep stays enabled. Every hardware soak so far therefore ran WITH
+     * sleep active during connections. Making it real (register MOD_USR1)
+     * raises the connected current well above the ≤0.5 mA budget and shortens
+     * the reserve autonomy, so it is left as-is until that trade-off is
+     * measured on the power board. GPIO retention above covers the output
+     * levels either way. */
     (void)hal_pwrmgr_lock(MOD_USR1);
     dpls_server_connected(&server, now_ms());
 }
@@ -1083,12 +1098,11 @@ void dpls_phy6252_tick(void)
             clear_settings_and_bonds();
         }
     }
-#if DPLS_ADC_SAMPLING
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
+        adc_pending = (uint8_t)(DPLS_ADC_NEED_LINE | DPLS_ADC_NEED_VCAP);
         adc_kick();
     }
-#endif
     update_power_state();
     dpls_server_tick(&server, now_ms());
     /* Recover from a lost ATT confirmation: drop the unacknowledged head so the
