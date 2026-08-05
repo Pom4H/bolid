@@ -1,24 +1,24 @@
-name: Build v1.1.2-rc.1 pre-release
+name: Build v1.1.3-rc.1 pre-release
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - release/v1.1.2-rc.1
+      - release/v1.1.3-rc.1
 
 permissions:
   contents: write
 
 concurrency:
-  group: prerelease-v1.1.2-rc.1
+  group: prerelease-v1.1.3-rc.1
   cancel-in-progress: true
 
 env:
-  RELEASE_TAG: v1.1.2-rc.1
+  RELEASE_TAG: v1.1.3-rc.1
 
 jobs:
   firmware:
-    name: Build single ADC firmware
+    name: Build four-channel ADC firmware
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
@@ -46,9 +46,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          bash tools/build_firmware.sh out/test-dpls-fw-1.1.2-rc.1-adc.hex 2>&1 | tee out/firmware-build.log
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf out/test-dpls-fw-1.1.2-rc.1.axf
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map out/test-dpls-fw-1.1.2-rc.1.map
+          bash tools/build_firmware.sh out/test-dpls-fw-1.1.3-rc.1-adc.hex 2>&1 | tee out/firmware-build.log
+          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf out/test-dpls-fw-1.1.3-rc.1.axf
+          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map out/test-dpls-fw-1.1.3-rc.1.map
 
       - uses: actions/upload-artifact@v4
         with:
@@ -77,6 +77,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          grep -q 'versionCode = 5' TestDPLS/app/build.gradle.kts
+          grep -q 'versionName = "1.1.2"' TestDPLS/app/build.gradle.kts
           grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
           grep -q 'isShrinkResources = true' TestDPLS/app/build.gradle.kts
           mkdir -p out
@@ -84,8 +86,8 @@ jobs:
           aab="$(find TestDPLS/app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' | head -n 1)"
           test -n "$apk" && test -f "$apk"
           test -n "$aab" && test -f "$aab"
-          cp "$apk" out/test-dpls-app-1.1.1-rc.1-minified-unsigned.apk
-          cp "$aab" out/test-dpls-app-1.1.1-rc.1-minified-unsigned.aab
+          cp "$apk" out/test-dpls-app-1.1.2-rc.1-minified-unsigned.apk
+          cp "$aab" out/test-dpls-app-1.1.2-rc.1-minified-unsigned.aab
           find TestDPLS/app/build/outputs/mapping/release -maxdepth 1 -type f -exec cp {} out/ \; 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
@@ -112,7 +114,7 @@ jobs:
           path: dist/android
 
       - name: Generate interactive documentation from firmware sources
-        run: python3 tools/generate_behavior_sim.py --output dist/release/test-dpls-behavior-sim-1.1.2-rc.1.html
+        run: python3 tools/generate_behavior_sim.py --output dist/release/test-dpls-behavior-sim-1.1.3-rc.1.html
 
       - name: Prepare release artifacts
         shell: bash
@@ -121,7 +123,7 @@ jobs:
           mkdir -p dist/release dist/docs
           cp dist/firmware/* dist/release/
           cp dist/android/* dist/release/
-          cp dist/release/test-dpls-behavior-sim-1.1.2-rc.1.html dist/docs/index.html
+          cp dist/release/test-dpls-behavior-sim-1.1.3-rc.1.html dist/docs/index.html
           cp docs/bring-up-checklist.md dist/docs/
           cp docs/android-operator-guide.md dist/docs/
           cp docs/android-pmi.md dist/docs/
@@ -129,32 +131,32 @@ jobs:
           cp docs/oss-register.md dist/docs/
           cp docs/live-voltage-requirements.md dist/docs/
           cp TestDPLS/BUILD.md dist/docs/android-build.md
-          (cd dist/docs && zip -r ../release/test-dpls-documentation-1.1.2-rc.1.zip .)
+          (cd dist/docs && zip -r ../release/test-dpls-documentation-1.1.3-rc.1.zip .)
           (cd dist/release && sha256sum * > SHA256SUMS.txt)
           cat > dist/release-notes.md <<'EOF'
-          # Тест-ДПЛС v1.1.2-rc.1
+          # Тест-ДПЛС v1.1.3-rc.1
 
-          Предварительная сборка из ветки `release/v1.1.2-rc.1`.
+          Предварительная сборка из ветки `release/v1.1.3-rc.1`.
 
           ## Главное
 
-          - единственный образ прошивки PHY6252 с ADC;
-          - напряжения запрашиваются автоматически каждую секунду во всех режимах, включая «Норма»;
-          - STATE_REPORT расширен значениями +1, +2, +Т и резерва с отдельными validity-флагами;
-          - текущая плата физически измеряет общий ДПЛС на P20 и резерв на P23; отсутствующие +2/+Т показываются как «Нет данных», а не копия общего канала;
-          - последовательный опрос P20/P23 вместо одновременного запуска каналов;
-          - Android публикуется только как minified release, без debug-сборки;
-          - интерактивный HTML генерируется интроспекцией текущих исходников и существует только как release artifact;
-          - firmware host tests дополнены cppcheck.
+          - PHY6252 последовательно измеряет четыре физических канала один раз в секунду: +1 на P20, +2 на P15, +Т на P11 и резерв на P23;
+          - внешний ADC и внешний аналоговый мультиплексор не требуются;
+          - для +1/+2/+Т нужны три отдельных входных делителя/защиты 0-30 В на плате hardware revision 2;
+          - STATE_REPORT передаёт четыре независимых значения с отдельными validity-флагами; подстановка одного канала в другой запрещена;
+          - приложение обновляет показания во всех режимах, включая «Норма»;
+          - целевая распиновка возвращена к архитектуре: KZ_1=P14, STATUS_LED=P7; P11/P15 освобождены от отладочных индикаторов и используются как ADC;
+          - общий raw-буфер сохраняет SRAM при четырёхканальном опросе;
+          - Android version 1.1.2, versionCode 5, только minified release без debug-сборки.
 
           ## Артефакты
 
-          - `test-dpls-fw-1.1.2-rc.1-adc.hex` — прошивка с ADC;
-          - `test-dpls-app-1.1.1-rc.1-minified-unsigned.apk` — minified release APK;
-          - `test-dpls-app-1.1.1-rc.1-minified-unsigned.aab` — minified release AAB;
-          - `test-dpls-behavior-sim-1.1.2-rc.1.html` — сгенерированная интерактивная документация;
-          - `test-dpls-documentation-1.1.2-rc.1.zip` — комплект документации и требования к live-телеметрии;
-          - `mapping.txt` — карта R8/ProGuard для расшифровки стеков;
+          - `test-dpls-fw-1.1.3-rc.1-adc.hex` — прошивка для hardware revision 2;
+          - `test-dpls-app-1.1.2-rc.1-minified-unsigned.apk` — minified release APK;
+          - `test-dpls-app-1.1.2-rc.1-minified-unsigned.aab` — minified release AAB;
+          - `test-dpls-behavior-sim-1.1.3-rc.1.html` — сгенерированная интерактивная документация;
+          - `test-dpls-documentation-1.1.3-rc.1.zip` — документация и требования к live-телеметрии;
+          - `mapping.txt` — карта R8/ProGuard;
           - `SHA256SUMS.txt` — контрольные суммы.
 
           APK/AAB не подписаны production-ключом: ключ не хранится в репозитории.
@@ -167,8 +169,8 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.2-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
+            gh release edit "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.3-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
           else
-            gh release create "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.2-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
+            gh release create "$RELEASE_TAG" --title "Тест-ДПЛС v1.1.3-rc.1" --notes-file dist/release-notes.md --prerelease --target "$GITHUB_SHA"
           fi
           gh release upload "$RELEASE_TAG" dist/release/* --clobber
