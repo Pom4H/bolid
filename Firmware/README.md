@@ -36,7 +36,7 @@ target-проект AC6 (`targets/phy6252/`). Полный vendor SDK 3.1.2 за
   indication/notification: по одному кадру на ATT-подтверждение, таймаут 2 с на
   потерянное подтверждение.
 
-UUID совпадают с Android-клиентом:
+UUID совпадают с Android- и iOS-клиентами:
 
 - Service `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`
 - RX `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001`

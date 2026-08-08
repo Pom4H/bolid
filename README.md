@@ -1,9 +1,9 @@
 # Test-DPLS
 
 Стек безопасного BLE-управления испытательным устройством ДПЛС: прошивка для
-PHY6252 (плата PB-03F-Kit) и Android-клиент. Протокол, аутентификация и
-хранение журнала описаны в [Firmware/README.md](Firmware/README.md), клиент —
-в [TestDPLS/README.md](TestDPLS/README.md).
+PHY6252 (плата PB-03F-Kit), Android- и iOS-клиенты. Протокол, аутентификация и
+хранение журнала описаны в [Firmware/README.md](Firmware/README.md); клиенты —
+в [TestDPLS/README.md](TestDPLS/README.md) и [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
 
 ## Структура
 
@@ -11,6 +11,7 @@ PHY6252 (плата PB-03F-Kit) и Android-клиент. Протокол, ау�
 |---|---|
 | `Firmware/` | Переносимое ядро сервера (C99, хостовые тесты) + адаптер PHY62XX SDK 3.1.2 и target-проект |
 | `TestDPLS/` | Android-клиент (Kotlin, Jetpack Compose, minSdk 33) |
+| `TestDPLS-iOS/` | iPhone-клиент (Swift, SwiftUI, iOS 16+) |
 | `tools/` | Сборка/прошивка/UART-отладка |
 | `tools/e2e/` | E2E-обвязка: телефон + плата через adb |
 | `docs/hardware/` | Схема PB-03F-Kit |
@@ -63,6 +64,14 @@ python3 tools/serial_capture.py 20 --no-reset
 cd TestDPLS && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
     ./gradlew installDebug
 ```
+
+## iOS
+
+```sh
+open TestDPLS-iOS/TestDPLS.xcodeproj   # Xcode 15+, физический iPhone
+```
+
+Подробности — [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
 
 ## E2E на живых устройствах
 
