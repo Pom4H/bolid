@@ -28,6 +28,17 @@ dotnet run --project src\TestDPLS\TestDPLS.csproj -c Release
 dotnet publish src\TestDPLS\TestDPLS.csproj -c Release -r win-x64 --self-contained true -o artifacts\win-x64
 ```
 
+### Preview без Windows BLE (Linux/macOS)
+
+Для просмотра UI на машине без WinRT BLE:
+
+```bash
+cd TestDPLS-Windows
+dotnet run --project src/TestDPLS.Preview/TestDPLS.Preview.csproj -c Release
+```
+
+Mock-устройства и пароль демо: `password1`.
+
 ## Тесты протокола
 
 Ядро протокола/криптографии — отдельная библиотека `TestDPLS.Core` (без WinRT), тесты проходят и на Linux CI:

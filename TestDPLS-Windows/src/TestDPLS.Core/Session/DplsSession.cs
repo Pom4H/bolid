@@ -171,9 +171,11 @@ public sealed class DplsSession
         SendPriority(DplsProtocol.MessageType.Hello, _clientNonce);
     }
 
-    public void UpdateSetupName(string name) { Ui.SetupName = name; RaiseUi(); }
-    public void UpdateSetupPassword(string password) { Ui.SetupPassword = password; RaiseUi(); }
-    public void UpdateSetupRepeatPassword(string password) { Ui.SetupRepeatPassword = password; RaiseUi(); }
+    // Field edits must not RaiseUi — mobile/desktop hosts rebuild screens on UiChanged
+    // and would steal focus from the password box on every keystroke.
+    public void UpdateSetupName(string name) => Ui.SetupName = name;
+    public void UpdateSetupPassword(string password) => Ui.SetupPassword = password;
+    public void UpdateSetupRepeatPassword(string password) => Ui.SetupRepeatPassword = password;
 
     public void Authenticate(string password)
     {

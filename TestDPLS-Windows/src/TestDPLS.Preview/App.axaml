@@ -1,0 +1,18 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="TestDPLS.Preview.App"
+             RequestedThemeVariant="Dark">
+  <Application.Resources>
+    <SolidColorBrush x:Key="BgBrush">#071923</SolidColorBrush>
+    <SolidColorBrush x:Key="PanelBrush">#0C202B</SolidColorBrush>
+    <SolidColorBrush x:Key="LineBrush">#263B46</SolidColorBrush>
+    <SolidColorBrush x:Key="BlueBrush">#2878E8</SolidColorBrush>
+    <SolidColorBrush x:Key="GreenBrush">#66C53E</SolidColorBrush>
+    <SolidColorBrush x:Key="OrangeBrush">#FF6A2A</SolidColorBrush>
+    <SolidColorBrush x:Key="MutedBrush">#91A2AC</SolidColorBrush>
+    <SolidColorBrush x:Key="NavBrush">#091C26</SolidColorBrush>
+  </Application.Resources>
+  <Application.Styles>
+    <FluentTheme />
+  </Application.Styles>
+</Application>

@@ -1,0 +1,9 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="TestDPLS.Preview.MainWindow"
+        Title="Тест-ДПЛС (preview)"
+        Width="420" Height="780"
+        MinWidth="360" MinHeight="640"
+        Background="#071923"
+        WindowStartupLocation="CenterScreen">
+</Window>
