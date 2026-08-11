@@ -42,3 +42,15 @@ jobs:
       - name: Assemble debug APK
         working-directory: TestDPLS
         run: ./gradlew assembleDebug
+
+  windows-core-tests:
+    name: Windows client protocol tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Test protocol core
+        working-directory: TestDPLS-Windows
+        run: dotnet test tests/TestDPLS.Core.Tests/TestDPLS.Core.Tests.csproj --configuration Release

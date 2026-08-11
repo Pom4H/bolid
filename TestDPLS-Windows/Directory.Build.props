@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Allow restoring/compiling Windows TFM from Linux CI agents. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+</Project>

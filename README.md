@@ -1,9 +1,10 @@
 # Test-DPLS
 
 Стек безопасного BLE-управления испытательным устройством ДПЛС: прошивка для
-PHY6252 (плата PB-03F-Kit), Android- и iOS-клиенты. Протокол, аутентификация и
+PHY6252 (плата PB-03F-Kit), Android-, iOS- и Windows-клиенты. Протокол, аутентификация и
 хранение журнала описаны в [Firmware/README.md](Firmware/README.md); клиенты —
-в [TestDPLS/README.md](TestDPLS/README.md) и [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+в [TestDPLS/README.md](TestDPLS/README.md), [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md)
+и [TestDPLS-Windows/README.md](TestDPLS-Windows/README.md).
 
 ## Структура
 
@@ -12,6 +13,7 @@ PHY6252 (плата PB-03F-Kit), Android- и iOS-клиенты. Протоко�
 | `Firmware/` | Переносимое ядро сервера (C99, хостовые тесты) + адаптер PHY62XX SDK 3.1.2 и target-проект |
 | `TestDPLS/` | Android-клиент (Kotlin, Jetpack Compose, minSdk 33) |
 | `TestDPLS-iOS/` | iPhone-клиент (Swift, SwiftUI, iOS 16+) |
+| `TestDPLS-Windows/` | Windows-клиент (C# / WPF / .NET 8, Bluetooth LE) |
 | `tools/` | Сборка/прошивка/UART-отладка |
 | `tools/e2e/` | E2E-обвязка: телефон + плата через adb |
 | `docs/hardware/` | Схема PB-03F-Kit |
@@ -72,6 +74,15 @@ open TestDPLS-iOS/TestDPLS.xcodeproj   # Xcode 15+, физический iPhone
 ```
 
 Подробности — [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+
+## Windows
+
+```powershell
+cd TestDPLS-Windows
+dotnet run --project src\TestDPLS\TestDPLS.csproj -c Release
+```
+
+Нужны Windows 10/11 и Bluetooth LE. Подробности — [TestDPLS-Windows/README.md](TestDPLS-Windows/README.md).
 
 ## E2E на живых устройствах
 

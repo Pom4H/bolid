@@ -1,0 +1,45 @@
+<Window x:Class="TestDPLS.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Тест-ДПЛС"
+        Width="420" Height="780"
+        MinWidth="360" MinHeight="640"
+        Background="{StaticResource BgBrush}"
+        WindowStartupLocation="CenterScreen">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <ContentControl x:Name="PageHost" Grid.Row="0"/>
+
+    <Border x:Name="BottomNav" Grid.Row="1" Background="{StaticResource NavBrush}"
+            BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Height="64"
+            Visibility="Collapsed">
+      <UniformGrid Columns="3">
+        <Button x:Name="NavMain" Content="Испытание" Click="NavMain_Click"
+                Background="Transparent" BorderThickness="0" Foreground="{StaticResource BlueBrush}" Cursor="Hand"/>
+        <Button x:Name="NavLog" Content="Журнал" Click="NavLog_Click"
+                Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" Cursor="Hand"/>
+        <Button x:Name="NavSettings" Content="Настройки" Click="NavSettings_Click"
+                Background="Transparent" BorderThickness="0" Foreground="{StaticResource MutedBrush}" Cursor="Hand"/>
+      </UniformGrid>
+    </Border>
+
+    <Border x:Name="ConfirmOverlay" Grid.RowSpan="2" Background="#E0071923" Visibility="Collapsed">
+      <Border Background="{StaticResource PanelBrush}" Margin="24" Padding="18" CornerRadius="8"
+              BorderBrush="{StaticResource LineBrush}" BorderThickness="1" VerticalAlignment="Center">
+        <StackPanel>
+          <TextBlock Text="Подтверждение" Foreground="White" FontSize="17" FontWeight="Medium"
+                     HorizontalAlignment="Center" Margin="0,0,0,16"/>
+          <TextBlock x:Name="ConfirmText" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"/>
+          <TextBlock x:Name="ConfirmHint" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,0,0,18"/>
+          <Button Content="Подтвердить" Style="{StaticResource PrimaryButton}" Click="ConfirmMode_Click"
+                  Background="{StaticResource OrangeBrush}"/>
+          <Button Content="Отмена" Style="{StaticResource SecondaryButton}" Click="CancelMode_Click"/>
+        </StackPanel>
+      </Border>
+    </Border>
+  </Grid>
+</Window>
