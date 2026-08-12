@@ -529,7 +529,9 @@ public partial class MainWindow : Window
                     new ProgressBar { Value = S.LogProgress.Value * 100, Maximum = 100, Height = 6, Margin = new Thickness(40, 0) },
                     new TextBlock
                     {
-                        Text = $"Загрузка… {(int)(S.LogProgress.Value * 100)}%",
+                        Text = string.IsNullOrWhiteSpace(S.StatusText)
+                            ? $"Загрузка… {(int)(S.LogProgress.Value * 100)}%"
+                            : S.StatusText,
                         Foreground = Brush("MutedBrush"),
                         HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                         Margin = new Thickness(0, 12, 0, 0),

@@ -294,6 +294,32 @@ public sealed class BleClient : IDplsTransport, IDisposable
     /// </summary>
     private static async Task<bool> EnableTxNotificationsAsync(GattCharacteristic tx)
     {
+        // Prefer Android-compatible CCCD 0x0003 (Notify|Indicate) via raw descriptor first:
+        // journal chunks are indications; other traffic may use notifications.
+        foreach (var payload in new byte[][]
+                 {
+                     [0x03, 0x00],
+                     [0x02, 0x00],
+                     [0x01, 0x00],
+                 })
+        {
+            try
+            {
+                var descriptors = await tx.GetDescriptorsForUuidAsync(
+                    GattDescriptorUuids.ClientCharacteristicConfiguration,
+                    BluetoothCacheMode.Uncached);
+                if (descriptors.Status != GattCommunicationStatus.Success || descriptors.Descriptors.Count == 0)
+                    continue;
+                var status = await descriptors.Descriptors[0].WriteValueAsync(payload.AsBuffer());
+                if (status == GattCommunicationStatus.Success)
+                    return true;
+            }
+            catch
+            {
+                // try next payload
+            }
+        }
+
         var props = tx.CharacteristicProperties;
         var tried = new List<GattClientCharacteristicConfigurationDescriptorValue>();
 
@@ -319,36 +345,11 @@ public sealed class BleClient : IDplsTransport, IDisposable
             }
             catch (ArgumentException)
             {
-                // Invalid enum for this stack — try next / raw descriptor.
+                // Invalid enum for this stack — try next.
             }
             catch (Exception)
             {
-                // Continue to fallbacks.
-            }
-        }
-
-        // Raw CCCD write: 0x0002=indicate, 0x0001=notify, 0x0003=both (LE).
-        foreach (var payload in new byte[][]
-                 {
-                     [0x02, 0x00],
-                     [0x01, 0x00],
-                     [0x03, 0x00],
-                 })
-        {
-            try
-            {
-                var descriptors = await tx.GetDescriptorsForUuidAsync(
-                    GattDescriptorUuids.ClientCharacteristicConfiguration,
-                    BluetoothCacheMode.Uncached);
-                if (descriptors.Status != GattCommunicationStatus.Success || descriptors.Descriptors.Count == 0)
-                    continue;
-                var status = await descriptors.Descriptors[0].WriteValueAsync(payload.AsBuffer());
-                if (status == GattCommunicationStatus.Success)
-                    return true;
-            }
-            catch
-            {
-                // try next payload
+                // Continue.
             }
         }
 
@@ -553,6 +554,12 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 lock (_writeLock) _writeInProgress = false;
                 if (!ok)
                 {
+                    if (Ui.LogProgress != null)
+                    {
+                        // Journal transfer: retry LOG_ACK instead of tearing the link.
+                        _session.OnLogWriteFailed();
+                        return;
+                    }
                     if (Ui.Phase is ConnectionPhase.Pairing or ConnectionPhase.Authenticating ||
                         (Ui.CredentialsReady && !Ui.Authenticated))
                     {
@@ -578,6 +585,11 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Post(() =>
             {
                 lock (_writeLock) _writeInProgress = false;
+                if (Ui.LogProgress != null)
+                {
+                    _session.OnLogWriteFailed();
+                    return;
+                }
                 if (Ui.Phase is ConnectionPhase.Pairing || Ui.IdentifyActive)
                 {
                     _ = Task.Delay(300).ContinueWith(_ => DrainWriteQueueAsync());

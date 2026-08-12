@@ -17,6 +17,9 @@ public sealed class DplsSession
     public static readonly Guid TxUuid = Guid.Parse("7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001");
 
     private const int MaxLogEvents = 200;
+    /// <summary>Resend LOG_ACK if no chunk progress (lost indication / stalled ATT).</summary>
+    private const int LogStallMs = 1_500;
+    private const int LogStallMaxRetries = 40;
 
     private readonly IDplsTransport _transport;
     private readonly object _gate = new();
@@ -46,12 +49,14 @@ public sealed class DplsSession
     private bool[] _logChunkReceived = [];
     private readonly List<(int Index, byte[] Data)> _logPendingChunks = [];
     private int? _pendingLogAckIndex;
+    private int _logStallRetries;
     private PendingSettings? _pendingSettings;
     private CancellationTokenSource? _preAuthKeepAliveCts;
     private CancellationTokenSource? _keepAliveCts;
     private CancellationTokenSource? _stateRefreshCts;
     private CancellationTokenSource? _logLoadTimeoutCts;
     private CancellationTokenSource? _logAckCts;
+    private CancellationTokenSource? _logStallCts;
     private CancellationTokenSource? _settingsTimeoutCts;
     private CancellationTokenSource? _commandTimeoutCts;
 
@@ -135,6 +140,18 @@ public sealed class DplsSession
             RaiseUi();
         }
         FlushLogAck();
+    }
+
+    /// <summary>
+    /// BLE write failed while a journal transfer is active. Prefer re-ACK over
+    /// tearing down the link — lost LOG_CHUNK indications are recovered the same way.
+    /// </summary>
+    public void OnLogWriteFailed()
+    {
+        if (Ui.LogProgress == null) return;
+        _transport.ResetQueue();
+        _pendingLogAckIndex = NextMissingLogIndex();
+        ScheduleLogAck();
     }
 
     public void BeginIdentifyFlow()
@@ -767,11 +784,21 @@ public sealed class DplsSession
 
     private void ParseLogChunk(ReadOnlySpan<byte> payload)
     {
-        if (payload.Length < 3) return;
+        if (!_logInfoReceived && payload.Length < 3) return;
+        if (_logInfoReceived && payload.Length < 3)
+        {
+            // Truncated indication — ask again instead of waiting forever.
+            ScheduleLogAck();
+            return;
+        }
         var o = 0;
         var first = LittleEndian.U16(payload, ref o);
         var count = LittleEndian.U8(payload, ref o);
-        if (count == 0 || payload.Length - o < count * 10) return;
+        if (count == 0 || payload.Length - o < count * 10)
+        {
+            if (_logInfoReceived) ScheduleLogAck();
+            return;
+        }
         if (!_logInfoReceived)
         {
             for (var i = 0; i < count; i++)
@@ -805,17 +832,29 @@ public sealed class DplsSession
     private void AfterChunkBatch()
     {
         if (_logExpectedEvents <= 0) return;
+        _logStallRetries = 0;
         var progress = (float)_logReceivedEvents / _logExpectedEvents;
         Ui.LogProgress = Math.Clamp(progress, 0.05f, 1f);
+        Ui.StatusText = $"Загрузка журнала… {_logReceivedEvents}/{_logExpectedEvents}";
         RaiseUi();
         if (_logReceivedEvents >= _logExpectedEvents) FinishLog();
-        else ScheduleLogAck();
+        else
+        {
+            ScheduleLogAck();
+            ArmLogStallWatchdog();
+        }
+    }
+
+    private int NextMissingLogIndex()
+    {
+        if (_logChunkReceived.Length == 0) return _logExpectedEvents;
+        var next = Array.FindIndex(_logChunkReceived, x => !x);
+        return next < 0 ? _logExpectedEvents : next;
     }
 
     private void ScheduleLogAck()
     {
-        var next = Array.FindIndex(_logChunkReceived, x => !x);
-        if (next < 0) next = _logExpectedEvents;
+        var next = NextMissingLogIndex();
         _pendingLogAckIndex = next;
         _logAckCts?.Cancel();
         var cts = new CancellationTokenSource();
@@ -848,13 +887,59 @@ public sealed class DplsSession
             NextSequence(),
             LittleEndian.Concat(AuthenticatedPayload(), chunk.ToArray())));
         _transport.EnqueuePriority(bytes, flush: true);
+        ArmLogStallWatchdog();
+    }
+
+    private void ArmLogStallWatchdog()
+    {
+        _logStallCts?.Cancel();
+        if (Ui.LogProgress == null) return;
+        var cts = new CancellationTokenSource();
+        _logStallCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(LogStallMs, cts.Token);
+                Post(OnLogStall);
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    private void OnLogStall()
+    {
+        if (Ui.LogProgress == null) return;
+        if (_logReceivedEvents >= _logExpectedEvents)
+        {
+            FinishLog();
+            return;
+        }
+
+        _logStallRetries++;
+        if (_logStallRetries > LogStallMaxRetries)
+        {
+            FailLog($"Не удалось загрузить журнал ({_logReceivedEvents}/{_logExpectedEvents})");
+            return;
+        }
+
+        // A wedged WriteInProgress would otherwise spin forever on ScheduleLogAck.
+        if (_transport.WriteInProgress)
+            _transport.ResetQueue();
+
+        Ui.StatusText = $"Повтор запроса журнала… {_logReceivedEvents}/{_logExpectedEvents}";
+        RaiseUi();
+        _pendingLogAckIndex = NextMissingLogIndex();
+        FlushLogAck();
     }
 
     private void FinishLog()
     {
         _logLoadTimeoutCts?.Cancel();
         _logAckCts?.Cancel();
+        _logStallCts?.Cancel();
         _logInfoReceived = false;
+        _logStallRetries = 0;
         var records = new List<EventRecord>();
         var o = 0;
         var span = _logBytes.AsSpan();
@@ -864,6 +949,8 @@ public sealed class DplsSession
             var ts = LittleEndian.U32(span, ref o);
             var type = LittleEndian.U8(span, ref o);
             var param = LittleEndian.U8(span, ref o);
+            // Skip empty slots left by lost chunks that never arrived.
+            if (seq == 0 && type == 0) continue;
             records.Add(new EventRecord(seq, ts, type, param));
         }
         records.Sort((a, b) => b.Sequence.CompareTo(a.Sequence));
@@ -972,6 +1059,8 @@ public sealed class DplsSession
         _logChunkReceived = [];
         _logInfoReceived = false;
         _pendingLogAckIndex = null;
+        _logStallRetries = 0;
+        _logStallCts?.Cancel();
         _logPendingChunks.Clear();
     }
 
@@ -1070,13 +1159,7 @@ public sealed class DplsSession
                 Post(() =>
                 {
                     if (Ui.LogProgress == null) return;
-                    _logInfoReceived = false;
-                    _logLoadPending = false;
-                    Ui.LogProgress = null;
-                    Ui.Error = "Не удалось загрузить журнал";
-                    RaiseUi();
-                    ScheduleKeepAlive();
-                    UpdateStateRefreshSchedule();
+                    FailLog($"Не удалось загрузить журнал ({_logReceivedEvents}/{_logExpectedEvents})");
                 });
             }
             catch (OperationCanceledException) { }
@@ -1112,6 +1195,7 @@ public sealed class DplsSession
         CancelStateRefresh();
         _logLoadTimeoutCts?.Cancel();
         _logAckCts?.Cancel();
+        _logStallCts?.Cancel();
         CancelSettingsTimeout();
         _commandTimeoutCts?.Cancel();
         _ = keepReconnectRelevant;
@@ -1120,17 +1204,23 @@ public sealed class DplsSession
     private void FailLog(string message)
     {
         _logLoadTimeoutCts?.Cancel();
+        _logAckCts?.Cancel();
+        _logStallCts?.Cancel();
         _logInfoReceived = false;
         _logLoadPending = false;
+        _logStallRetries = 0;
         Ui.LogProgress = null;
         Ui.Error = message;
         RaiseUi();
         ScheduleKeepAlive();
+        UpdateStateRefreshSchedule();
     }
 
     public void Fail(string message)
     {
         _logLoadTimeoutCts?.Cancel();
+        _logAckCts?.Cancel();
+        _logStallCts?.Cancel();
         _logInfoReceived = false;
         Ui.Phase = ConnectionPhase.Error;
         Ui.StatusText = message;

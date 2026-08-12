@@ -716,7 +716,9 @@ public partial class MainWindow : Window
                     new ProgressBar { Value = S.LogProgress.Value * 100, Maximum = 100, Height = 6, Margin = new Thickness(40, 0, 40, 12) },
                     new TextBlock
                     {
-                        Text = $"Загрузка журнала… {(int)(S.LogProgress.Value * 100)}%",
+                        Text = string.IsNullOrWhiteSpace(S.StatusText)
+                            ? $"Загрузка журнала… {(int)(S.LogProgress.Value * 100)}%"
+                            : S.StatusText,
                         Foreground = (Brush)FindResource("MutedBrush"),
                         HorizontalAlignment = HorizontalAlignment.Center,
                     },
