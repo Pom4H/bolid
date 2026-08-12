@@ -339,7 +339,11 @@ static void send_command_result(dpls_server_t *s, const dpls_cached_command_t *c
 static bool active_mode_interlock_ok(dpls_server_t *s)
 {
     uint8_t valid = measurement_validity(s);
+    /* Active physical modes are allowed only when both autonomous safety inputs
+     * are fresh. A good reserve measurement is not sufficient if +1/P20 (the
+     * source for real-short/auto-isolation state) is stale or unavailable. */
     if (!(valid & DPLS_STATE_RESERVE_VALID)) return false;
+    if (!(valid & (DPLS_STATE_AUTOISO_VALID | DPLS_STATE_PORT_1_VALID))) return false;
     return !s->hal.reserve_low(s->hal.context);
 }
 
