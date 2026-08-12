@@ -56,7 +56,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-short
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-shortcut.ps1 -Publish
 ```
 
-На рабочем столе появится ярлык **Тест-ДПЛС.lnk**.
+На рабочем столе появится ярлык **Test-DPLS.lnk**.
 
 ## Тесты протокола
 

@@ -1,8 +1,7 @@
-# Create a Desktop shortcut for Тест-ДПЛС (Windows WPF client).
-# Run from PowerShell after building or publishing the app:
-#
-#   .\tools\create-desktop-shortcut.ps1
-#   .\tools\create-desktop-shortcut.ps1 -Publish
+# Create a Desktop shortcut for Test-DPLS (Windows WPF client).
+# Run:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-shortcut.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-shortcut.ps1 -Publish
 
 param(
     [switch]$Publish,
@@ -26,11 +25,11 @@ if ($Publish) {
 }
 
 if (-not (Test-Path $Target)) {
-    throw "Не найден исполняемый файл: $Target"
+    throw "Executable not found: $Target"
 }
 
 $Desktop = [Environment]::GetFolderPath("Desktop")
-$ShortcutPath = Join-Path $Desktop "Тест-ДПЛС.lnk"
+$ShortcutPath = Join-Path $Desktop "Test-DPLS.lnk"
 $WorkDir = Split-Path -Parent $Target
 
 $Wsh = New-Object -ComObject WScript.Shell
@@ -38,8 +37,8 @@ $Shortcut = $Wsh.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath = $Target
 $Shortcut.WorkingDirectory = $WorkDir
 $Shortcut.WindowStyle = 1
-$Shortcut.Description = "Тест-ДПЛС — BLE-клиент управления ДПЛС"
+$Shortcut.Description = "Test-DPLS BLE client"
 $Shortcut.Save()
 
-Write-Host "Ярлык создан: $ShortcutPath"
-Write-Host "Цель: $Target"
+Write-Host "Shortcut created: $ShortcutPath"
+Write-Host "Target: $Target"
