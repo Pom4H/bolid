@@ -1,5 +1,8 @@
 ; Test-DPLS PHY6252 memory map.
-; Retains the proven PB-03F layout while using the SDK 3.1.2 libraries.
+; Production code keeps startup/sleep-critical code and RW/ZI in retained SRAM,
+; while application/host code executes from flash XIP. The SDK demo's DTM-only
+; SRAM2 region is intentionally absent: production main has no RF direct-test
+; entry point and P20 belongs exclusively to the +1 ADC input.
 
 LR_IROM1 0x1fff1838 0x0E7C8 {
   ER_IROM1 0x1fff1838 0x077C8 {
@@ -10,10 +13,6 @@ LR_IROM1 0x1fff1838 0x0E7C8 {
     *.o(_section_sram_code_)
     .ANY (+RO)
     .ANY (+RW +ZI)
-  }
-  ER_IROM2 0x1fffc000 0x04000 {
-    rf_phy_driver.o(i.rf_phy_dtm*)
-    rf_phy_driver.o(i.rf_phy_direct_*)
   }
 }
 
