@@ -17,9 +17,11 @@
 #define DPLS_ADC_CALIB_MAGIC_V2 0x324C5044u /* "DPL2" little-endian */
 #define DPLS_ADC_CALIB_V2_VERSION 2u
 
-/* Kept explicit for documentation introspection and hardware contracts. */
-#define DPLS_ADC_DECIMATE 5u
+/* One complete four-channel scan is started roughly once per second. A normal
+ * conversion finishes orders of magnitude faster; 500 ms is only a recovery
+ * guard for a lost IRQ/vendor-driver wedge. */
 #define DPLS_ADC_PERIOD_MS 1000u
+#define DPLS_ADC_CONVERSION_TIMEOUT_MS 500u
 #define DPLS_ADC_WINDOW 8u
 #define DPLS_ADC_STALE_MS 3500u
 
@@ -33,8 +35,7 @@
 #define DPLS_ADC_CHANNEL_COUNT 4u
 
 /* Reserve divider is independent from the 1/31 DPLS line dividers. 2.000 is
- * still a board-level provisional value until the power board is measured, but
- * its validation range must not use the 20x..45x line-divider bounds. */
+ * still provisional until the power board is measured. */
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
 #define DPLS_VCAP_GAIN_MIN_MILLI 1000u
 #define DPLS_VCAP_GAIN_MAX_MILLI 5000u
@@ -55,15 +56,14 @@ typedef struct {
  *   0..3   magic
  *   4      version (=2)
  *   5..7   reserved zero
- *   8..39  four {gain:u32, offset:i32} records: +1,+2,+T,reserve
+ *   8..39  four {gain:u32, offset:i32}: +1,+2,+T,reserve
  *   40..41 CRC16 over bytes 0..39
  */
 #define DPLS_CALIB_V2_DATA_SIZE 40u
 #define DPLS_CALIB_V2_SIZE 42u
 
-/* Compile-time pin contract: if board.h changes without deliberately updating
- * the ADC mux mapping, the target build must fail instead of silently sampling
- * another physical net. */
+/* Compile-time electrical contract: changing board.h without changing the ADC
+ * mux mapping must fail the target build rather than sample another net. */
 typedef char dpls_adc_assert_port1[(DPLS_PIN_PORT1_ADC == GPIO_P20) ? 1 : -1];
 typedef char dpls_adc_assert_port2[(DPLS_PIN_PORT2_ADC == GPIO_P15) ? 1 : -1];
 typedef char dpls_adc_assert_port_t[(DPLS_PIN_PORT_T_ADC == GPIO_P24) ? 1 : -1];
@@ -90,6 +90,7 @@ static bool initialized;
 static volatile bool adc_busy;
 static uint8_t adc_pending;
 static uint8_t inflight_index = DPLS_ADC_INDEX_NONE;
+static uint32_t inflight_started_ms;
 static uint32_t next_cycle_ms;
 
 static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
@@ -168,9 +169,8 @@ static void load_legacy_calibration(void)
         nv.crc != dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_v1_t, crc)))
         return;
 
-    /* A legacy "line" calibration was measured on P20 only. Applying that
-     * correction to the physically independent +2/+T divider would fabricate
-     * precision, so migrate it only to +1 and leave +2/+T at nominal 31x. */
+    /* Legacy line calibration was measured on P20 only. Do not copy its
+     * component-specific correction to the independent +2/+T dividers. */
     {
         dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
         if (dpls_calib_valid(&line)) {
@@ -216,7 +216,7 @@ static void finish_inflight_as_failed(void)
 }
 
 /* ISR is deliberately minimal: copy raw words, record completion and wake the
- * OSAL task. No floating point, calibration, averaging, flash or BLE here. */
+ * OSAL task. No float/calibration/averaging/flash/BLE here. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i;
@@ -265,6 +265,7 @@ static void adc_kick(void)
     cfg.is_high_resolution = 0u;
 
     inflight_index = i;
+    inflight_started_ms = (uint32_t)osal_GetSystemClock();
     adc_busy = true;
     if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
         finish_inflight_as_failed();
@@ -284,9 +285,6 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     process_event = new_process_event;
     memset(channels, 0, sizeof(channels));
 
-    /* Configuration bit and callback channel are intentionally both explicit:
-     * the PHY6252 API names single-ended mux selections differently from the
-     * channel identifier delivered by the callback. */
     channels[0].pending_bit = DPLS_ADC_NEED_PORT1;
     channels[0].config_channel = ADC_BIT(ADC_CH3P_P20);
     channels[0].result_channel = ADC_CH9;
@@ -318,6 +316,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     adc_busy = false;
     adc_pending = 0u;
     inflight_index = DPLS_ADC_INDEX_NONE;
+    inflight_started_ms = 0u;
     adc_raw_ready = false;
     adc_event_failed = false;
     next_cycle_ms = 0u;
@@ -331,9 +330,17 @@ void dpls_phy6252_adc_tick(uint32_t now_ms)
     if (!initialized)
         return;
 
-    /* Never overwrite the pending mask of a cycle that is still in flight. The
-     * previous code reset it every second even if the driver had stalled, which
-     * could duplicate early channels and starve later ones. */
+    /* A lost ADC IRQ must not freeze all four measurements forever. Recover the
+     * vendor driver from task context, mark only this channel failed and let the
+     * remaining channels continue from the process event. */
+    if (inflight_index != DPLS_ADC_INDEX_NONE && adc_busy &&
+        (uint32_t)(now_ms - inflight_started_ms) >= DPLS_ADC_CONVERSION_TIMEOUT_MS) {
+        (void)hal_adc_stop();
+        finish_inflight_as_failed();
+        return;
+    }
+
+    /* Never overwrite a cycle still in flight. */
     if (adc_pending == 0u && !adc_busy && !adc_raw_ready &&
         inflight_index == DPLS_ADC_INDEX_NONE && elapsed(now_ms, next_cycle_ms)) {
         adc_pending = DPLS_ADC_NEED_ALL;
@@ -363,9 +370,8 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
             channel->last_sample_ms = now_ms;
         }
 
-        /* Whether the conversion succeeded or failed, one bad physical channel
-         * must never block the other three. It is retried in the next 1 s cycle;
-         * its validity bit naturally expires after DPLS_ADC_STALE_MS. */
+        /* Success, explicit failure and timeout all consume exactly one channel.
+         * It is retried next cycle; one fault can never starve the other three. */
         adc_pending = (uint8_t)(adc_pending & (uint8_t)~channel->pending_bit);
         adc_raw_ready = false;
         adc_event_failed = false;

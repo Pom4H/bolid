@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Fail the build when the PHY6252 hardware contract drifts.
-
-This is intentionally stricter than a collection of grep checks.  The pin map is
-an electrical interface: moving a symbol to another pad, overlapping an ADC with
-a power-stage output, or silently dropping the BLE sleep lock must require an
-explicit change to this contract in the same review.
-"""
+"""Fail the build when the PHY6252 electrical contract drifts."""
 
 from __future__ import annotations
 
@@ -19,6 +13,7 @@ ADC = ROOT / "Firmware/phy6252/dpls_phy6252_adc.c"
 APP = ROOT / "Firmware/phy6252/dpls_phy6252_app.c"
 TARGET = ROOT / "Firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 CPROJECT = ROOT / "Firmware/targets/phy6252/test-dpls.cproject.yml"
+SCATTER = ROOT / "Firmware/targets/phy6252/scatter_load.sct"
 CHECKLIST = ROOT / "docs/bring-up-checklist.md"
 
 DEFINE_RE = re.compile(r"^\s*#define\s+(DPLS_PIN_[A-Z0-9_]+)\s+([^/\r\n]+)", re.MULTILINE)
@@ -38,6 +33,14 @@ EXPECTED = {
     "DPLS_PIN_LED_GREEN": "P11",
     "DPLS_PIN_LED_BLUE": "P18",
     "DPLS_PIN_FACTORY_RESET": "P34",
+}
+
+EXPECTED_MODE_OUTPUT = {
+    "DPLS_MODE_OPEN_T": "DPLS_PIN_ISO_T",
+    "DPLS_MODE_OPEN_MAIN": "DPLS_PIN_ISO_2",
+    "DPLS_MODE_SHORT_1": "DPLS_PIN_KZ_1",
+    "DPLS_MODE_SHORT_2": "DPLS_PIN_KZ_2",
+    "DPLS_MODE_SHORT_T": "DPLS_PIN_KZ_T",
 }
 
 
@@ -80,6 +83,17 @@ def resolve_pin(name: str, defs: dict[str, str], seen: set[str] | None = None) -
     raise AssertionError("unreachable")
 
 
+def mode_block(hw: str, mode: str) -> str:
+    match = re.search(
+        rf"case\s+{re.escape(mode)}\s*:(.*?)(?=\n\s*case\s+DPLS_MODE_|\n\s*default\s*:)",
+        hw,
+        re.DOTALL,
+    )
+    if not match:
+        fail(f"mode switch block {mode} missing")
+    return match.group(1)
+
+
 def main() -> None:
     board = read(BOARD)
     hw = read(HW)
@@ -87,6 +101,7 @@ def main() -> None:
     app = read(APP)
     target = read(TARGET)
     cproject = read(CPROJECT)
+    scatter = read(SCATTER)
     checklist = read(CHECKLIST)
 
     defs = {name: value.strip() for name, value in DEFINE_RE.findall(board)}
@@ -99,8 +114,6 @@ def main() -> None:
         ]
         fail("pin map changed:\n  " + "\n  ".join(differences))
 
-    # All physical roles are intentionally unique.  The only board alias is the
-    # backwards-compatible LINE_ADC -> PORT1_ADC symbol, not another role.
     by_pin: dict[str, list[str]] = {}
     for role, pin in resolved.items():
         by_pin.setdefault(pin, []).append(role)
@@ -110,14 +123,14 @@ def main() -> None:
     if resolve_pin("DPLS_PIN_LINE_ADC", defs) != EXPECTED["DPLS_PIN_PORT1_ADC"]:
         fail("DPLS_PIN_LINE_ADC must remain an alias of DPLS_PIN_PORT1_ADC")
 
-    # Digital hardware has exactly one owner.
+    # Digital hardware has exactly one owner and a real checked sleep lock.
     require(hw, "hal_pwrmgr_register(MOD_USR1, NULL, disable_32k_xtal)", HW)
     require(hw, "hal_pwrmgr_lock(MOD_USR1)", HW)
     require(hw, "hal_pwrmgr_unlock(MOD_USR1)", HW)
     require(hw, "prime_all_outputs_low", HW)
     require(hw, "register_output_retention", HW)
     require(hw, "subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00)", HW)
-    forbid(hw, "MOD_USR2", HW)
+    forbid(hw, "hal_pwrmgr_register(MOD_USR2", HW)
     for symbol in (
         "DPLS_PIN_ISO_1", "DPLS_PIN_ISO_2", "DPLS_PIN_ISO_T",
         "DPLS_PIN_KZ_1", "DPLS_PIN_KZ_2", "DPLS_PIN_KZ_T",
@@ -125,21 +138,29 @@ def main() -> None:
     ):
         require(hw, symbol, HW)
 
-    # ADC mux and callback channel are paired explicitly for each external net.
+    # Mode semantics are electrical too: each non-normal mode must drive exactly
+    # its assigned output and no second active-high control.
+    write_re = re.compile(r"hal_gpio_write\((DPLS_PIN_[A-Z0-9_]+),\s*1\s*\)")
+    for mode, expected_pin in EXPECTED_MODE_OUTPUT.items():
+        writes = write_re.findall(mode_block(hw, mode))
+        if writes != [expected_pin]:
+            fail(f"{mode}: expected active output {expected_pin}, got {writes}")
+
+    # ADC mux/callback pairing, timeout recovery and stale-data invalidation.
     for needle in (
         "ADC_BIT(ADC_CH3P_P20)", "result_channel = ADC_CH9",
         "ADC_BIT(ADC_CH3N_P15)", "result_channel = ADC_CH4",
         "ADC_BIT(ADC_CH2N_P24)", "result_channel = ADC_CH2",
         "ADC_BIT(ADC_CH1P_P23)", "result_channel = ADC_CH1",
-        "DPLS_ADC_NEED_ALL", "DPLS_ADC_STALE_MS",
+        "DPLS_ADC_NEED_ALL", "DPLS_ADC_STALE_MS", "DPLS_ADC_CONVERSION_TIMEOUT_MS",
         "dpls_adc_assert_port1", "dpls_adc_assert_port2",
         "dpls_adc_assert_port_t", "dpls_adc_assert_vcap",
+        "hal_adc_stop();", "finish_inflight_as_failed();",
     ):
         require(adc, needle, ADC)
     forbid(adc, "ADC_CH1N_P11", ADC)
 
-    # Application code consumes hardware services; it may not reopen their
-    # low-level implementation details.
+    # Application consumes services rather than reopening low-level drivers.
     for needle in (
         "hal.port1_voltage_mv = port1_voltage_mv",
         "hal.port2_voltage_mv = port2_voltage_mv",
@@ -155,16 +176,23 @@ def main() -> None:
     ):
         forbid(app, forbidden, APP)
 
-    # The BLE target is integration glue only; board-specific safety belongs to
-    # dpls_phy6252_hw.c.
+    # BLE target is integration glue only.
     require(target, "dpls_phy6252_hw_init()", TARGET)
-    for forbidden in ("MOD_USR1", "MOD_USR2", "disable_32k_xtal", "prime_safe_gpio_outputs"):
+    for forbidden in (
+        "hal_pwrmgr_register(MOD_USR1", "hal_pwrmgr_register(MOD_USR2",
+        "disable_32k_xtal", "prime_safe_gpio_outputs",
+    ):
         forbid(target, forbidden, TARGET)
 
     require(cproject, "../../phy6252/dpls_phy6252_hw.c", CPROJECT)
     require(cproject, "../../phy6252/dpls_phy6252_adc.c", CPROJECT)
 
-    # Human bring-up instructions are part of the hardware interface too.
+    # Target adapters stay in XIP; ER_IROM1 has only a small retained-SRAM margin.
+    require(scatter, "dpls_phy6252_hw.o(+RO)", SCATTER)
+    require(scatter, "dpls_phy6252_adc.o(+RO)", SCATTER)
+    require(scatter, "dpls_phy6252_app.o(+RO)", SCATTER)
+
+    # Human bring-up instructions are part of the electrical interface.
     for needle in (
         "P31 / P32 / P33", "P14 / P16 / P17",
         "+1=P20", "+2=P15", "+T=P24", "резерв=P23", "P34",
