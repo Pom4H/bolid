@@ -92,6 +92,8 @@ public sealed class MockBleClient : IDplsTransport
         Connect(address);
     }
 
+    public void IdentifyRepair(string address) => Identify(address);
+
     public void StopIdentify()
     {
         _identifyMode = false;

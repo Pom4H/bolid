@@ -36,6 +36,8 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private bool _disposed;
     private bool _connectInProgress;
     private bool _disconnectDuringConnect;
+    private bool _forceUnpair;
+    private bool _lastConnectLookedLikeStaleBond;
     private TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs>? _pairingHandler;
 
     public BleClient()
@@ -99,13 +101,19 @@ public sealed class BleClient : IDplsTransport, IDisposable
             _session.StopScanUi();
     }
 
-    public void Identify(string address)
+    public void Identify(string address, bool repairBond = false)
     {
         CancelReconnect();
         _reconnectAttempt = 0;
+        // «Повторить сопряжение» and auto-repair clear the Windows side of a
+        // desynced bond (firmware may have erased LTK while Windows kept it).
+        _forceUnpair = repairBond;
         _session.BeginIdentifyFlow();
         Connect(address);
     }
+
+    /// <summary>Identify after explicitly clearing the Windows Bluetooth bond.</summary>
+    public void IdentifyRepair(string address) => Identify(address, repairBond: true);
 
     public void StopIdentify() => _session.StopIdentify();
     public void ConfirmIdentifiedDevice() => _session.ConfirmIdentifiedDevice();
@@ -144,36 +152,55 @@ public sealed class BleClient : IDplsTransport, IDisposable
         _session.NotifyUnlinked(scheduleReconnectHint: false);
         _known.TryGetValue(ParseAddress(address), out var discovered);
         _session.PrepareConnect(discovered ?? Ui.Devices.FirstOrDefault(d => d.Address == address));
-        await ConnectInternalAsync(address);
+        await ConnectWithBondRepairAsync(address);
     }
 
-    private async Task ConnectInternalAsync(string address)
+    /// <summary>
+    /// One connect attempt, then at most one automatic Unpair+Pair if the failure
+    /// matches a stale Windows bond (works only after deleting the bond by hand today).
+    /// </summary>
+    private async Task ConnectWithBondRepairAsync(string address)
+    {
+        _lastConnectLookedLikeStaleBond = false;
+        var forceUnpair = _forceUnpair;
+        _forceUnpair = false;
+
+        var ok = await ConnectInternalAsync(address, forceUnpair);
+        if (ok || _disposed || _selectedAddress != address) return;
+
+        if (!_lastConnectLookedLikeStaleBond) return;
+
+        // First attempt failed with a paired/stale-looking bond — clear Windows LTK and retry once.
+        Ui.Error = null;
+        Ui.Phase = ConnectionPhase.Pairing;
+        Ui.StatusText = "Сброс устаревшего сопряжения Windows…";
+        if (Ui.IdentifyActive) Ui.IdentifyLedLive = false;
+        Raise();
+
+        await UnpairByAddressAsync(address);
+        await Task.Delay(600);
+        if (_disposed || _selectedAddress != address) return;
+
+        _lastConnectLookedLikeStaleBond = false;
+        _ = await ConnectInternalAsync(address, forceUnpair: true);
+    }
+
+    /// <returns>True when GATT is ready and the protocol handshake was started.</returns>
+    private async Task<bool> ConnectInternalAsync(string address, bool forceUnpair)
     {
         _connectInProgress = true;
         _disconnectDuringConnect = false;
+        var hadOrCreatedBond = false;
         try
         {
             var btAddress = ParseAddress(address);
 
             // Prefer FromIdAsync via selector — more stable on Windows than address alone.
-            BluetoothLEDevice? device = null;
-            try
-            {
-                var selector = BluetoothLEDevice.GetDeviceSelectorFromBluetoothAddress(btAddress);
-                var infos = await DeviceInformation.FindAllAsync(selector);
-                if (infos.Count > 0)
-                    device = await BluetoothLEDevice.FromIdAsync(infos[0].Id);
-            }
-            catch
-            {
-                // Fall through to address-based open.
-            }
-
-            device ??= await BluetoothLEDevice.FromBluetoothAddressAsync(btAddress);
+            BluetoothLEDevice? device = await OpenDeviceAsync(btAddress);
             if (device == null)
             {
                 _session.Fail("Устройство недоступно. Запустите поиск снова.");
-                return;
+                return false;
             }
 
             _device = device;
@@ -183,7 +210,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
             if (access != DeviceAccessStatus.Allowed)
             {
                 _session.Fail($"Нет доступа к Bluetooth-устройству ({access}). Проверьте параметры конфиденциальности Windows.");
-                return;
+                return false;
             }
 
             try
@@ -196,10 +223,41 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 // Older stacks may not support GattSession; continue.
             }
 
+            hadOrCreatedBond = device.DeviceInformation.Pairing.IsPaired;
+
+            if (forceUnpair && device.DeviceInformation.Pairing.IsPaired)
+            {
+                Ui.Phase = ConnectionPhase.Pairing;
+                Ui.StatusText = "Удаление старого сопряжения…";
+                Raise();
+                await UnpairDeviceAsync(device);
+                CloseCurrentGatt();
+                await Task.Delay(400);
+                device = await OpenDeviceAsync(btAddress);
+                if (device == null)
+                {
+                    _lastConnectLookedLikeStaleBond = true;
+                    _session.Fail(
+                        "После сброса сопряжения устройство временно недоступно.\n" +
+                        "Подождите 2–3 с и нажмите «Повторить сопряжение».");
+                    return false;
+                }
+                _device = device;
+                device.ConnectionStatusChanged += OnConnectionStatusChanged;
+                try
+                {
+                    _gattSession = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                    _gattSession.MaintainConnection = true;
+                }
+                catch { /* ignore */ }
+                hadOrCreatedBond = false;
+            }
+
             Ui.Phase = ConnectionPhase.Pairing;
             Ui.StatusText = "Сопряжение…";
             Raise();
             var paired = await EnsurePairedAsync(device);
+            if (paired) hadOrCreatedBond = true;
 
             // Windows often needs a fresh device handle after pairing.
             if (paired)
@@ -213,8 +271,9 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
                     if (device == null)
                     {
+                        _lastConnectLookedLikeStaleBond = true;
                         _session.Fail("Устройство пропало после сопряжения. Повторите попытку.");
-                        return;
+                        return false;
                     }
                     _device = device;
                     device.ConnectionStatusChanged += OnConnectionStatusChanged;
@@ -239,22 +298,22 @@ public sealed class BleClient : IDplsTransport, IDisposable
             var service = await FindDplsServiceAsync(device);
             if (service == null)
             {
+                MarkStaleBondIf(hadOrCreatedBond);
                 _session.Fail(
                     "Служба Test-DPLS не найдена.\n" +
-                    "1) Плата прошита Test-DPLS и рядом\n" +
-                    "2) Параметры Windows → Bluetooth → удалите старое сопряжение\n" +
-                    "3) Нажмите «Повторить сопряжение»");
-                return;
+                    "Часто помогает сброс сопряжения Windows — нажмите «Повторить сопряжение».");
+                return false;
             }
 
             _service = service;
             var chars = await ResolveCharacteristicsAsync(service);
             if (chars == null)
             {
+                MarkStaleBondIf(hadOrCreatedBond);
                 _session.Fail(
                     "Характеристики RX/TX недоступны.\n" +
-                    "Удалите устройство в параметрах Bluetooth Windows и повторите сопряжение.");
-                return;
+                    "Нажмите «Повторить сопряжение» (сброс bond Windows).");
+                return false;
             }
 
             _rx = chars.Value.Rx;
@@ -268,30 +327,37 @@ public sealed class BleClient : IDplsTransport, IDisposable
             _tx.ValueChanged += OnTxValueChanged;
             if (!await EnableTxNotificationsAsync(_tx))
             {
+                MarkStaleBondIf(hadOrCreatedBond);
                 _session.Fail(
                     "Подписка на BLE-события не удалась.\n" +
-                    "Удалите устройство в параметрах Bluetooth Windows и повторите.");
-                return;
+                    "Нажмите «Повторить сопряжение» (сброс bond Windows).");
+                return false;
             }
 
             if (_disconnectDuringConnect ||
                 device.ConnectionStatus != BluetoothConnectionStatus.Connected)
             {
+                MarkStaleBondIf(hadOrCreatedBond);
                 FailIdentifyOrConnect("Связь оборвалась до запуска протокола.");
-                return;
+                return false;
             }
 
             _session.NotifyLinked();
             _session.OnGattReady(startIdentify: Ui.IdentifyActive);
             _reconnectAttempt = 0;
+            return true;
         }
         catch (Exception ex)
         {
             // During identify / first connect, wait for user retry instead of burning reconnects.
             if (_session.ReachedReady && _selectedAddress != null)
+            {
                 ScheduleReconnect();
-            else
-                _session.Fail($"Ошибка BLE: {ex.Message}");
+                return false;
+            }
+            MarkStaleBondIf(hadOrCreatedBond);
+            _session.Fail($"Ошибка BLE: {ex.Message}");
+            return false;
         }
         finally
         {
@@ -302,8 +368,73 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 !_session.ReachedReady &&
                 (_device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected))
             {
+                MarkStaleBondIf(hadOrCreatedBond);
                 FailIdentifyOrConnect("Связь оборвалась во время подключения.");
             }
+        }
+    }
+
+    private void MarkStaleBondIf(bool hadBond)
+    {
+        if (hadBond) _lastConnectLookedLikeStaleBond = true;
+    }
+
+    private static async Task<BluetoothLEDevice?> OpenDeviceAsync(ulong btAddress)
+    {
+        try
+        {
+            var selector = BluetoothLEDevice.GetDeviceSelectorFromBluetoothAddress(btAddress);
+            var infos = await DeviceInformation.FindAllAsync(selector);
+            if (infos.Count > 0)
+            {
+                var fromId = await BluetoothLEDevice.FromIdAsync(infos[0].Id);
+                if (fromId != null) return fromId;
+            }
+        }
+        catch
+        {
+            // Fall through to address-based open.
+        }
+
+        try
+        {
+            return await BluetoothLEDevice.FromBluetoothAddressAsync(btAddress);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task UnpairByAddressAsync(string address)
+    {
+        try
+        {
+            var device = _device ?? await OpenDeviceAsync(ParseAddress(address));
+            if (device != null)
+                await UnpairDeviceAsync(device);
+        }
+        catch
+        {
+            // Best-effort — user can still delete the bond in Windows Settings.
+        }
+        finally
+        {
+            CloseCurrentGatt();
+        }
+    }
+
+    private static async Task UnpairDeviceAsync(BluetoothLEDevice device)
+    {
+        try
+        {
+            if (!device.DeviceInformation.Pairing.IsPaired) return;
+            var result = await device.DeviceInformation.Pairing.UnpairAsync();
+            _ = result;
+        }
+        catch
+        {
+            // Ignore — next PairAsync may still work after a partial unpair.
         }
     }
 

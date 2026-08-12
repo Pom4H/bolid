@@ -266,7 +266,7 @@ public partial class MainWindow : Window
                 : "Это устройство",
             () =>
             {
-                if (retry) _client.Identify(device.Address);
+                if (retry) _client.IdentifyRepair(device.Address);
                 else { _client.ConfirmIdentifiedDevice(); _identifying = null; }
                 Render();
             },

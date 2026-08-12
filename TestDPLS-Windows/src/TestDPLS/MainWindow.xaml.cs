@@ -316,7 +316,7 @@ public partial class MainWindow : Window
                 : "Это устройство",
             () =>
             {
-                if (retry) _client.Identify(device.Address);
+                if (retry) _client.IdentifyRepair(device.Address);
                 else
                 {
                     _client.ConfirmIdentifiedDevice();
@@ -403,12 +403,26 @@ public partial class MainWindow : Window
         center.Children.Add(new ProgressBar { IsIndeterminate = true, Width = 180, Height = 4 });
         center.Children.Add(new TextBlock
         {
-            Text = $"Подключение к\n{S.SelectedDevice?.UserName ?? S.SelectedDevice?.AdvertisedName ?? "устройству"}...",
+            Text = string.IsNullOrWhiteSpace(S.StatusText)
+                ? $"Подключение к\n{S.SelectedDevice?.UserName ?? S.SelectedDevice?.AdvertisedName ?? "устройству"}..."
+                : S.StatusText,
             Foreground = Brushes.White,
             FontSize = 18,
             TextAlignment = TextAlignment.Center,
             Margin = new Thickness(0, 30, 0, 0),
         });
+        if (!string.IsNullOrWhiteSpace(S.StatusText) &&
+            S.StatusText is not "Вход…" and not "Сохранение…")
+        {
+            center.Children.Add(new TextBlock
+            {
+                Text = S.SelectedDevice?.UserName ?? S.SelectedDevice?.AdvertisedName ?? "",
+                Foreground = (Brush)FindResource("MutedBrush"),
+                FontSize = 13,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 10, 0, 0),
+            });
+        }
         if (S.Error != null)
         {
             center.Children.Add(new TextBlock

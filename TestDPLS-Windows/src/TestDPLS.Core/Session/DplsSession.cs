@@ -824,8 +824,8 @@ public sealed class DplsSession
                     _pendingIdentifyAck = false;
                     Ui.IdentifyLedLive = false;
                     Fail(code == 2
-                        ? "Устройство отклонило Identify: нет шифрования BLE.\n" +
-                          "Удалите устройство в параметрах Bluetooth Windows и нажмите «Повторить сопряжение»."
+                        ? "Устаревшее сопряжение Windows (нет общего ключа с платой).\n" +
+                          "Нажмите «Повторить сопряжение» — приложение само сбросит bond."
                         : DeviceErrorReason(code));
                     return;
                 }
