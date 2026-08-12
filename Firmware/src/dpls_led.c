@@ -34,9 +34,10 @@ uint32_t dpls_led_tick(dpls_led_t *led, uint32_t now_ms)
 
     if (!led->identify) {
         apply_level(led, false);
-        return DPLS_LED_IDLE_MS;
+        /* Zero means there is no future LED work. The target re-arms this state
+         * machine when an IDENTIFY command changes the flag. */
+        return 0u;
     }
-    /* Беззнаковая разность корректна и на переполнении счётчика мс. */
     phase = (now_ms - led->cycle_start_ms) % DPLS_LED_PERIOD_MS;
     if (phase < DPLS_LED_IDENTIFY_HALF_MS) {
         apply_level(led, true);
