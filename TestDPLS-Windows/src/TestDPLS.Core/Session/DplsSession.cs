@@ -61,6 +61,9 @@ public sealed class DplsSession
     private CancellationTokenSource? _commandTimeoutCts;
     private CancellationTokenSource? _authTimeoutCts;
     private int _authJobId;
+    private string? _pendingPassword;
+    private byte[]? _pendingAuthProof;
+    private int _authProofRetries;
 
     private enum PendingSettingsKind { Name, Password }
 
@@ -215,6 +218,49 @@ public sealed class DplsSession
     public void UpdateSetupPassword(string password) => Ui.SetupPassword = password;
     public void UpdateSetupRepeatPassword(string password) => Ui.SetupRepeatPassword = password;
 
+    public void PrepareAuthReconnect()
+    {
+        Ui.Phase = ConnectionPhase.Connecting;
+        Ui.StatusText = "Восстановление связи…";
+        Ui.CredentialsReady = false;
+        Ui.AwaitingUserPassword = false;
+        Ui.Error = null;
+        RaiseUi();
+    }
+
+    public void StashPasswordForReconnect(string password)
+    {
+        _pendingPassword = password;
+        Ui.Phase = ConnectionPhase.Connecting;
+        Ui.StatusText = "Восстановление связи…";
+        Ui.AwaitingUserPassword = false;
+        Ui.Error = null;
+        RaiseUi();
+    }
+
+    /// <summary>
+    /// BLE dropped after Identify/confirm but before AUTH_RESULT. Challenge is invalid.
+    /// Keep the login screen usable: next «Подключиться» will reconnect then auth.
+    /// </summary>
+    public void OnPreAuthLinkLost(string detail)
+    {
+        CancelAuthTimeout();
+        CancelPreAuthKeepAlive();
+        _authJobId++;
+        _pendingAuthProof = null;
+        _authProofRetries = 0;
+        IsLinked = false;
+        _transport.ResetQueue();
+        // Stay on password UI so the operator can retry without re-identify.
+        Ui.CredentialsReady = true;
+        Ui.AwaitingUserPassword = true;
+        Ui.IdentifyLedLive = false;
+        Ui.Phase = ConnectionPhase.Error;
+        Ui.StatusText = detail;
+        Ui.Error = detail;
+        RaiseUi();
+    }
+
     public void Authenticate(string password)
     {
         if (password.Length < 8)
@@ -225,6 +271,9 @@ public sealed class DplsSession
         CancelPreAuthKeepAlive();
         var salt = _authSalt.ToArray();
         var job = ++_authJobId;
+        _pendingPassword = null;
+        _pendingAuthProof = null;
+        _authProofRetries = 0;
         Ui.AwaitingUserPassword = false;
         Ui.Phase = ConnectionPhase.Authenticating;
         Ui.StatusText = "Вход…";
@@ -255,8 +304,8 @@ public sealed class DplsSession
                 if (job != _authJobId) return;
                 if (!IsLinked)
                 {
-                    Ui.AwaitingUserPassword = true;
-                    Fail("Связь оборвалась во время входа. Повторите подключение.");
+                    // Stash and let the host reconnect (BleClient.Authenticate path).
+                    StashPasswordForReconnect(password);
                     return;
                 }
                 _cachedVerifier = verifier;
@@ -646,7 +695,9 @@ public sealed class DplsSession
                 _authSalt = payload.Slice(offset, 16).ToArray();
                 offset += 16;
                 _initialized = LittleEndian.U8(payload, ref offset) != 0;
-                var autoAuth = _initialized && _cachedVerifier != null;
+                var stashed = _pendingPassword;
+                _pendingPassword = null;
+                var autoAuth = _initialized && (_cachedVerifier != null || stashed != null);
                 Ui.Initialized = _initialized;
                 Ui.CredentialsReady = true;
                 Ui.AwaitingUserPassword = !autoAuth;
@@ -655,8 +706,14 @@ public sealed class DplsSession
                     Ui.SetupName = Ui.SelectedDevice?.UserName ?? "Test-DPLS-001";
                 Ui.SetupPassword = "";
                 Ui.SetupRepeatPassword = "";
+                Ui.Error = null;
                 RaiseUi();
                 SchedulePreAuthKeepAlive();
+                if (stashed != null && _initialized)
+                {
+                    Authenticate(stashed);
+                    break;
+                }
                 if (autoAuth && _cachedVerifier is { } verifier)
                     SendAuthProof(verifier);
                 break;
@@ -666,6 +723,9 @@ public sealed class DplsSession
                 CancelPreAuthKeepAlive();
                 CancelAuthTimeout();
                 _authJobId++;
+                _pendingAuthProof = null;
+                _authProofRetries = 0;
+                _pendingPassword = null;
                 var status = LittleEndian.U8(payload, ref offset);
                 var retryAfter = payload.Length >= 3 ? (int)LittleEndian.U16(payload, ref offset) : 0;
                 if (status == 3)
@@ -1108,12 +1168,79 @@ public sealed class DplsSession
 
     private void SendAuthProof(byte[] verifier)
     {
+        _cachedVerifier = verifier;
         var signed = new List<byte>();
         signed.AddRange(_deviceNonce);
         signed.AddRange(_clientNonce);
         LittleEndian.AppendU32(signed, _sessionId);
         var mac = DplsCrypto.HmacSha256(verifier, signed.ToArray());
-        Send(DplsProtocol.MessageType.AuthProof, LittleEndian.Concat(_clientNonce, mac));
+        var payload = LittleEndian.Concat(_clientNonce, mac);
+        _pendingAuthProof = payload;
+        _authProofRetries = 0;
+        Send(DplsProtocol.MessageType.AuthProof, payload);
+        if (_authTimeoutCts == null || _authTimeoutCts.IsCancellationRequested)
+            ArmAuthTimeout();
+        ArmAuthProofRetransmit();
+    }
+
+    private void ArmAuthProofRetransmit()
+    {
+        var job = _authJobId;
+        var cts = _authTimeoutCts;
+        if (cts == null) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Spaced past DPLS_AUTH_MIN_INTERVAL_MS (1000) so a late retry is verified,
+                // not rejected as status=1 ("wrong password").
+                while (!cts.IsCancellationRequested && job == _authJobId)
+                {
+                    await Task.Delay(2000, cts.Token);
+                    Post(() =>
+                    {
+                        if (job != _authJobId || Ui.Authenticated || _pendingAuthProof == null) return;
+                        if (!IsLinked || _cachedVerifier == null) return;
+                        if (_authProofRetries >= 4) return;
+                        _authProofRetries++;
+                        Ui.StatusText = $"Вход… (повтор {_authProofRetries})";
+                        RaiseUi();
+                        var signed = new List<byte>();
+                        signed.AddRange(_deviceNonce);
+                        signed.AddRange(_clientNonce);
+                        LittleEndian.AppendU32(signed, _sessionId);
+                        var mac = DplsCrypto.HmacSha256(_cachedVerifier, signed.ToArray());
+                        Send(DplsProtocol.MessageType.AuthProof, LittleEndian.Concat(_clientNonce, mac));
+                    });
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    private void ArmAuthTimeout()
+    {
+        CancelAuthTimeout();
+        var cts = new CancellationTokenSource();
+        _authTimeoutCts = cts;
+        var job = _authJobId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(18_000, cts.Token);
+                Post(() =>
+                {
+                    if (job != _authJobId || Ui.Authenticated) return;
+                    _pendingAuthProof = null;
+                    Ui.AwaitingUserPassword = true;
+                    Fail(IsLinked
+                        ? "Устройство не ответило на вход.\nПроверьте пароль и связь, затем повторите."
+                        : "Связь оборвалась во время входа.\nВведите пароль снова — будет переподключение.");
+                });
+            }
+            catch (OperationCanceledException) { }
+        });
     }
 
     private byte[] AuthenticatedPayload()
@@ -1324,28 +1451,6 @@ public sealed class DplsSession
                     Send(DplsProtocol.MessageType.StateGet, AuthenticatedPayload());
                     Ui.StatusText = "Запрос состояния устройства…";
                     RaiseUi();
-                });
-            }
-            catch (OperationCanceledException) { }
-        });
-    }
-
-    private void ArmAuthTimeout()
-    {
-        CancelAuthTimeout();
-        var cts = new CancellationTokenSource();
-        _authTimeoutCts = cts;
-        var job = _authJobId;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(20_000, cts.Token);
-                Post(() =>
-                {
-                    if (job != _authJobId || Ui.Authenticated) return;
-                    Ui.AwaitingUserPassword = true;
-                    Fail("Устройство не ответило на вход.\nПроверьте связь и повторите.");
                 });
             }
             catch (OperationCanceledException) { }

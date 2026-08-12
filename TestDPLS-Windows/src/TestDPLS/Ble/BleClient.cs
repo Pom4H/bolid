@@ -120,7 +120,28 @@ public sealed class BleClient : IDplsTransport, IDisposable
     public void UpdateSetupName(string v) => _session.UpdateSetupName(v);
     public void UpdateSetupPassword(string v) => _session.UpdateSetupPassword(v);
     public void UpdateSetupRepeatPassword(string v) => _session.UpdateSetupRepeatPassword(v);
-    public void Authenticate(string password) => _session.Authenticate(password);
+    public void Authenticate(string password)
+    {
+        // After a pre-auth drop the UI stays on the login screen; Connect must
+        // rebuild the encrypted link + Hello before AUTH_PROOF can succeed.
+        if (!_session.IsLinked && _selectedAddress != null)
+        {
+            _session.StashPasswordForReconnect(password);
+            _ = ReconnectForLoginAsync(_selectedAddress);
+            return;
+        }
+        _session.Authenticate(password);
+    }
+
+    private async Task ReconnectForLoginAsync(string address)
+    {
+        CancelReconnect();
+        CloseCurrentGatt();
+        ResetQueue();
+        _session.NotifyUnlinked(scheduleReconnectHint: false);
+        _session.PrepareAuthReconnect();
+        await ConnectWithBondRepairAsync(address);
+    }
     public void Setup(string name, string password) => _session.Setup(name, password);
     public void RequestMode(DplsMode mode) => _session.RequestMode(mode);
     public void CancelMode() => _session.CancelMode();
@@ -667,16 +688,28 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 }
 
                 // Identify runs before READY: never keep "LED blinking" after the link drops.
-                // Firmware stops identify on disconnect; journal shows no EVT_IDENTIFY_START
-                // when the write never took effect.
                 if (Ui.IdentifyActive && !_session.ReachedReady)
                 {
                     FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
                     return;
                 }
 
-                // Before READY, do not auto-reconnect — show error and wait for user retry.
-                if (!_session.ReachedReady) return;
+                // Login / Hello / AuthProof also run before READY. Ignoring disconnect here
+                // left IsLinked=true and caused "Устройство не ответило на вход".
+                if (!_session.ReachedReady)
+                {
+                    if (_session.IsLinked || Ui.CredentialsReady || Ui.AwaitingUserPassword ||
+                        Ui.Phase is ConnectionPhase.Authenticating or ConnectionPhase.Pairing
+                            or ConnectionPhase.Synchronizing or ConnectionPhase.Discovering
+                            or ConnectionPhase.Subscribing)
+                    {
+                        _session.OnPreAuthLinkLost(
+                            "Связь оборвалась до завершения входа.\n" +
+                            "Введите пароль снова — приложение переподключится.");
+                    }
+                    return;
+                }
+
                 _session.NotifyUnlinked(scheduleReconnectHint: true);
                 ScheduleReconnect();
             });
