@@ -344,9 +344,12 @@ public partial class MainWindow : Window
         {
             Text = status,
             Foreground = S.Error != null ? (Brush)FindResource("OrangeBrush") : Brushes.White,
-            FontSize = 17,
+            FontSize = 16,
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(8, 0, 8, 0),
+            MaxWidth = 360,
         });
         if (S.Phase == ConnectionPhase.Pairing)
         {

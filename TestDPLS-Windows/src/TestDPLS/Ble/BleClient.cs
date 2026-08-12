@@ -34,6 +34,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private CancellationTokenSource? _reconnectCts;
     private bool _writeInProgress;
     private bool _disposed;
+    private bool _connectInProgress;
     private TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs>? _pairingHandler;
 
     public BleClient()
@@ -99,6 +100,8 @@ public sealed class BleClient : IDplsTransport, IDisposable
 
     public void Identify(string address)
     {
+        CancelReconnect();
+        _reconnectAttempt = 0;
         _session.BeginIdentifyFlow();
         Connect(address);
     }
@@ -145,10 +148,26 @@ public sealed class BleClient : IDplsTransport, IDisposable
 
     private async Task ConnectInternalAsync(string address)
     {
+        _connectInProgress = true;
         try
         {
             var btAddress = ParseAddress(address);
-            var device = await BluetoothLEDevice.FromBluetoothAddressAsync(btAddress);
+
+            // Prefer FromIdAsync via selector — more stable on Windows than address alone.
+            BluetoothLEDevice? device = null;
+            try
+            {
+                var selector = BluetoothLEDevice.GetDeviceSelectorFromBluetoothAddress(btAddress);
+                var infos = await DeviceInformation.FindAllAsync(selector);
+                if (infos.Count > 0)
+                    device = await BluetoothLEDevice.FromIdAsync(infos[0].Id);
+            }
+            catch
+            {
+                // Fall through to address-based open.
+            }
+
+            device ??= await BluetoothLEDevice.FromBluetoothAddressAsync(btAddress);
             if (device == null)
             {
                 _session.Fail("Устройство недоступно. Запустите поиск снова.");
@@ -165,7 +184,6 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 return;
             }
 
-            // Keep the link up while discovering GATT (Windows otherwise drops quickly).
             try
             {
                 _gattSession = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
@@ -179,7 +197,38 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Ui.Phase = ConnectionPhase.Pairing;
             Ui.StatusText = "Сопряжение…";
             Raise();
-            await EnsurePairedAsync(device);
+            var paired = await EnsurePairedAsync(device);
+
+            // Windows often needs a fresh device handle after pairing.
+            if (paired)
+            {
+                try
+                {
+                    device.ConnectionStatusChanged -= OnConnectionStatusChanged;
+                    var addr = device.BluetoothAddress;
+                    device.Dispose();
+                    await Task.Delay(400);
+                    device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
+                    if (device == null)
+                    {
+                        _session.Fail("Устройство пропало после сопряжения. Повторите попытку.");
+                        return;
+                    }
+                    _device = device;
+                    device.ConnectionStatusChanged += OnConnectionStatusChanged;
+                    try
+                    {
+                        _gattSession?.Dispose();
+                        _gattSession = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                        _gattSession.MaintainConnection = true;
+                    }
+                    catch { /* ignore */ }
+                }
+                catch
+                {
+                    // Continue with existing handle.
+                }
+            }
 
             Ui.Phase = ConnectionPhase.Discovering;
             Ui.StatusText = "Поиск службы Test-DPLS…";
@@ -189,8 +238,10 @@ public sealed class BleClient : IDplsTransport, IDisposable
             if (service == null)
             {
                 _session.Fail(
-                    "Служба Test-DPLS не найдена. Убедитесь, что плата прошита Test-DPLS, " +
-                    "Bluetooth включён, устройство рядом, и в параметрах Windows нет «сломанного» сопряжения с ним.");
+                    "Служба Test-DPLS не найдена.\n" +
+                    "1) Плата прошита Test-DPLS и рядом\n" +
+                    "2) Параметры Windows → Bluetooth → удалите старое сопряжение\n" +
+                    "3) Нажмите «Повторить сопряжение»");
                 return;
             }
 
@@ -198,7 +249,9 @@ public sealed class BleClient : IDplsTransport, IDisposable
             var chars = await ResolveCharacteristicsAsync(service);
             if (chars == null)
             {
-                _session.Fail("Характеристики RX/TX недоступны. Повторите сопряжение или удалите устройство в параметрах Bluetooth Windows.");
+                _session.Fail(
+                    "Характеристики RX/TX недоступны.\n" +
+                    "Удалите устройство в параметрах Bluetooth Windows и повторите сопряжение.");
                 return;
             }
 
@@ -211,7 +264,6 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Raise();
 
             _tx.ValueChanged += OnTxValueChanged;
-            // CCCD 0x0003 = notify + indicate (same as mobile clients).
             var cccdValue = (GattClientCharacteristicConfigurationDescriptorValue)(
                 (int)GattClientCharacteristicConfigurationDescriptorValue.Notify |
                 (int)GattClientCharacteristicConfigurationDescriptorValue.Indicate);
@@ -233,28 +285,35 @@ public sealed class BleClient : IDplsTransport, IDisposable
         }
         catch (Exception ex)
         {
-            if (_selectedAddress != null)
+            // During identify / first connect, wait for user retry instead of burning reconnects.
+            if (_session.ReachedReady && _selectedAddress != null)
                 ScheduleReconnect();
             else
                 _session.Fail($"Ошибка BLE: {ex.Message}");
         }
+        finally
+        {
+            _connectInProgress = false;
+        }
     }
 
-    private async Task EnsurePairedAsync(BluetoothLEDevice device)
+    /// <returns>True when a new pairing was completed.</returns>
+    private async Task<bool> EnsurePairedAsync(BluetoothLEDevice device)
     {
         try
         {
-            if (device.DeviceInformation.Pairing.IsPaired) return;
+            if (device.DeviceInformation.Pairing.IsPaired) return false;
 
-            // Just-Works style pairing used by the firmware (no PIN).
             var custom = device.DeviceInformation.Pairing.Custom;
             _pairingHandler = (_, args) => args.Accept();
             custom.PairingRequested += _pairingHandler;
             try
             {
-                _ = await custom.PairAsync(
+                var result = await custom.PairAsync(
                     DevicePairingKinds.ConfirmOnly,
                     DevicePairingProtectionLevel.Encryption);
+                return result.Status is DevicePairingResultStatus.Paired
+                    or DevicePairingResultStatus.AlreadyPaired;
             }
             finally
             {
@@ -265,7 +324,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
         }
         catch
         {
-            // Pairing may complete later on first encrypted RX write.
+            return false;
         }
     }
 
@@ -376,6 +435,10 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Post(() =>
             {
                 if (_selectedAddress == null) return;
+                // Ignore disconnect flaps while the initial connect/pair/discover is running.
+                if (_connectInProgress) return;
+                // Before READY, do not auto-reconnect — show error and wait for user retry.
+                if (!_session.ReachedReady) return;
                 _session.NotifyUnlinked(scheduleReconnectHint: true);
                 ScheduleReconnect();
             });
