@@ -8,7 +8,6 @@
 #include "dpls_phy6252_hw.h"
 #include "dpls_server.h"
 #include "OSAL.h"
-#include "OSAL_Timers.h"
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
@@ -32,14 +31,12 @@
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
-#define DPLS_HW_REVISION 2u /* +1, +2, +T and reserve are independent ADC inputs */
+#define DPLS_HW_REVISION 2u
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
 
-/* Power-source and real-short interpretation is domain logic, not ADC-driver
- * logic. The ADC adapter only supplies fresh calibrated voltages. */
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
 #define DPLS_RESERVE_LOW_MV 3700u
@@ -80,13 +77,17 @@ static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
 
-#define DPLS_RX_QUEUE_DEPTH 6u
+/* ATT Write Requests already provide RX backpressure and ATT indications permit
+ * only one unconfirmed TX. Two slots therefore cover one item being processed/
+ * in flight plus one queued item without retaining ten historical buffers across
+ * every sleep cycle. Queue-full remains fail-safe and disconnects/NAKs. */
+#define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
 
-#define DPLS_TX_QUEUE_DEPTH 4u
+#define DPLS_TX_QUEUE_DEPTH 2u
 #define DPLS_TX_SLOT_SIZE 168u
 typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
@@ -259,9 +260,6 @@ static void status_led_output(void *context, bool on)
     dpls_phy6252_hw_identify_led(on);
 }
 
-/* Derive domain state only from fresh measurements. A stale reserve reading is
- * treated as low by reserve_low() below, which is the fail-safe direction for a
- * control device: stale telemetry can never leave a test mode energized. */
 static void update_power_state(uint32_t now)
 {
     uint8_t validity = dpls_phy6252_adc_validity(now);
@@ -279,8 +277,6 @@ static void update_power_state(uint32_t now)
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
     } else {
-        /* Hardware performs the actual fast isolation. Do not keep exporting a
-         * software-derived real-short flag after its measurement has gone stale. */
         auto_isolation_active = false;
     }
 
@@ -332,16 +328,14 @@ static bool reserve_low(void *context)
     uint8_t validity;
     (void)context;
     validity = dpls_phy6252_adc_validity(now_ms());
-    if (!(validity & DPLS_STATE_RESERVE_VOLTAGE_VALID))
-        return true;
+    if (!(validity & DPLS_STATE_RESERVE_VOLTAGE_VALID)) return true;
     return reserve_low_state;
 }
 
 static bool real_short_active(void *context)
 {
     (void)context;
-    if (!(dpls_phy6252_adc_validity(now_ms()) & DPLS_STATE_PORT_1_VALID))
-        return false;
+    if (!(dpls_phy6252_adc_validity(now_ms()) & DPLS_STATE_PORT_1_VALID)) return false;
     return auto_isolation_active;
 }
 
@@ -352,8 +346,7 @@ static uint8_t measurement_validity(void *context)
     flags = dpls_phy6252_adc_validity(now_ms());
     if (flags & DPLS_STATE_PORT_1_VALID)
         flags |= DPLS_STATE_POWER_VALID | DPLS_STATE_AUTOISO_VALID;
-    if (dpls_phy6252_adc_fully_calibrated())
-        flags |= DPLS_STATE_ADC_CALIBRATED;
+    if (dpls_phy6252_adc_fully_calibrated()) flags |= DPLS_STATE_ADC_CALIBRATED;
     return flags;
 }
 
@@ -467,9 +460,7 @@ static void device_info(void *context, dpls_device_info_t *out)
     out->fw_patch = DPLS_FW_VERSION_PATCH;
     out->hw_revision = DPLS_HW_REVISION;
     out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT;
-    if (dpls_phy6252_adc_fully_calibrated())
-        out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
-    /* DPLS_CAP_HW_READBACK stays clear: commanded mode is not electrical readback. */
+    if (dpls_phy6252_adc_fully_calibrated()) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
 }
 
 static bool auth_lock_read(void *context)
@@ -485,8 +476,20 @@ static bool auth_lock_read(void *context)
 
 static bool auth_lock_write(void *context, bool locked)
 {
+    dpls_auth_lock_t current;
     dpls_auth_lock_t record;
+    bool current_valid;
     (void)context;
+
+    current_valid = osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(current), &current) == SUCCESS &&
+                    current.magic == DPLS_AUTH_LOCK_MAGIC &&
+                    current.crc == dpls_crc16((const uint8_t *)&current, offsetof(dpls_auth_lock_t, crc));
+    if (current_valid && ((current.locked != 0u) == locked)) return true;
+    /* Missing/corrupt marker already means "not persistently locked". Do not
+     * burn a flash write after every successful authentication just to encode
+     * the default false state. */
+    if (!current_valid && !locked) return true;
+
     record.magic = DPLS_AUTH_LOCK_MAGIC;
     record.locked = locked ? 1u : 0u;
     record.reserved = 0u;
@@ -524,8 +527,7 @@ static void diagnostic_error(void *context, bool critical)
     (void)context;
     if (!critical) return;
     safe_normal(NULL);
-    if (connection_handle != INVALID_CONNHANDLE)
-        (void)GAPRole_TerminateConnection();
+    if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
 }
 
 static void tx_pump(void)
@@ -655,8 +657,6 @@ void dpls_phy6252_init(uint8 new_task_id)
     tx_in_flight = false;
     identify_led_active = false;
 
-    /* Target startup calls hw_init even earlier; this second call is intentionally
-     * idempotent and makes the app safe if the integration order ever changes. */
     (void)dpls_phy6252_hw_init();
     (void)dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
 
@@ -673,10 +673,9 @@ void dpls_phy6252_init(uint8 new_task_id)
     classify_settings();
     factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
     factory_reset_started_ms = now_ms();
-    if (settings_state == DPLS_SETTINGS_EMPTY) {
-        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
-        dpls_ble_identity_reset_bonding_keys();
-    }
+    /* Identity preparation already produced stable IRK/CSRK before this point.
+     * An uncommissioned device must not erase/rewrite those keys on every boot;
+     * explicit factory reset remains the only identity-key reset path. */
 
     memset(&hal, 0, sizeof(hal));
     hal.link_encrypted = link_encrypted;
@@ -722,8 +721,7 @@ static void erase_stored_bonds(void)
 static void erase_bonds_and_drop_link(void)
 {
     erase_stored_bonds();
-    if (connection_handle != INVALID_CONNHANDLE)
-        (void)GAPRole_TerminateConnection();
+    if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
 }
 
 static void note_pre_auth_disconnect(void)
@@ -747,10 +745,6 @@ void dpls_phy6252_connected(uint16 conn_handle)
     connected_at_ms = now_ms();
     connection_had_encryption = false;
 
-    /* A connected session without this lock is a known unsafe state on SDK
-     * 3.1.2: ADC clock changes can race radio sleep/wake and freeze OSAL/GATT.
-     * Unlike previous releases, failure is checked and the link is terminated
-     * instead of continuing with a silently ineffective lock. */
     if (!dpls_phy6252_hw_connection_lock()) {
         safe_normal(NULL);
         connected_at_ms = 0u;
