@@ -209,7 +209,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     device.ConnectionStatusChanged -= OnConnectionStatusChanged;
                     var addr = device.BluetoothAddress;
                     device.Dispose();
-                    await Task.Delay(400);
+                    await Task.Delay(200);
                     device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
                     if (device == null)
                     {
@@ -422,24 +422,24 @@ public sealed class BleClient : IDplsTransport, IDisposable
 
     private static async Task<GattDeviceService?> FindDplsServiceAsync(BluetoothLEDevice device)
     {
+        // Prefer UUID lookup first (fast path once bonded); fall back to full scan.
         for (var attempt = 0; attempt < 4; attempt++)
         {
-            // Full discovery is more reliable on Windows than ForUuid alone.
-            var all = await device.GetGattServicesAsync(
-                attempt % 2 == 0 ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached);
+            var mode = attempt == 0 ? BluetoothCacheMode.Cached : BluetoothCacheMode.Uncached;
+
+            var byUuid = await device.GetGattServicesForUuidAsync(DplsSession.ServiceUuid, mode);
+            if (byUuid.Status == GattCommunicationStatus.Success && byUuid.Services.Count > 0)
+                return byUuid.Services[0];
+
+            var all = await device.GetGattServicesAsync(mode);
             if (all.Status == GattCommunicationStatus.Success)
             {
                 var found = all.Services.FirstOrDefault(s => s.Uuid == DplsSession.ServiceUuid);
                 if (found != null) return found;
             }
 
-            var byUuid = await device.GetGattServicesForUuidAsync(
-                DplsSession.ServiceUuid,
-                attempt % 2 == 0 ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached);
-            if (byUuid.Status == GattCommunicationStatus.Success && byUuid.Services.Count > 0)
-                return byUuid.Services[0];
-
-            await Task.Delay(400 * (attempt + 1));
+            if (attempt < 3)
+                await Task.Delay(200 * (attempt + 1));
         }
 
         return null;
@@ -599,9 +599,9 @@ public sealed class BleClient : IDplsTransport, IDisposable
             var ok = status == GattCommunicationStatus.Success;
             Post(() =>
             {
-                lock (_writeLock) _writeInProgress = false;
                 if (!ok)
                 {
+                    lock (_writeLock) _writeInProgress = false;
                     if (Ui.LogProgress != null)
                     {
                         // Journal transfer: retry LOG_ACK instead of tearing the link.
@@ -609,10 +609,13 @@ public sealed class BleClient : IDplsTransport, IDisposable
                         return;
                     }
                     if (Ui.Phase is ConnectionPhase.Pairing or ConnectionPhase.Authenticating ||
+                        Ui.IdentifyActive ||
                         (Ui.CredentialsReady && !Ui.Authenticated))
                     {
-                        // Retry shortly while pairing dialog may be shown.
-                        _ = Task.Delay(300).ContinueWith(_ => DrainWriteQueueAsync());
+                        // Re-queue the same frame — previously we drained it and retried an
+                        // empty queue, so AuthProof/Hello/Identify were lost and the UI hung.
+                        RequeueFront(next);
+                        _ = Task.Delay(350).ContinueWith(_ => DrainWriteQueueAsync());
                         return;
                     }
                     if (_session.ReachedReady)
@@ -624,11 +627,12 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     _session.Fail($"Ошибка передачи BLE: {status}");
                     return;
                 }
+                lock (_writeLock) _writeInProgress = false;
                 // Only treat Identify as live when the ATT write succeeded AND the link is up.
                 // Windows can report write Success while the peripheral already dropped.
                 var stillUp = _device?.ConnectionStatus == BluetoothConnectionStatus.Connected;
-                _session.OnWriteCompleted(ok && stillUp);
-                if (ok && !stillUp && Ui.IdentifyActive && !_session.ReachedReady)
+                _session.OnWriteCompleted(stillUp);
+                if (!stillUp && Ui.IdentifyActive && !_session.ReachedReady)
                 {
                     FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
                     return;
@@ -646,13 +650,28 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     _session.OnLogWriteFailed();
                     return;
                 }
-                if (Ui.Phase is ConnectionPhase.Pairing || Ui.IdentifyActive)
+                if (Ui.Phase is ConnectionPhase.Pairing or ConnectionPhase.Authenticating ||
+                    Ui.IdentifyActive ||
+                    (Ui.CredentialsReady && !Ui.Authenticated))
                 {
-                    _ = Task.Delay(300).ContinueWith(_ => DrainWriteQueueAsync());
+                    RequeueFront(next);
+                    _ = Task.Delay(350).ContinueWith(_ => DrainWriteQueueAsync());
                     return;
                 }
                 _session.Fail($"Ошибка передачи BLE: {ex.Message}");
             });
+        }
+    }
+
+    private void RequeueFront(byte[] frame)
+    {
+        lock (_writeLock)
+        {
+            var rest = _writeQueue.ToList();
+            _writeQueue.Clear();
+            _writeQueue.Enqueue(frame);
+            foreach (var item in rest)
+                _writeQueue.Enqueue(item);
         }
     }
 

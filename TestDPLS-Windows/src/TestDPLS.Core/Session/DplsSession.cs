@@ -59,6 +59,8 @@ public sealed class DplsSession
     private CancellationTokenSource? _logStallCts;
     private CancellationTokenSource? _settingsTimeoutCts;
     private CancellationTokenSource? _commandTimeoutCts;
+    private CancellationTokenSource? _authTimeoutCts;
+    private int _authJobId;
 
     private enum PendingSettingsKind { Name, Password }
 
@@ -153,9 +155,12 @@ public sealed class DplsSession
         Ui.IdentifyLedLive = false;
         IsLinked = false;
         _transport.ResetQueue();
-        Fail(detail is { Length: > 0 }
-            ? detail + "\nИндикация не запущена — нажмите «Повторить сопряжение»."
-            : "Связь оборвалась до запуска индикации.\nНажмите «Повторить сопряжение».");
+        var message = string.IsNullOrWhiteSpace(detail)
+            ? "Связь оборвалась до запуска индикации."
+            : detail.Trim();
+        if (!message.Contains("Повторить", StringComparison.Ordinal))
+            message += "\nНажмите «Повторить сопряжение».";
+        Fail(message);
     }
 
     /// <summary>
@@ -218,9 +223,46 @@ public sealed class DplsSession
             return;
         }
         CancelPreAuthKeepAlive();
-        var verifier = DplsCrypto.DeriveVerifier(password, _authSalt);
-        _cachedVerifier = verifier;
-        SendAuthProof(verifier);
+        var salt = _authSalt.ToArray();
+        var job = ++_authJobId;
+        Ui.AwaitingUserPassword = false;
+        Ui.Phase = ConnectionPhase.Authenticating;
+        Ui.StatusText = "Вход…";
+        Ui.Error = null;
+        RaiseUi();
+        ArmAuthTimeout();
+
+        _ = Task.Run(() =>
+        {
+            byte[] verifier;
+            try
+            {
+                verifier = DplsCrypto.DeriveVerifier(password, salt);
+            }
+            catch (Exception ex)
+            {
+                Post(() =>
+                {
+                    if (job != _authJobId) return;
+                    Ui.AwaitingUserPassword = true;
+                    Fail($"Ошибка вычисления пароля: {ex.Message}");
+                });
+                return;
+            }
+
+            Post(() =>
+            {
+                if (job != _authJobId) return;
+                if (!IsLinked)
+                {
+                    Ui.AwaitingUserPassword = true;
+                    Fail("Связь оборвалась во время входа. Повторите подключение.");
+                    return;
+                }
+                _cachedVerifier = verifier;
+                SendAuthProof(verifier);
+            });
+        });
     }
 
     public void Setup(string deviceName, string password)
@@ -237,18 +279,55 @@ public sealed class DplsSession
             return;
         }
 
+        CancelPreAuthKeepAlive();
         var salt = DplsCrypto.RandomBytes(16);
-        var verifier = DplsCrypto.DeriveVerifier(password, salt);
-        _cachedVerifier = verifier;
-        _pendingSetupName = trimmed;
-        var name = Utf8Util.Truncate(trimmed, 31);
-        var payload = new List<byte>();
-        LittleEndian.AppendU32(payload, _sessionId);
-        LittleEndian.AppendU8(payload, (byte)name.Length);
-        payload.AddRange(name);
-        payload.AddRange(salt);
-        payload.AddRange(verifier);
-        Send(DplsProtocol.MessageType.Setup, payload.ToArray());
+        var job = ++_authJobId;
+        Ui.AwaitingUserPassword = false;
+        Ui.Phase = ConnectionPhase.Authenticating;
+        Ui.StatusText = "Сохранение…";
+        Ui.Error = null;
+        RaiseUi();
+        ArmAuthTimeout();
+
+        _ = Task.Run(() =>
+        {
+            byte[] verifier;
+            try
+            {
+                verifier = DplsCrypto.DeriveVerifier(password, salt);
+            }
+            catch (Exception ex)
+            {
+                Post(() =>
+                {
+                    if (job != _authJobId) return;
+                    Ui.AwaitingUserPassword = true;
+                    Fail($"Ошибка вычисления пароля: {ex.Message}");
+                });
+                return;
+            }
+
+            Post(() =>
+            {
+                if (job != _authJobId) return;
+                if (!IsLinked)
+                {
+                    Ui.AwaitingUserPassword = true;
+                    Fail("Связь оборвалась во время настройки. Повторите подключение.");
+                    return;
+                }
+                _cachedVerifier = verifier;
+                _pendingSetupName = trimmed;
+                var name = Utf8Util.Truncate(trimmed, 31);
+                var payload = new List<byte>();
+                LittleEndian.AppendU32(payload, _sessionId);
+                LittleEndian.AppendU8(payload, (byte)name.Length);
+                payload.AddRange(name);
+                payload.AddRange(salt);
+                payload.AddRange(verifier);
+                Send(DplsProtocol.MessageType.Setup, payload.ToArray());
+            });
+        });
     }
 
     public void RequestMode(DplsMode mode)
@@ -352,29 +431,62 @@ public sealed class DplsSession
             return;
         }
 
-        var currentVerifier = DplsCrypto.DeriveVerifier(current, _authSalt);
-        if (_cachedVerifier is null || !currentVerifier.AsSpan().SequenceEqual(_cachedVerifier))
-        {
-            Ui.SettingsOp = SettingsOp.Failed;
-            Ui.SettingsError = "Неверный текущий пароль";
-            RaiseUi();
-            return;
-        }
-
-        var newSalt = DplsCrypto.RandomBytes(16);
-        var newVerifier = DplsCrypto.DeriveVerifier(newPassword, newSalt);
-        var id = _commandId++;
-        ArmPendingSettings(new PendingSettings(PendingSettingsKind.Password, id, newVerifier));
-        var payload = new List<byte>();
-        LittleEndian.AppendU32(payload, _sessionId);
-        payload.AddRange(_sessionToken);
-        LittleEndian.AppendU32(payload, id);
-        payload.AddRange(newSalt);
-        payload.AddRange(newVerifier);
+        var salt = _authSalt.ToArray();
+        var cached = _cachedVerifier;
+        var sessionId = _sessionId;
+        var token = _sessionToken.ToArray();
         Ui.SettingsOp = SettingsOp.InProgress;
         Ui.SettingsError = null;
         RaiseUi();
-        Send(DplsProtocol.MessageType.PasswordSet, payload.ToArray());
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var currentVerifier = DplsCrypto.DeriveVerifier(current, salt);
+                if (cached is null || !currentVerifier.AsSpan().SequenceEqual(cached))
+                {
+                    Post(() =>
+                    {
+                        Ui.SettingsOp = SettingsOp.Failed;
+                        Ui.SettingsError = "Неверный текущий пароль";
+                        RaiseUi();
+                    });
+                    return;
+                }
+
+                var newSalt = DplsCrypto.RandomBytes(16);
+                var newVerifier = DplsCrypto.DeriveVerifier(newPassword, newSalt);
+                Post(() =>
+                {
+                    if (!Ui.Authenticated || !IsLinked)
+                    {
+                        Ui.SettingsOp = SettingsOp.Failed;
+                        Ui.SettingsError = "Нет соединения с устройством";
+                        RaiseUi();
+                        return;
+                    }
+                    var id = _commandId++;
+                    ArmPendingSettings(new PendingSettings(PendingSettingsKind.Password, id, newVerifier));
+                    var payload = new List<byte>();
+                    LittleEndian.AppendU32(payload, sessionId);
+                    payload.AddRange(token);
+                    LittleEndian.AppendU32(payload, id);
+                    payload.AddRange(newSalt);
+                    payload.AddRange(newVerifier);
+                    Send(DplsProtocol.MessageType.PasswordSet, payload.ToArray());
+                });
+            }
+            catch (Exception ex)
+            {
+                Post(() =>
+                {
+                    Ui.SettingsOp = SettingsOp.Failed;
+                    Ui.SettingsError = $"Ошибка вычисления пароля: {ex.Message}";
+                    RaiseUi();
+                });
+            }
+        });
     }
 
     public void LoadEventLog()
@@ -552,6 +664,8 @@ public sealed class DplsSession
             case DplsProtocol.MessageType.AuthResult:
                 if (Ui.Authenticated) return;
                 CancelPreAuthKeepAlive();
+                CancelAuthTimeout();
+                _authJobId++;
                 var status = LittleEndian.U8(payload, ref offset);
                 var retryAfter = payload.Length >= 3 ? (int)LittleEndian.U16(payload, ref offset) : 0;
                 if (status == 3)
@@ -1216,6 +1330,30 @@ public sealed class DplsSession
         });
     }
 
+    private void ArmAuthTimeout()
+    {
+        CancelAuthTimeout();
+        var cts = new CancellationTokenSource();
+        _authTimeoutCts = cts;
+        var job = _authJobId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(20_000, cts.Token);
+                Post(() =>
+                {
+                    if (job != _authJobId || Ui.Authenticated) return;
+                    Ui.AwaitingUserPassword = true;
+                    Fail("Устройство не ответило на вход.\nПроверьте связь и повторите.");
+                });
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    private void CancelAuthTimeout() => _authTimeoutCts?.Cancel();
+
     private void CancelTimers(bool keepReconnectRelevant)
     {
         CancelPreAuthKeepAlive();
@@ -1226,6 +1364,7 @@ public sealed class DplsSession
         _logStallCts?.Cancel();
         CancelSettingsTimeout();
         _commandTimeoutCts?.Cancel();
+        CancelAuthTimeout();
         _ = keepReconnectRelevant;
     }
 
@@ -1249,9 +1388,11 @@ public sealed class DplsSession
         _logLoadTimeoutCts?.Cancel();
         _logAckCts?.Cancel();
         _logStallCts?.Cancel();
+        CancelAuthTimeout();
         _logInfoReceived = false;
         if (Ui.IdentifyActive)
             Ui.IdentifyLedLive = false;
+        try { _transport.ResetQueue(); } catch { /* ignore */ }
         Ui.Phase = ConnectionPhase.Error;
         Ui.StatusText = message;
         Ui.Error = message;

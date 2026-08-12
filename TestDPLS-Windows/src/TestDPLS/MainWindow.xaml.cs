@@ -23,7 +23,15 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        _client.UiChanged += () => Dispatcher.Invoke(Render);
+        _client.UiChanged += () =>
+        {
+            // BeginInvoke avoids nested Invoke deadlocks when BLE callbacks
+            // already run on the dispatcher via SynchronizationContext.
+            if (Dispatcher.CheckAccess())
+                Render();
+            else
+                Dispatcher.BeginInvoke(Render);
+        };
         _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _uiTimer.Tick += (_, __) =>
         {
