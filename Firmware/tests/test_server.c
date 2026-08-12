@@ -194,9 +194,33 @@ static void do_hello(dpls_server_t *s, uint8_t *buf, uint32_t now) {
 
 /* proof[0] (== payload[16]) drives the fake verify: 0xa5 is the right password. */
 static void send_proof(dpls_server_t *s, uint8_t *buf, bool correct, uint32_t now) {
-    uint8_t payload[48]; size_t n; memset(payload, 0, 48);
+    uint8_t payload[48]; size_t n;
+    memset(payload, 1, 16);                  /* must repeat HELLO client_nonce */
+    memset(payload + 16, 0, 32);
     payload[16] = correct ? 0xa5u : 0x00u;
     n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf); dpls_server_receive(s, buf, n, now);
+}
+
+/* AUTH_PROOF must be bound to the nonce from HELLO. The fake verifier purposely
+ * ignores the nonce, so this test would authenticate if the server ever went
+ * back to trusting/replacing client_nonce from the proof packet itself. */
+static void test_auth_nonce_binding(void) {
+    uint8_t buf[DPLS_MAX_FRAME], payload[48]; size_t n;
+    fake_t f = {.encrypted = true, .initialized = true};
+    dpls_hal_t hal = lockout_hal(&f);
+    dpls_server_t s;
+
+    dpls_server_init(&s, &hal, 0);
+    dpls_server_connected(&s, 1000);
+    do_hello(&s, buf, 1100);                 /* nonce = 0x01 × 16 */
+    memset(payload, 2, 16);                  /* substituted nonce */
+    memset(payload + 16, 0, 32);
+    payload[16] = 0xa5u;                     /* verifier would otherwise accept */
+    n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf);
+    dpls_server_receive(&s, buf, n, 2000);
+    assert(!s.authenticated);
+    assert(s.failed_auth_attempts == 1u);
+    assert(s.client_nonce[0] == 1u && s.client_nonce[15] == 1u);
 }
 
 /* ТЗ 7.3.5 brute-force protection: the failed-attempt count and the lock must
@@ -308,7 +332,8 @@ int main(void) {
     dpls_server_connected(&server, 10);
     memset(payload, 1, 16); n = request(DPLS_MSG_HELLO, payload, 16, buf); assert(dpls_server_receive(&server, buf, n, 20));
     assert(dpls_frame_decode(fake.tx, fake.tx_len, &response)); assert(response.type == DPLS_MSG_AUTH_CHALLENGE);
-    memset(payload, 0, 48); payload[16] = 0xa5; n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf); dpls_server_receive(&server, buf, n, 30); assert(server.authenticated);
+    memset(payload, 1, 16); memset(payload + 16, 0, 32); payload[16] = 0xa5;
+    n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf); dpls_server_receive(&server, buf, n, 30); assert(server.authenticated);
     /* STATE_REPORT keeps its legacy prefix and appends +1, +2, +T and reserve. */
     fake.validity = DPLS_STATE_PORT_1_VALID | DPLS_STATE_PORT_2_VALID |
                     DPLS_STATE_PORT_T_VALID | DPLS_STATE_RESERVE_VOLTAGE_VALID |
@@ -410,6 +435,7 @@ int main(void) {
     assert(event_read);
     assert(ev.event_type == 14 && ev.parameter == 0);
 
+    test_auth_nonce_binding();
     test_auth_lockout();
     test_setup_window();
     test_device_settings();
