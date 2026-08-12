@@ -78,7 +78,8 @@ static void auth_session(dpls_server_t *s, fake_t *fake, uint8_t *buf) {
     memset(payload, 1, 16);
     n = request(DPLS_MSG_HELLO, payload, 16, buf);
     assert(dpls_server_receive(s, buf, n, 20));
-    memset(payload, 0, 48);
+    memset(payload, 1, 16); /* AUTH_PROOF repeats the HELLO client nonce. */
+    memset(payload + 16, 0, 32);
     payload[16] = 0xa5;
     n = request(DPLS_MSG_AUTH_PROOF, payload, 48, buf);
     assert(dpls_server_receive(s, buf, n, 30));
