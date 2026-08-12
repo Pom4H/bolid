@@ -30,6 +30,9 @@ enum {
 #define DPLS_AUTH_MIN_INTERVAL_MS 1000u
 #define DPLS_SETUP_WINDOW_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
+/* LED driver owns the actual blink; this remains the public blink cadence used
+ * by UI/tests, not retained server state. */
+#define DPLS_IDENTIFY_BLINK_MS 500u
 
 typedef enum {
     DPLS_MODE_NORMAL = 0,
@@ -98,7 +101,6 @@ typedef struct {
     uint16_t (*reserve_voltage_mv)(void *context);
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
-    /* NULL means no measured state is known yet. */
     uint8_t (*measurement_validity)(void *context);
     void (*identify_led)(void *context, bool enabled);
     bool (*random_bytes)(void *context, uint8_t *out, size_t length);
@@ -116,10 +118,8 @@ typedef struct {
     bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
     bool (*event_storage_append)(void *context, const dpls_event_t *event);
     bool (*event_storage_read)(void *context, uint32_t sequence, dpls_event_t *event);
-    /* Core responses are indication-only. tx_notify is kept temporarily in the
-     * platform ABI so this safety patch does not churn every adapter/test at
-     * once; it is intentionally never called by dpls_server.c. */
     bool (*tx_indicate)(void *context, const uint8_t *frame, size_t length);
+    /* Temporary adapter ABI compatibility; dpls_server.c never calls notify. */
     bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
     void *context;
     void (*diagnostic_error)(void *context, bool critical);
