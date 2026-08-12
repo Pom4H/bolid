@@ -1,189 +1,138 @@
 # BLE-сервер Test-DPLS для PHY6252
 
-Каталог содержит переносимое ядро безопасного сервера (`src/`, `include/`),
-адаптер GATT/HAL для PHY62XX SDK 3.1.2 (`phy6252/`) и продуктовый
-target-проект AC6 (`targets/phy6252/`). Полный vendor SDK 3.1.2 загружается
-скриптом по закреплённому коммиту в `sdk/PHY62XX_SDK_3.1.2/` (не под git).
+Каталог содержит переносимое ядро (`src/`, `include/`), PHY6252 adapter
+(`phy6252/`) и product target SDK 3.1.2 (`targets/phy6252/`). Vendor SDK
+загружается закреплённым скриптом и не редактируется.
 
-## Реализовано
+## Архитектура target-слоя
 
-- бинарные кадры `version/type/flags/sequence/length/payload/CRC16-CCITT`;
-- challenge-response аутентификация через HAL, блокировка после 5 ошибок на
-  300 с (персистентная — переживает reconnect и ребут, SNV `0x84`), rate-limit
-  1 proof/с;
-- токен сессии и проверка каждой защищённой команды;
-- идемпотентный `MODE_SET` (cache 8 command ID);
-- подтверждение команды только после успешного аппаратного переключения;
-- независимый возврат в `NORMAL` через 5 минут, при потере/тайм-ауте сессии и
-  низком резерве;
-- идентификация с аппаратным пределом 60 с;
-- переключение силовых выходов режимов (ISO_1/2/T, KZ_1/2/T) по принципу
-  break-before-make с гарантией не более одного активного сигнала;
-- статусный светодиод: мигание 1 Гц на время идентификации, вне её погашен
-  (`src/dpls_led.c`, тест `tests/test_led.c`);
-- независимое измерение +1/+2/+Т/резерва (ADC P20/P15/P24/P23) с
-  последовательным сканированием, усреднением по окну и двухточечной
-  калибровкой gain+offset в SNV (`src/dpls_calib.c`, тест `tests/test_calib.c`);
-- определение источника питания (линия/резерв) и низкого заряда резерва по
-  ADC с гистерезисом; журналирование переходов;
-- наблюдение автоизоляции реального КЗ (функция БРИЗ-Т): просадка линии в
-  «Норме» → приоритет над тестами (сброс в «Норму» и блокировка команд),
-  журнал и постоянное свечение светодиода. Быстрая изоляция ≤200 мс —
-  аппаратная;
-- персистентный кольцевой журнал на 200 записей во Flash и оконная выгрузка;
-- RX только через зашифрованную GATT characteristic, TX через
-  indication/notification: по одному кадру на ATT-подтверждение, таймаут 2 с на
-  потерянное подтверждение.
+После hardware-safety refactor обязанности разделены жёстко:
 
-UUID совпадают с Android-клиентом:
+- `phy6252/dpls_phy6252_hw.c` — **единственный владелец цифрового железа**:
+  безопасная инициализация GPIO, retention, break-before-make, RGB identify,
+  P16/P17 32 kHz workaround и connection-scoped sleep-lock;
+- `phy6252/dpls_phy6252_adc.c` — **единственный владелец ADC**: четыре
+  single-ended канала, последовательный state machine, freshness/validity и
+  per-channel calibration;
+- `phy6252/dpls_phy6252_app.c` — адаптер предметной логики к `dpls_server`:
+  power/reserve/auto-isolation, settings, journal, transport callbacks;
+- `targets/phy6252/source/dplsBLEPeripheral.c` — только интеграция vendor GAP/
+  OSAL, SRAM retention, FS mount и запуск DPLS adapter.
 
-- Service `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`
-- RX `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001`
-- TX `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001`
+Низкоуровневые GPIO/ADC/pwrmgr операции не должны возвращаться в `app.c` или
+BLE target. Это проверяет `tools/check_phy6252_contract.py` в CI.
 
-## Проверка ядра на хосте
+## Электрический контракт revision 2
+
+| Роль | GPIO | ADC/примечание |
+|---|---:|---|
+| ISO_1 / ISO_2 / ISO_T | P31 / P32 / P33 | active-high |
+| KZ_1 / KZ_2 / KZ_T | P14 / P16 / P17 | active-high |
+| +1 | P20 | ADC_CH9 |
+| +2 | P15 | ADC_CH4 |
+| +T | P24 | ADC_CH2 |
+| резерв | P23 | ADC_CH1 |
+| RGB R/G/B | P07 / P11 / P18 | identify = green |
+| factory reset | P34 | physical only |
+
+Все управляющие линии имеют fail-safe 0 = «Норма». `DPLS_PIN_LINE_ADC` — только
+legacy-алиас +1/P20, а не отдельный физический вход.
+
+### Почему GPIO и sleep вынесены отдельно
+
+`hal_gpio_pin_init(..., GPIO_OUTPUT)` в PHY62XX SDK меняет DDR, но не
+предзагружает data latch. После warm/retained reset это могло кратко показать
+старую `1` на активном-high выходе. Hardware adapter использует
+`hal_gpio_write(pin, 0)`, который сначала записывает latch и лишь затем включает
+output direction, после чего регистрирует retention.
+
+P16/P17 одновременно являются XTAL_32K pads PHY6252. На Test-DPLS кварца нет,
+используется RC32K, поэтому hardware adapter снимает vendor XTAL bias на старте
+и в wake callback.
+
+Известная ADC↔radio/sleep гонка SDK 3.1.2 устраняется реальным
+`hal_pwrmgr_lock(MOD_USR1)` на время активного BLE connection. Регистрация и
+lock проверяются: при ошибке устройство возвращает выходы в Norma и не
+продолжает опасную connected-сессию с no-op lock. Advertising/disconnected
+остаются low-power.
+
+## ADC revision 2
+
+Один встроенный ADC сканирует строго по одному каналу:
+
+`P20/+1 → P15/+2 → P24/+T → P23/reserve`.
+
+Новый цикл начинается только когда предыдущий полностью завершён. Ошибка одного
+conversion не блокирует остальные каналы; канал повторяется в следующем цикле.
+Старое значение перестаёт считаться valid после freshness deadline, поэтому
+зависший ADC не выглядит как «живое» неизменное напряжение.
+
+Три DPLS-делителя имеют отдельные runtime `gain/offset`. Legacy SNV `0x83`
+содержал только одну line calibration: при миграции она относится только к
+P20/+1 и **не копируется** на +2/+T. Новый v2-формат поддерживает четыре
+отдельные calibration record с version+CRC. `ADC_CALIBRATED` выставляется только
+когда валидны все четыре.
+
+Reserve — отдельный divider. Его nominal gain 2.000 пока остаётся
+предварительным значением до измерения силовой платы; для него используются
+собственные sanity bounds, а не 20x–45x bounds DPLS line divider.
+
+## Сборка и тесты
 
 ```sh
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
+# portable core
+cmake -S Firmware -B Firmware/build
+cmake --build Firmware/build
+ctest --test-dir Firmware/build --output-on-failure
 
-## Сборка целевой прошивки (SDK 3.1.2, AC6)
+# electrical/source contract
+python3 tools/check_phy6252_contract.py
 
-Сборку запускает `tools/build_firmware.sh` из корня репозитория:
-
-1. `tools/fetch_phy6252_sdk.sh` клонирует полный PHY62XX SDK 3.1.2 по
-   SHA, закреплённому в `sdk/phy6252-sdk.env`, и сверяет его;
-2. `cbuild` (CMSIS-Toolbox) собирает solution
-   `targets/phy6252/test-dpls.csolution.yml` компилятором AC6 (лицензия —
-   бесплатная Keil MDK Community, и локально, и в CI);
-3. `fromelf` раскладывает AXF на регионы, скрипт склеивает их в прошивочный
-   Intel HEX (start-address записи вычищаются из всех регионов, кроме
-   последнего — иначе парсер флешера pvvx теряет RAM-сегменты).
-
-Образ один:
-
-```sh
+# target SDK 3.1.2 / Arm Compiler 6
 tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
 ```
 
-Измерение напряжения линии и резерва собирается всегда; CI
-(`firmware-target.yml`) выкладывает этот же образ артефактом.
+CI также собирает Android release и генерирует интерактивную hardware model:
 
-## Устройство target-проекта (`targets/phy6252/`)
+```sh
+python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
+```
 
-- `test-dpls.csolution.yml` / `test-dpls.cproject.yml` — CMSIS-solution:
-  vendor-исходники SDK 3.1.2 + ядро/адаптер DPLS, дефайны
-  (`MTU_SIZE=247`, `GATT_MAX_NUM_CONN=MAX_NUM_LL_CONN+1`,
-  `CFG_HCLK_DYNAMIC_CHANGE=0`, `-fshort-enums`, microlib);
-- `scatter_load.sct` — проверенная раскладка PB-03F;
-- `source/dplsBLEPeripheral.c` — прикладная OSAL-задача (замена
-  simpleBLEPeripheral.c из примера).
+Generated HTML не хранится в git: модель интроспектирует текущие `board.h`,
+`dpls_server.h`, hardware owner, ADC owner и app thresholds.
 
-Vendor-дерево не редактируется: компилируются штатные `main.c`,
-`OSAL_SimpleBLEPeripheral.c`, драйверы и `jump_table.c` из SDK.
+## Vendor SDK 3.1.2: обязательные интеграционные поправки
 
-**Ловушки ванильного main.c SDK 3.1.2** (компенсированы в
-`source/dplsBLEPeripheral.c`, не удалять):
+`targets/phy6252/source/dplsBLEPeripheral.c` сохраняет две проверенные
+особенности target:
 
-- main.c удерживает во сне только SRAM0, а раскладка использует SRAM1/SRAM2 →
-  без `hal_pwrmgr_RAM_retention(RET_SRAM0|RET_SRAM1|RET_SRAM2)` каждое
-  пробуждение превращается в warm-reboot (reset-loop ~3 с);
-- main.c не вызывает `hal_fs_init`, а `osal_snv` собран с `USE_FS=1` → без
-  монтирования fs (3 сектора @ `0x1103C000`) весь SNV не работает: нет BLE
-  MAC, настроек, журнала;
-- watchdog в 3.1.2 самоподкармливается из прерывания — зависание задачи не
-  приводит к сбросу (на 3.1.1 приводило).
+1. полное SRAM retention (`RET_SRAM0|RET_SRAM1|RET_SRAM2`), потому что scatter
+   использует все три банка;
+2. mount fs @ `0x1103C000`, 3 sectors до первого `osal_snv` access.
 
-Дополнительно адаптер держит `hal_pwrmgr_lock(MOD_USR1)` на время активного
-подключения (защита от гонки ADC ↔ sleep-переходов радио).
+Удалять их без нового hardware soak нельзя.
 
-## Интеграция (ключевые точки)
+## Persistent storage
 
-1. До запуска BLE `dpls_phy6252_init()` выставляет все силовые выходы в 0
-   (состояние «Норма») и инициализирует ADC/светодиод; `hardware_safe_normal`
-   в HAL гарантирует «Норму».
-2. `dpls_gatt_add_service()` регистрируется, RX-callback идёт в
-   `dpls_server_receive()`. GATT-callback'и — по ABI SDK 3.1.2 (длины
-   `uint16`, notification отсекается по `ATT_GetCurrentMTUSize`).
-3. Из GAP callbacks — `dpls_server_connected()`/`dpls_server_disconnected()`;
-   из OSAL-таймера 200 мс — `dpls_phy6252_tick()` (внутри `dpls_server_tick()`
-   + сэмплирование ADC раз в ~1 с); из отдельного таймера —
-   `dpls_phy6252_led_tick()`, который сам возвращает задержку до следующего
-   фронта.
-4. HAL реализован в `phy6252/dpls_phy6252_app.c`: силовые ключи, ADC
-   линии/резерва, источник питания, светодиод, TRNG, настройки/калибровка в
-   SNV и HMAC-SHA256 verifier. Журнал хранится в SDK SNV.
-5. В advertising добавлены 128-bit Service UUID и manufacturer data: ID
-   устройства little-endian с company ID `0x0B01`; имя `Test-DPLS-XXXX` из
-   реального device ID.
+- settings `0x80`;
+- settings marker `0x81`;
+- BLE MAC `0x82`;
+- ADC calibration `0x83`;
+- auth-lock `0x84`;
+- journal `0x90..0xA3`.
 
-Handshake использует кадры до 57 байт: `MTU_SIZE=247` уже задан в
-`test-dpls.cproject.yml`, Android запрашивает MTU 247. Транспортная
-фрагментация для ATT MTU 23 остаётся следующим совместимостным шагом; журнал
-уже передаётся короткими оконными chunk-сообщениями.
+Обычная прошивка сохраняет SNV; flash с `--erase` очищает его полностью.
 
-Журнал использует 20 SNV-блоков `0x90..0xA3` по 10 записей. Каждая запись
-имеет собственный CRC. При старте прошивка восстанавливает только
-`count/next_sequence`, не загружая события в ОЗУ. Во время выгрузки в RAM
-кэшируется только один Flash-блок (10 записей, 120 байт), а каждый `LOG_ACK`
-отправляет одну запись в `LOG_CHUNK`; снимок границ журнала фиксируется в
-`LOG_START`. Полный erase Flash стирает журнал, обычное обновление области
-приложения — сохраняет.
+## Что проверять на новом стенде
 
-## Распиновка (production, `phy6252/dpls_board.h`)
+Полный порядок — [`docs/bring-up-checklist.md`](../docs/bring-up-checklist.md).
+Критические acceptance checks перед RC:
 
-Из «Тест-ДПЛС финальная архитектура», лист 5; схема подключения к прототипу
-силовой части — `docs/hardware/pb03f-kit-power-pinout.png`. Логика управления
-3,3 В, активный «1», все управляющие линии подтянуты к земле аппаратно
-(безопасное состояние — все выходы 0 = «Норма»).
-
-| Пин | Сигнал | Назначение |
-|---|---|---|
-| P31 / P32 / P33 | ISO_1 / ISO_2 / ISO_T | разрыв каналов +1 / +2 / +Т (норм. замкнуты) |
-| P14 / P16 / P17 | KZ_1 / KZ_2 / KZ_T | шунты КЗ на портах (норм. разомкнуты) |
-| P20 (ADC9) | PORT1_ADC | напряжение +1, отдельный тракт 0-30 В |
-| P15 (ADC4) | PORT2_ADC | напряжение +2, отдельный тракт 0-30 В |
-| P24 (ADC2) | PORT_T_ADC | напряжение +Т, отдельный тракт 0-30 В |
-| P23 (ADC1) | VCAP_ADC | напряжение резервного ионистора |
-| P34 | FACTORY_RESET | сброс пароля (только физический доступ) |
-| P7 / P11 / P18 | RGB R / G / B | цветная индикация; identify — зелёные вспышки |
-
-Соответствие режимов: «Обрыв +Т» → ISO_T; «Обрыв магистрали» → ISO_2;
-«КЗ+1/+2/+Т» → KZ_1/2/T. P0 не используется целевой логикой.
-
-**SNV:** IRK/CSRK `0x02`/`0x03`, бонды GAPBondMgr `0x20..0x5F`, настройки
-`0x80`, маркер состояния `0x81`, BLE MAC `0x82` (магия «DMAC»), калибровка
-`0x83` (line/vcap gain+offset, CRC; дефолт 1/31 при отсутствии), auth-lock
-`0x84` (магия «DLCK»), журнал `0x90..0xA3`. Хранилище — fs-backed `osal_snv`,
-3 сектора @ `0x1103C000`; `--erase` при прошивке стирает всё (включая пароль
-и MAC), обычная прошивка сохраняет.
-
-**Раскладка памяти:** `hal_adc_value_cal` тянет softfloat — единственный
-float в прошивке. Он не помещается в тесный SRAM-регион `ER_IROM1`, поэтому
-`adc.o`, `dpls_led.o`, `dpls_calib.o` и fp-объекты вынесены в XIP-flash рядом
-с `dpls_phy6252_app.o` (см. `targets/phy6252/scatter_load.sct`) — так
-float-вызовы XIP-локальны и не порождают veneer'ов. Запас `ER_IROM1` ≈1,2 КБ —
-новые крупные статики требуют анализа MAP.
-
-## Проверено на железе / открытые пункты
-
-На PB-03F-Kit проверено (полный E2E с Android-клиентом): boot, sleep/wake,
-персистентность SNV, advertising/identity, коммишининг и вход, блокировка
-перебора, все 5 тестовых режимов (выходы + журнал причин), выгрузка/экспорт
-журнала, смена имени/пароля, измерение напряжения на P20/P23. Каналы revision 2 на P15/P24 и RGB P7/P11/P18 требуют проверки на новой плате.
-
-**Требует подтверждения на макете силовой части** (см.
-[чеклист bring-up](../docs/bring-up-checklist.md)): коэффициенты делителей
-(линия 1/31 — из архитектуры, VCAP — предварительное значение `2000`), пороги источника
-питания и низкого резерва, точность ±0,1 В, занесение заводской калибровки,
-break-before-make под нагрузкой, приоритет автоизоляции. На PB-03F-Kit нет
-кнопки на P24 — физический сброс требует перемычки.
-
-**Известная особенность стека SDK 3.1.2:** после мгновенного автовозврата
-режима (двойной переход за одну секунду, на голом ките провоцируется «низким
-резервом») хост принимает индикации со статусом SUCCESS, но перестаёт
-доставлять их до переподключения; RX-путь и OSAL-задача при этом живы.
-Сценарий штатного автовозврата по 5-минутному таймеру проверить на стенде
-отдельно.
+- reset/warm-reset без кратких импульсов на P31/P32/P33/P14/P16/P17;
+- каждый mode активирует ровно один из шести выходов;
+- P16/P17 стабильны при connect/disconnect и длительной BLE-сессии;
+- ≥15 минут BLE + постоянный четырёхканальный ADC без GATT loss;
+- изменение каждого потенциометра влияет только на свой +1/+2/+T/reserve;
+- ошибка/обрыв одного ADC не останавливает остальные;
+- target AC6 build и все CI checks зелёные;
+- после заводской калибровки отдельно подтверждена точность каждого DPLS-входа.

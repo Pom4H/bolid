@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate the Test-DPLS interactive behaviour model from firmware sources.
+"""Generate an interactive Test-DPLS hardware/behaviour model from source.
 
-The generated HTML is a build artifact. It must not be committed: this script
-introspects the current pin map, mode switch, firmware version, timeouts and ADC
-thresholds so release documentation cannot silently drift from the code.
+No pin table or mode table is duplicated here.  The generator reads board.h,
+the protocol server, the hardware owner and the ADC owner.  If that structure
+cannot be understood it fails the build instead of producing plausible-looking
+stale documentation.
 """
 
 from __future__ import annotations
@@ -12,48 +13,41 @@ import argparse
 import json
 import os
 import re
-import sys
 from pathlib import Path
-from typing import Final
 
-DEFINE_RE: Final = re.compile(r"^\s*#define\s+([A-Z0-9_]+)\s+([^/\r\n]+)", re.MULTILINE)
-MODE_RE: Final = re.compile(r"\b(DPLS_MODE_[A-Z0-9_]+)\s*=\s*(\d+)")
-CASE_RE: Final = re.compile(
+DEFINE_RE = re.compile(r"^\s*#define\s+([A-Z0-9_]+)\s+([^/\r\n]+)", re.MULTILINE)
+MODE_RE = re.compile(r"\b(DPLS_MODE_[A-Z0-9_]+)\s*=\s*(\d+)")
+CASE_RE = re.compile(
     r"case\s+(DPLS_MODE_[A-Z0-9_]+)\s*:(.*?)(?=\n\s*case\s+DPLS_MODE_|\n\s*default\s*:)",
     re.DOTALL,
 )
-GPIO_WRITE_RE: Final = re.compile(r"hal_gpio_write\((DPLS_PIN_[A-Z0-9_]+),\s*1\s*\)")
+WRITE_RE = re.compile(r"hal_gpio_write\((DPLS_PIN_[A-Z0-9_]+),\s*1\s*\)")
 
-MODE_LABELS: Final = {
+MODE_LABELS = {
     "DPLS_MODE_NORMAL": "Норма",
-    "DPLS_MODE_OPEN_T": "Обрыв T",
+    "DPLS_MODE_OPEN_T": "Обрыв +T",
     "DPLS_MODE_OPEN_MAIN": "Обрыв магистрали",
     "DPLS_MODE_SHORT_1": "КЗ +1",
     "DPLS_MODE_SHORT_2": "КЗ +2",
-    "DPLS_MODE_SHORT_T": "КЗ T",
+    "DPLS_MODE_SHORT_T": "КЗ +T",
 }
 
-PIN_LABELS: Final = {
+PIN_LABELS = {
     "DPLS_PIN_ISO_1": "ISO_1 · разрыв +1",
     "DPLS_PIN_ISO_2": "ISO_2 · разрыв +2",
-    "DPLS_PIN_ISO_T": "ISO_T · разрыв T",
+    "DPLS_PIN_ISO_T": "ISO_T · разрыв +T",
     "DPLS_PIN_KZ_1": "KZ_1 · КЗ +1",
     "DPLS_PIN_KZ_2": "KZ_2 · КЗ +2",
-    "DPLS_PIN_KZ_T": "KZ_T · КЗ T",
-    "DPLS_PIN_LED_OPEN_T": "лампа · Обрыв T",
-    "DPLS_PIN_LED_OPEN_MAIN": "лампа · Обрыв магистрали",
-    "DPLS_PIN_LED_SHORT_1": "лампа · КЗ +1",
-    "DPLS_PIN_LED_SHORT_2": "лампа · КЗ +2",
-    "DPLS_PIN_LED_SHORT_T": "лампа · КЗ T",
-    "DPLS_PIN_LINE_ADC": "ADC · +1 (legacy)",
-    "DPLS_PIN_PORT1_ADC": "ADC · напряжение +1",
-    "DPLS_PIN_PORT2_ADC": "ADC · напряжение +2",
-    "DPLS_PIN_PORT_T_ADC": "ADC · напряжение +Т",
+    "DPLS_PIN_KZ_T": "KZ_T · КЗ +T",
+    "DPLS_PIN_PORT1_ADC": "ADC · +1",
+    "DPLS_PIN_PORT2_ADC": "ADC · +2",
+    "DPLS_PIN_PORT_T_ADC": "ADC · +T",
     "DPLS_PIN_VCAP_ADC": "ADC · резерв",
-    "DPLS_PIN_FACTORY_RESET": "сброс пароля",
+    "DPLS_PIN_LINE_ADC": "ADC · +1 (alias)",
     "DPLS_PIN_LED_RED": "RGB · красный",
-    "DPLS_PIN_LED_GREEN": "RGB · зелёный / идентификация",
+    "DPLS_PIN_LED_GREEN": "RGB · зелёный / поиск",
     "DPLS_PIN_LED_BLUE": "RGB · синий",
+    "DPLS_PIN_FACTORY_RESET": "сброс пароля",
 }
 
 
@@ -79,18 +73,18 @@ def numeric(name: str, tables: list[dict[str, str]]) -> int:
     token = raw.strip().strip("()")
     token = re.sub(r"(?<=\d)[uUlL]+\b", "", token)
     if not re.fullmatch(r"[0-9xXa-fA-F\s+\-*/()]+", token):
-        die(f"unsupported value for {name}: {raw!r}")
+        die(f"unsupported numeric expression {name}={raw!r}")
     try:
         value = eval(token, {"__builtins__": {}}, {})
     except Exception as exc:
         die(f"cannot evaluate {name}={raw!r}: {exc}")
     if not isinstance(value, int):
-        die(f"{name} is not an integer: {raw!r}")
+        die(f"{name} is not an integer")
     return value
 
 
 def resolve_pin(name: str, board_defs: dict[str, str], seen: set[str] | None = None) -> str:
-    seen = set() if seen is None else seen
+    seen = set() if seen is None else set(seen)
     if name in seen:
         die(f"cyclic pin alias at {name}")
     seen.add(name)
@@ -106,63 +100,57 @@ def resolve_pin(name: str, board_defs: dict[str, str], seen: set[str] | None = N
 
 
 def extract_model(root: Path) -> dict[str, object]:
-    board_path = root / "Firmware/phy6252/dpls_board.h"
-    server_path = root / "Firmware/include/dpls_server.h"
-    app_path = root / "Firmware/phy6252/dpls_phy6252_app.c"
+    paths = {
+        "board": root / "Firmware/phy6252/dpls_board.h",
+        "server": root / "Firmware/include/dpls_server.h",
+        "app": root / "Firmware/phy6252/dpls_phy6252_app.c",
+        "hw": root / "Firmware/phy6252/dpls_phy6252_hw.c",
+        "adc": root / "Firmware/phy6252/dpls_phy6252_adc.c",
+    }
+    source = {name: read(path) for name, path in paths.items()}
+    defs = {name: defines(text) for name, text in source.items()}
+    tables = [defs["server"], defs["app"], defs["adc"], defs["board"]]
 
-    board = read(board_path)
-    server = read(server_path)
-    app = read(app_path)
-    board_defs = defines(board)
-    server_defs = defines(server)
-    app_defs = defines(app)
-    tables = [server_defs, app_defs, board_defs]
-
-    enum_match = re.search(r"typedef\s+enum\s*\{(.*?)\}\s*dpls_mode_t\s*;", server, re.DOTALL)
+    enum_match = re.search(r"typedef\s+enum\s*\{(.*?)\}\s*dpls_mode_t\s*;", source["server"], re.DOTALL)
     if not enum_match:
         die("dpls_mode_t enum not found")
     modes = sorted(MODE_RE.findall(enum_match.group(1)), key=lambda item: int(item[1]))
     if [name for name, _ in modes] != list(MODE_LABELS):
         die(f"unexpected mode enum: {[name for name, _ in modes]}")
 
-    case_blocks = {name: body for name, body in CASE_RE.findall(app)}
-    mode_rows: list[dict[str, object]] = []
-    for mode_name, value in modes:
-        writes = GPIO_WRITE_RE.findall(case_blocks.get(mode_name, ""))
-        controls = [pin for pin in writes if not pin.startswith("DPLS_PIN_LED_")]
-        indicators = [pin for pin in writes if pin.startswith("DPLS_PIN_LED_")]
-        if mode_name == "DPLS_MODE_NORMAL":
-            controls = []
-            indicators = []
-        elif not controls:
-            die(f"{mode_name} must expose a control write; got {writes}")
+    cases = {name: body for name, body in CASE_RE.findall(source["hw"])}
+    mode_rows = []
+    for name, value in modes:
+        writes = WRITE_RE.findall(cases.get(name, ""))
+        if name != "DPLS_MODE_NORMAL" and len(writes) != 1:
+            die(f"{name} must assert exactly one hardware output, got {writes}")
         mode_rows.append({
-            "id": mode_name,
+            "id": name,
             "value": int(value),
-            "label": MODE_LABELS[mode_name],
-            "controls": controls,
-            "indicators": indicators,
+            "label": MODE_LABELS[name],
+            "controls": [] if name == "DPLS_MODE_NORMAL" else writes,
         })
 
     pin_rows = []
-    for name in sorted(name for name in board_defs if name.startswith("DPLS_PIN_")):
+    for name in sorted(n for n in defs["board"] if n.startswith("DPLS_PIN_")):
+        kind = (
+            "analog" if name.endswith("_ADC")
+            else "indicator" if name.startswith("DPLS_PIN_LED_")
+            else "input" if name == "DPLS_PIN_FACTORY_RESET"
+            else "control"
+        )
         pin_rows.append({
             "name": name,
-            "pin": resolve_pin(name, board_defs),
+            "pin": resolve_pin(name, defs["board"]),
             "label": PIN_LABELS.get(name, name.removeprefix("DPLS_PIN_").replace("_", " ").lower()),
-            "kind": (
-                "indicator" if name.startswith("DPLS_PIN_LED_") or name == "DPLS_PIN_STATUS_LED"
-                else "analog" if name.endswith("_ADC")
-                else "input" if name == "DPLS_PIN_FACTORY_RESET"
-                else "control"
-            ),
+            "kind": kind,
         })
 
-    fw = ".".join(str(numeric(name, tables)) for name in (
+    firmware = ".".join(str(numeric(name, tables)) for name in (
         "DPLS_FW_VERSION_MAJOR", "DPLS_FW_VERSION_MINOR", "DPLS_FW_VERSION_PATCH"
     ))
-    return {
-        "firmware": fw,
+    model = {
+        "firmware": firmware,
         "commit": os.environ.get("GITHUB_SHA", "local")[:12],
         "modes": mode_rows,
         "pins": pin_rows,
@@ -171,68 +159,64 @@ def extract_model(root: Path) -> dict[str, object]:
             "sessionTimeoutMs": numeric("DPLS_SESSION_TIMEOUT_MS", tables),
             "identifyMaxMs": numeric("DPLS_IDENTIFY_MAX_MS", tables),
             "identifyBlinkMs": numeric("DPLS_IDENTIFY_BLINK_MS", tables),
-            "authBlockMs": numeric("DPLS_AUTH_BLOCK_MS", tables),
-            "authAttempts": numeric("DPLS_AUTH_MAX_ATTEMPTS", tables),
+            "adcPeriodMs": numeric("DPLS_ADC_PERIOD_MS", tables),
+            "adcStaleMs": numeric("DPLS_ADC_STALE_MS", tables),
         },
         "adc": {
-            "decimate": numeric("DPLS_ADC_DECIMATE", tables),
-            "window": numeric("DPLS_ADC_WINDOW", tables),
             "linePresentMv": numeric("DPLS_LINE_PRESENT_MV", tables),
             "lineAbsentMv": numeric("DPLS_LINE_ABSENT_MV", tables),
             "reserveLowMv": numeric("DPLS_RESERVE_LOW_MV", tables),
             "reserveOkMv": numeric("DPLS_RESERVE_OK_MV", tables),
             "autoIsoTripMv": numeric("DPLS_AUTOISO_TRIP_MV", tables),
             "autoIsoClearMv": numeric("DPLS_AUTOISO_CLEAR_MV", tables),
-            "sequential": "status == all_channels" in app and "adc_pending" in app,
+            "sequential": "inflight_index" in source["adc"] and "adc_pending" in source["adc"],
+            "channels": [
+                {"label": "+1", "pin": resolve_pin("DPLS_PIN_PORT1_ADC", defs["board"]), "channel": "ADC_CH9"},
+                {"label": "+2", "pin": resolve_pin("DPLS_PIN_PORT2_ADC", defs["board"]), "channel": "ADC_CH4"},
+                {"label": "+T", "pin": resolve_pin("DPLS_PIN_PORT_T_ADC", defs["board"]), "channel": "ADC_CH2"},
+                {"label": "резерв", "pin": resolve_pin("DPLS_PIN_VCAP_ADC", defs["board"]), "channel": "ADC_CH1"},
+            ],
         },
-        "sources": [str(path.relative_to(root)) for path in (board_path, server_path, app_path)],
+        "safety": {
+            "connectionSleepLock": "hal_pwrmgr_lock(MOD_USR1)" in source["hw"],
+            "xtalWakeFix": "disable_32k_xtal" in source["hw"],
+            "glitchSafeInit": "prime_all_outputs_low" in source["hw"],
+            "staleAdcInvalidation": "DPLS_ADC_STALE_MS" in source["adc"],
+        },
+        "sources": [str(path.relative_to(root)) for path in paths.values()],
     }
+    return model
 
 
-HTML_TEMPLATE: Final = r'''<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Тест-ДПЛС · интерактивная интроспекция</title>
-<style>
-:root{color-scheme:light dark;--bg:#f4f6f8;--panel:#fff;--ink:#15191f;--dim:#657080;--line:#d8dee8;--accent:#2867c7;--hot:#d5760c;--ok:#238451;--bad:#c54535}
-@media(prefers-color-scheme:dark){:root{--bg:#11151a;--panel:#1a2027;--ink:#edf1f6;--dim:#98a5b5;--line:#303944;--accent:#73aaff;--hot:#ffad4c;--ok:#61d69a;--bad:#ff7e6b}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:20px}.hero,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}.hero{position:sticky;top:0;z-index:3;box-shadow:0 6px 18px #0002}.hero h1{font-size:19px;margin:0 0 8px}.meta{color:var(--dim);font:12px ui-monospace,monospace}.buttons{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}button{border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--ink);padding:7px 11px;cursor:pointer}button.active{background:var(--accent);border-color:var(--accent);color:white}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:820px){.grid{grid-template-columns:1fr}}h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 10px}.state{display:grid;grid-template-columns:auto 1fr;gap:5px 14px}.state dt{color:var(--dim)}.state dd{margin:0;font-family:ui-monospace,monospace}.chips{display:flex;gap:7px;flex-wrap:wrap}.chip{border:1px solid var(--line);border-radius:999px;padding:5px 9px;font:12px ui-monospace,monospace}.chip.on{border-color:var(--hot);color:var(--hot);background:color-mix(in srgb,var(--hot) 12%,transparent)}table{border-collapse:collapse;width:100%}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--dim);font-size:11px;text-transform:uppercase}.mono{font-family:ui-monospace,monospace}.controls{display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center}.controls input{width:100%}.value{font:12px ui-monospace,monospace;min-width:78px;text-align:right}.status-ok{color:var(--ok)}.status-bad{color:var(--bad)}.note{color:var(--dim);font-size:12px}.source{font:12px ui-monospace,monospace;color:var(--dim);word-break:break-all}
-</style></head><body><main>
-<section class="hero"><h1>Тест-ДПЛС · модель, собранная интроспекцией прошивки</h1><div class="meta" id="meta"></div><div class="buttons" id="modeButtons"></div></section>
-<div class="grid">
-<section class="panel"><h2>Командуемое состояние</h2><dl class="state" id="state"></dl><h2 style="margin-top:14px">Активные выводы</h2><div class="chips" id="activePins"></div></section>
-<section class="panel"><h2>Таймауты и защита</h2><table id="timing"></table><p class="note">Автовозврат в «Норму» моделируется по значениям из <span class="mono">dpls_server.h</span>.</p></section>
-<section class="panel"><h2>ADC и гистерезис</h2><div class="controls"><label for="line">Напряжение ДПЛС</label><span class="value" id="lineValue"></span><input id="line" type="range" min="0" max="30000" step="100" value="24000"><span></span><label for="vcap">Напряжение резерва</label><span class="value" id="vcapValue"></span><input id="vcap" type="range" min="0" max="6000" step="50" value="4500"><span></span></div><dl class="state" id="adcState" style="margin-top:14px"></dl></section>
-<section class="panel"><h2>Распиновка</h2><table><thead><tr><th>Символ</th><th>GPIO</th><th>Роль</th><th>Тип</th></tr></thead><tbody id="pins"></tbody></table></section>
-</div><section class="panel"><h2>Источник данных</h2><div id="sources"></div><p class="note">HTML не хранится в репозитории. Он создаётся release workflow из текущих исходников.</p></section>
-</main><script id="model" type="application/json">__MODEL_JSON__</script><script>
-const model=JSON.parse(document.getElementById('model').textContent);let current=model.modes[0];let linePresent=true,reserveLow=false,autoIso=false;const fmtMs=ms=>ms>=60000?`${ms/60000} мин`:`${ms/1000} с`;
-document.getElementById('meta').textContent=`FW ${model.firmware} · commit ${model.commit} · ADC ${model.adc.sequential?'последовательный':'проверь реализацию'}`;const buttons=document.getElementById('modeButtons');model.modes.forEach(m=>{const b=document.createElement('button');b.textContent=m.label;b.onclick=()=>{current=m;renderMode()};b.dataset.id=m.id;buttons.appendChild(b)});
-function renderMode(){[...buttons.children].forEach(b=>b.classList.toggle('active',b.dataset.id===current.id));const deadline=current.value===0?'нет':fmtMs(model.timing.modeTimeoutMs);document.getElementById('state').innerHTML=`<dt>Режим</dt><dd>${current.label}</dd><dt>Код</dt><dd>${current.value}</dd><dt>Автовозврат</dt><dd>${deadline}</dd><dt>Break-before-make</dt><dd>да</dd>`;const names=[...current.controls,...current.indicators];document.getElementById('activePins').innerHTML=model.pins.map(p=>`<span class="chip ${names.includes(p.name)?'on':''}">${p.pin} · ${p.label}</span>`).join('')}
-const timing=[['Режим испытания',model.timing.modeTimeoutMs],['Без активности сессии',model.timing.sessionTimeoutMs],['Идентификация',model.timing.identifyMaxMs],['Полупериод мигания',model.timing.identifyBlinkMs],['Блокировка аутентификации',model.timing.authBlockMs]];document.getElementById('timing').innerHTML=timing.map(([n,v])=>`<tr><td>${n}</td><td class="mono">${fmtMs(v)}</td></tr>`).join('')+`<tr><td>Ошибок до блокировки</td><td class="mono">${model.timing.authAttempts}</td></tr>`;
-document.getElementById('pins').innerHTML=model.pins.map(p=>`<tr><td class="mono">${p.name}</td><td class="mono">${p.pin}</td><td>${p.label}</td><td>${p.kind}</td></tr>`).join('');document.getElementById('sources').innerHTML=model.sources.map(s=>`<div class="source">${s}</div>`).join('');
-function renderAdc(){const line=+document.getElementById('line').value,vcap=+document.getElementById('vcap').value;if(linePresent&&line<model.adc.lineAbsentMv)linePresent=false;else if(!linePresent&&line>model.adc.linePresentMv)linePresent=true;if(!reserveLow&&vcap<model.adc.reserveLowMv)reserveLow=true;else if(reserveLow&&vcap>model.adc.reserveOkMv)reserveLow=false;if(!autoIso&&line<model.adc.autoIsoTripMv&&current.value===0)autoIso=true;else if(autoIso&&line>model.adc.autoIsoClearMv)autoIso=false;document.getElementById('lineValue').textContent=`${(line/1000).toFixed(1)} В`;document.getElementById('vcapValue').textContent=`${(vcap/1000).toFixed(2)} В`;document.getElementById('adcState').innerHTML=`<dt>Источник питания</dt><dd class="${linePresent?'status-ok':'status-bad'}">${linePresent?'линия':'резерв'}</dd><dt>Низкий резерв</dt><dd class="${reserveLow?'status-bad':'status-ok'}">${reserveLow?'да':'нет'}</dd><dt>Автоизоляция КЗ</dt><dd class="${autoIso?'status-bad':'status-ok'}">${autoIso?'активна':'нет'}</dd><dt>Окно усреднения</dt><dd>${model.adc.window} отсчётов</dd><dt>Период запуска</dt><dd>${model.adc.decimate} × системный тик</dd>`}
-document.getElementById('line').oninput=renderAdc;document.getElementById('vcap').oninput=renderAdc;renderMode();renderAdc();
-</script></body></html>'''
+HTML = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Тест-ДПЛС · hardware model</title><style>
+:root{font-family:system-ui,sans-serif;color-scheme:light dark}body{margin:0;background:#11151a;color:#edf1f6}main{max-width:1100px;margin:auto;padding:20px}.card{background:#1a2027;border:1px solid #303944;border-radius:14px;padding:16px;margin:0 0 14px}h1{font-size:20px;margin:0 0 5px}h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#98a5b5}.meta,.mono{font-family:ui-monospace,monospace}.meta{color:#98a5b5;font-size:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:760px){.grid{grid-template-columns:1fr}}button{margin:4px;padding:7px 10px;border-radius:8px;border:1px solid #3a4654;background:transparent;color:inherit}button.on{background:#2867c7;border-color:#2867c7}.chip{display:inline-block;padding:5px 8px;margin:3px;border:1px solid #3a4654;border-radius:999px;font:12px ui-monospace,monospace}.chip.hot{border-color:#ffad4c;color:#ffad4c}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:6px;border-bottom:1px solid #303944;text-align:left}th{color:#98a5b5}ul{padding-left:20px}.ok{color:#61d69a}.bad{color:#ff7e6b}</style></head><body><main>
+<section class="card"><h1>Тест-ДПЛС · модель текущей прошивки</h1><div id="meta" class="meta"></div><div id="buttons"></div></section>
+<div class="grid"><section class="card"><h2>Режим</h2><div id="mode"></div><h2>Активные управляющие выводы</h2><div id="active"></div></section><section class="card"><h2>Hardware safety</h2><ul id="safety"></ul></section></div>
+<div class="grid"><section class="card"><h2>Четыре ADC</h2><table><thead><tr><th>Вход</th><th>GPIO</th><th>ADC</th></tr></thead><tbody id="adc"></tbody></table><p class="meta" id="adcmeta"></p></section><section class="card"><h2>Распиновка</h2><table><thead><tr><th>Символ</th><th>GPIO</th><th>Роль</th></tr></thead><tbody id="pins"></tbody></table></section></div>
+<section class="card"><h2>Источник</h2><div id="sources" class="meta"></div></section>
+<script id="model" type="application/json">__MODEL__</script><script>
+const m=JSON.parse(document.getElementById('model').textContent),$=id=>document.getElementById(id);let cur=m.modes[0];
+$('meta').textContent=`FW ${m.firmware} · ${m.commit} · ADC ${m.adc.sequential?'последовательный':'НЕ подтверждён'}`;
+function render(){ $('buttons').innerHTML=''; for(const mode of m.modes){const b=document.createElement('button');b.textContent=mode.label;b.className=mode.id===cur.id?'on':'';b.onclick=()=>{cur=mode;render()};$('buttons').appendChild(b)} $('mode').textContent=cur.label;$('active').innerHTML=cur.controls.length?cur.controls.map(x=>`<span class="chip hot">${x}</span>`).join(''):'<span class="chip">все 0 · Norma</span>' } render();
+$('safety').innerHTML=Object.entries(m.safety).map(([k,v])=>`<li class="${v?'ok':'bad'}">${v?'✓':'✕'} ${k}</li>`).join('');
+$('adc').innerHTML=m.adc.channels.map(x=>`<tr><td>${x.label}</td><td class="mono">${x.pin}</td><td class="mono">${x.channel}</td></tr>`).join('');
+$('adcmeta').textContent=`цикл ${m.timing.adcPeriodMs} мс · stale после ${m.timing.adcStaleMs} мс · line hysteresis ${m.adc.lineAbsentMv}/${m.adc.linePresentMv} мВ · reserve ${m.adc.reserveLowMv}/${m.adc.reserveOkMv} мВ`;
+$('pins').innerHTML=m.pins.map(x=>`<tr><td class="mono">${x.name}</td><td class="mono">${x.pin}</td><td>${x.label}</td></tr>`).join('');$('sources').innerHTML=m.sources.map(x=>`<div>${x}</div>`).join('');
+</script></main></body></html>'''
 
 
-def render(model: dict[str, object]) -> str:
-    payload = json.dumps(model, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    return HTML_TEMPLATE.replace("__MODEL_JSON__", payload)
-
-
-def main() -> int:
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", default="docs/behavior-sim.html")
     args = parser.parse_args()
-    root = args.root.resolve()
+    root = Path(__file__).resolve().parents[1]
     model = extract_model(root)
-    output = args.output.resolve()
+    encoded = json.dumps(model, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render(model), encoding="utf-8")
+    output.write_text(HTML.replace("__MODEL__", encoded), encoding="utf-8")
     print(f"generated {output} from {len(model['sources'])} source files")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

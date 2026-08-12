@@ -2,14 +2,13 @@
 
 #include "dpls_ble_identity.h"
 #include "dpls_board.h"
-#include "dpls_calib.h"
 #include "dpls_gatt_service.h"
 #include "dpls_led.h"
+#include "dpls_phy6252_adc.h"
+#include "dpls_phy6252_hw.h"
 #include "dpls_server.h"
 #include "OSAL.h"
 #include "OSAL_Timers.h"
-#include "adc.h"
-#include "error.h"
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
@@ -17,18 +16,15 @@
 #include "watchdog.h"
 #include "gapbondmgr.h"
 #include "peripheral.h"
-#include "pwrmgr.h"
 #include <core_cm0.h>
 #include <tinycrypt/hmac.h>
 #include <stddef.h>
 #include <string.h>
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
-#define DPLS_CALIB_MAGIC 0x434C5044u
 #define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u /* "DLCK" */
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
-#define DPLS_CALIB_SNV_ID 0x83u /* 0x82 is taken by dpls_ble_identity (BLE MAC) */
 #define DPLS_AUTH_LOCK_SNV_ID 0x84u
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
@@ -36,51 +32,23 @@
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_NAME_SIZE 32u
-#define DPLS_HW_REVISION 2u /* four independent voltage inputs: +1, +2, +T, reserve */
+#define DPLS_HW_REVISION 2u /* +1, +2, +T and reserve are independent ADC inputs */
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
-/* Line-voltage ADC: sample about once a second (every Nth 200 ms tick) and
- * average over a short window against noise, keeping the pulsed draw within the
- * ≤0.5 mA budget. The ISR is deliberately minimal — raw copy plus a task wake —
- * with all scaling and calibration done in the OSAL task, so a conversion never
- * competes with the radio inside interrupt context. */
-#define DPLS_ADC_DECIMATE 5u
-#define DPLS_ADC_WINDOW 8u
-/* Channels are kicked one at a time: the SDK 3.1.2 ADCC handler only drains the
- * IRQ when status == all_channels, so a dual-channel kick whose conversions
- * finish out of lockstep can leave a pending interrupt uncleared and starve the
- * OSAL loop. Reproduced by tests/test_adc_irq_model.c. */
-#define DPLS_ADC_NEED_PORT1 0x01u
-#define DPLS_ADC_NEED_PORT2 0x02u
-#define DPLS_ADC_NEED_PORT_T 0x04u
-#define DPLS_ADC_NEED_VCAP 0x08u
-#define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
-                           DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
-/* Power-source detection from the line voltage, with hysteresis so a value near
- * the threshold does not flap. Below the 5 V line minimum the device is running
- * from its reserve (also true while it is shorting the line in a KZ mode). */
+
+/* Power-source and real-short interpretation is domain logic, not ADC-driver
+ * logic. The ADC adapter only supplies fresh calibrated voltages. */
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
-/* Reserve super-capacitor low/clear thresholds (usable window ~5.0→3.6 V).
- * These depend on the VCAP divider, which is not in the supplied schematic —
- * confirm and calibrate on hardware. */
 #define DPLS_RESERVE_LOW_MV 3700u
 #define DPLS_RESERVE_OK_MV 4000u
-/* Placeholder VCAP divider until the schematic value is known; calibratable via
- * the same NVM block as the line channel. */
-#define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
-/* Real short-circuit (BRIZ-T auto-isolation): the RE gives a 2.9–3.4 V trip
- * band. Firmware only observes, indicates and logs — the actual ≤200 ms current
- * interruption is done in hardware. Detection is armed only after the line has
- * been seen healthy, so powering up with no line does not look like a short. */
 #define DPLS_AUTOISO_TRIP_MV 3000u
 #define DPLS_AUTOISO_CLEAR_MV 4500u
-/* Drop stale NV bonds after repeated encrypted links that never reach DPLS auth. */
+
 #define DPLS_BOND_DESYNC_LIMIT 3u
 #define DPLS_BOND_DESYNC_WINDOW_MS 120000u
-/* Plaintext link timeout — pairing never completed. */
 #define DPLS_LINK_ENCRYPT_TIMEOUT_MS 15000u
 
 typedef struct {
@@ -91,8 +59,6 @@ typedef struct {
     uint16_t crc;
 } dpls_settings_t;
 
-/* Persistent brute-force lock marker (SNV 0x84). Written when the 5th wrong
- * password lands, cleared when the block expires or on factory reset. */
 typedef struct {
     uint32_t magic;
     uint8_t locked;
@@ -100,24 +66,12 @@ typedef struct {
     uint16_t crc;
 } dpls_auth_lock_t;
 
-/* Persisted two-point calibration. The reserve (VCAP) fields are reserved for
- * the reserve-monitoring stage and stored now so the layout stays fixed. */
-typedef struct {
-    uint32_t magic;
-    uint32_t line_gain_milli;
-    int32_t line_offset_mv;
-    uint32_t vcap_gain_milli;
-    int32_t vcap_offset_mv;
-    uint16_t crc;
-} dpls_calib_nv_t;
-
 static dpls_server_t server;
 static dpls_settings_t settings;
 static dpls_led_t status_led;
 static bool identify_led_active;
 static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
-static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
 static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
 static uint32_t factory_reset_started_ms;
@@ -125,57 +79,29 @@ static uint32_t connected_at_ms;
 static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
-/* Largest client→device frame is SETUP (9 overhead + 5 + 31 name + 16 salt + 32
- * verifier = 93), so 96-byte RX slots cover every request. */
+
 #define DPLS_RX_QUEUE_DEPTH 6u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
 
-/* Outgoing indications are paced one-in-flight against the ATT confirmation, so
- * a busy stack or a back-to-back pair no longer drops the response. The largest
- * device→client frame is a batched LOG_CHUNK (9 overhead + 3 + 15×10 = 162), so
- * 168-byte slots cover every response without paying for the full 244-byte
- * frame maximum. */
 #define DPLS_TX_QUEUE_DEPTH 4u
 #define DPLS_TX_SLOT_SIZE 168u
 typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
 static uint8 tx_head, tx_tail, tx_count;
 static bool tx_in_flight;
-/* Watchdog for a lost ATT confirmation. The SDK 3.1.2 host occasionally drops
- * an indication queued back-to-back after a confirmation; without a deadline
- * the one-in-flight pipeline would wedge and every later response would queue
- * up dead. If no confirmation lands in this window the frame is written off
- * and the pump moves on (the client's poll cycle re-requests fresh state). */
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
 static uint32_t tx_in_flight_since_ms;
+
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
 
-static dpls_calib_t line_calib;
-static dpls_calib_t vcap_calib;
-static uint16_t line_window[DPLS_ADC_WINDOW];
-static uint16_t port2_window[DPLS_ADC_WINDOW];
-static uint16_t port_t_window[DPLS_ADC_WINDOW];
-static uint16_t vcap_window[DPLS_ADC_WINDOW];
-static uint8_t line_window_count, line_window_pos;
-static uint8_t port2_window_count, port2_window_pos;
-static uint8_t port_t_window_count, port_t_window_pos;
-static uint8_t vcap_window_count, vcap_window_pos;
-static volatile uint16_t cached_line_mv;
-static volatile uint16_t cached_port2_mv;
-static volatile uint16_t cached_port_t_mv;
-static volatile uint16_t cached_vcap_mv;
-static volatile bool adc_busy;
-static uint8_t adc_pending; /* DPLS_ADC_NEED_* bits still owed this cycle */
-static uint8_t adc_decimate;
 static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
 static bool auto_isolation_active;
 static bool line_established;
-static bool line_calib_from_nv;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -241,12 +167,7 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
     memset(present, 0, sizeof(present));
     journal_cached_block = 0xffu;
 
-    /* First pass finds the newest individually checksummed record. */
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
-        /* Boot-time scan of 20 populated SNV blocks (plus the SDK's verbose
-         * SNV UART tracing) takes longer than the 2 s watchdog window, and
-         * init runs before the OSAL feed task exists. Feed per block or a
-         * full journal makes the device unbootable. */
         hal_watchdog_feed();
         block = journal_load_block((uint8_t)block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
@@ -262,9 +183,6 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
         return true;
     }
 
-    /* Second pass builds only a 25-byte validity bitmap. No event array is
-     * retained in RAM. A torn/corrupt record truncates the recovered history
-     * at that point instead of exporting stale bytes. */
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         hal_watchdog_feed();
         block = journal_load_block((uint8_t)block_index);
@@ -323,273 +241,84 @@ static bool link_encrypted(void *context)
     return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
 }
 
-/* Drop every mode output and its indicator lamp to the safe (de-energized)
- * level. Isolation switches conduct and short shunts open, which is the "Norma"
- * state. Every auto-return path (timeout, disconnect, low reserve, real short,
- * internal error) funnels through here, so a lamp can never outlive its mode. */
-static void mode_outputs_off(void)
-{
-    hal_gpio_write(DPLS_PIN_ISO_1, 0);
-    hal_gpio_write(DPLS_PIN_ISO_2, 0);
-    hal_gpio_write(DPLS_PIN_ISO_T, 0);
-    hal_gpio_write(DPLS_PIN_KZ_1, 0);
-    hal_gpio_write(DPLS_PIN_KZ_2, 0);
-    hal_gpio_write(DPLS_PIN_KZ_T, 0);
-}
-
 static void safe_normal(void *context)
 {
     (void)context;
-    mode_outputs_off();
-    hardware_mode = DPLS_MODE_NORMAL;
+    dpls_phy6252_hw_safe_normal();
 }
 
-/* Drives the control output for the requested mode. Returns true = "output
- * set", NOT "electrically confirmed": this board has no power-stage feedback
- * (DEVICE_INFO capability HW_READBACK = false), so COMMAND_RESULT/STATE_REPORT
- * report the commanded mode, not a measured state. The false-return path (and
- * COMMAND_RESULT status 4) is the hook for a future Variant-B build that reads
- * back the electrical state before reporting success. */
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;
-    if (mode > DPLS_MODE_SHORT_T) return false;
-    /* Break-before-make: return to the all-safe state first so no two outputs
-     * are ever driven together, then assert the single line for this mode. */
-    mode_outputs_off();
-    switch (mode) {
-    case DPLS_MODE_NORMAL: break;
-    case DPLS_MODE_OPEN_T:
-        hal_gpio_write(DPLS_PIN_ISO_T, 1);
-        break;
-    case DPLS_MODE_OPEN_MAIN:
-        hal_gpio_write(DPLS_PIN_ISO_2, 1);
-        break;
-    case DPLS_MODE_SHORT_1:
-        hal_gpio_write(DPLS_PIN_KZ_1, 1);
-        break;
-    case DPLS_MODE_SHORT_2:
-        hal_gpio_write(DPLS_PIN_KZ_2, 1);
-        break;
-    case DPLS_MODE_SHORT_T:
-        hal_gpio_write(DPLS_PIN_KZ_T, 1);
-        break;
-    default: return false;
-    }
-    hardware_mode = mode;
-    return true;
+    return dpls_phy6252_hw_apply_mode(mode);
 }
 
 static void status_led_output(void *context, bool on)
 {
     (void)context;
-    /* TЗ: identify is shown by green flashes. Always drive the unused colour
-     * channels low so a retained/stale RGB state cannot mix into the scene. */
-    hal_gpio_write(DPLS_PIN_LED_RED, 0);
-    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
-    hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
+    dpls_phy6252_hw_identify_led(on);
 }
 
-static void load_calibration(void)
+/* Derive domain state only from fresh measurements. A stale reserve reading is
+ * treated as low by reserve_low() below, which is the fail-safe direction for a
+ * control device: stale telemetry can never leave a test mode energized. */
+static void update_power_state(uint32_t now)
 {
-    dpls_calib_nv_t nv;
-    dpls_calib_default(&line_calib);
-    dpls_calib_default(&vcap_calib);
-    vcap_calib.gain_milli = DPLS_VCAP_NOMINAL_GAIN_MILLI;
-    line_calib_from_nv = false;
-    if (osal_snv_read(DPLS_CALIB_SNV_ID, sizeof(nv), &nv) == SUCCESS &&
-        nv.magic == DPLS_CALIB_MAGIC &&
-        nv.crc == dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_t, crc))) {
-        dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
-        dpls_calib_t vcap = {nv.vcap_gain_milli, nv.vcap_offset_mv};
-        if (dpls_calib_valid(&line)) { line_calib = line; line_calib_from_nv = true; }
-        if (dpls_calib_valid(&vcap)) vcap_calib = vcap;
-    }
-}
+    uint8_t validity = dpls_phy6252_adc_validity(now);
 
-/* Fold one sample into a moving-average window and return the current average. */
-static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
-{
-    uint32_t sum = 0u;
-    uint8_t i;
-    window[*pos] = value;
-    *pos = (uint8_t)((*pos + 1u) % DPLS_ADC_WINDOW);
-    if (*count < DPLS_ADC_WINDOW) ++*count;
-    for (i = 0u; i < *count; ++i) sum += window[i];
-    return (uint16_t)(sum / *count);
-}
-
-/* A single raw buffer is enough because channels are converted strictly
- * one at a time. This saves SRAM compared with one MAX_ADC_SAMPLE_SIZE buffer
- * per voltage input. */
-static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
-static volatile uint8_t adc_raw_size;
-static volatile adc_CH_t adc_raw_channel;
-static volatile bool adc_raw_ready;
-
-/* ADC completion ISR: copy the raw samples, flag the channel and wake the task.
- * No float, no averaging loop, no flash, no BLE here — the previous version did
- * hal_adc_value_cal + window folding in interrupt context, which is the leading
- * suspect for the ADC↔radio watchdog reset loop. */
-static void adc_evt(adc_Evt_t *event)
-{
-    uint8_t i, n;
-    if (event->type != HAL_ADC_EVT_DATA) {
-        adc_busy = false;
-        return;
-    }
-    n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
-    for (i = 0; i < n; ++i) adc_raw[i] = event->data[i];
-    adc_raw_size = n;
-    adc_raw_channel = event->ch;
-    adc_raw_ready = true;
-    /* One-shot mode: the ADC IRQ handler stops the converter after the last
-     * channel callback returns, so we only clear our re-entrancy guard. */
-    adc_busy = false;
-    osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
-}
-
-/* Task context: raw samples → pin volts (soft-float scaling lives here now) →
- * two-point calibration → moving-average window. */
-static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t size,
-                                const dpls_calib_t *calib, uint16_t *window,
-                                uint8_t *wcount, uint8_t *wpos, volatile uint16_t *cached)
-{
-    float pin_volts = hal_adc_value_cal(ch, (uint16_t *)raw, size, FALSE, FALSE);
-    uint32_t pin_mv = pin_volts <= 0.0f ? 0u : (uint32_t)(pin_volts * 1000.0f + 0.5f);
-    *cached = fold_window(window, wcount, wpos, dpls_calib_apply(calib, pin_mv));
-}
-
-static void adc_kick(void)
-{
-    adc_Cfg_t cfg;
-    uint8_t channel;
-    uint8_t claim;
-    if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
-    memset(&cfg, 0, sizeof(cfg));
-    /* One channel per conversion. P20/P15/P24 are the independent +1/+2/+T
-     * voltage paths, P23 is the reserve accumulator. Standard resolution is
-     * used because every divider keeps its ADC pin close to or below 1 V. */
-    if (adc_pending & DPLS_ADC_NEED_PORT1) {
-        channel = ADC_BIT(ADC_CH3P_P20);
-        claim = DPLS_ADC_NEED_PORT1;
-    } else if (adc_pending & DPLS_ADC_NEED_PORT2) {
-        channel = ADC_BIT(ADC_CH3N_P15);
-        claim = DPLS_ADC_NEED_PORT2;
-    } else if (adc_pending & DPLS_ADC_NEED_PORT_T) {
-        channel = ADC_BIT(ADC_CH2N_P24);
-        claim = DPLS_ADC_NEED_PORT_T;
-    } else {
-        channel = ADC_BIT(ADC_CH1P_P23);
-        claim = DPLS_ADC_NEED_VCAP;
-    }
-    cfg.channel = channel;
-    cfg.is_continue_mode = FALSE;
-    cfg.is_differential_mode = 0u;
-    cfg.is_high_resolution = 0u;
-    adc_busy = true;
-    if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
-        adc_busy = false;
-        return;
-    }
-    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
-        (void)hal_adc_stop();
-        adc_busy = false;
-        return;
-    }
-    adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
-}
-
-void dpls_phy6252_process_adc(void)
-{
-    if (adc_raw_ready) {
-        adc_CH_t ch = adc_raw_channel;
-        uint8_t size = adc_raw_size;
-        adc_raw_ready = false;
-        switch (ch) {
-        case ADC_CH9:
-            process_adc_channel(ch, adc_raw, size, &line_calib,
-                                line_window, &line_window_count, &line_window_pos,
-                                &cached_line_mv);
-            break;
-        case ADC_CH4:
-            process_adc_channel(ch, adc_raw, size, &line_calib,
-                                port2_window, &port2_window_count, &port2_window_pos,
-                                &cached_port2_mv);
-            break;
-        case ADC_CH2:
-            process_adc_channel(ch, adc_raw, size, &line_calib,
-                                port_t_window, &port_t_window_count, &port_t_window_pos,
-                                &cached_port_t_mv);
-            break;
-        case ADC_CH1:
-            process_adc_channel(ch, adc_raw, size, &vcap_calib,
-                                vcap_window, &vcap_window_count, &vcap_window_pos,
-                                &cached_vcap_mv);
-            break;
-        default:
-            break;
-        }
-    }
-    /* Start the next channel from task context after consuming the shared raw
-     * buffer. A complete four-channel cycle is still initiated every second. */
-    adc_kick();
-}
-
-/* Derive the power-source and reserve-low flags with hysteresis. Skipped until
- * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
- * reserve/low-battery state at boot. */
-static void update_power_state(void)
-{
-    if (line_window_count != 0u) {
-        uint16_t line = cached_line_mv;
+    if (validity & DPLS_STATE_PORT_1_VALID) {
+        uint16_t line = dpls_phy6252_adc_port1_mv();
         if (power_state == DPLS_POWER_LINE && line < DPLS_LINE_ABSENT_MV)
             power_state = DPLS_POWER_RESERVE;
         else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV)
             power_state = DPLS_POWER_LINE;
-        /* A real downstream short is a healthy line collapsing; ignore sags in
-         * the KZ test modes (we cause those ourselves). */
+
         if (line > DPLS_LINE_PRESENT_MV) line_established = true;
-        if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
+        if (line_established && dpls_phy6252_hw_mode() == DPLS_MODE_NORMAL) {
             if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
+    } else {
+        /* Hardware performs the actual fast isolation. Do not keep exporting a
+         * software-derived real-short flag after its measurement has gone stale. */
+        auto_isolation_active = false;
     }
-    if (vcap_window_count != 0u) {
-        uint16_t vcap = cached_vcap_mv;
-        if (!reserve_low_state && vcap < DPLS_RESERVE_LOW_MV) reserve_low_state = true;
-        else if (reserve_low_state && vcap > DPLS_RESERVE_OK_MV) reserve_low_state = false;
+
+    if (validity & DPLS_STATE_RESERVE_VOLTAGE_VALID) {
+        uint16_t reserve = dpls_phy6252_adc_reserve_mv();
+        if (!reserve_low_state && reserve < DPLS_RESERVE_LOW_MV) reserve_low_state = true;
+        else if (reserve_low_state && reserve > DPLS_RESERVE_OK_MV) reserve_low_state = false;
     }
 }
 
 static uint16_t voltage_mv(void *context)
 {
     (void)context;
-    return cached_line_mv;
+    return dpls_phy6252_adc_port1_mv();
 }
 
 static uint16_t port1_voltage_mv(void *context)
 {
     (void)context;
-    return cached_line_mv;
+    return dpls_phy6252_adc_port1_mv();
 }
 
 static uint16_t port2_voltage_mv(void *context)
 {
     (void)context;
-    return cached_port2_mv;
+    return dpls_phy6252_adc_port2_mv();
 }
 
 static uint16_t port_t_voltage_mv(void *context)
 {
     (void)context;
-    return cached_port_t_mv;
+    return dpls_phy6252_adc_port_t_mv();
 }
 
 static uint16_t reserve_voltage_mv(void *context)
 {
     (void)context;
-    return cached_vcap_mv;
+    return dpls_phy6252_adc_reserve_mv();
 }
 
 static dpls_power_t power_source(void *context)
@@ -600,35 +329,30 @@ static dpls_power_t power_source(void *context)
 
 static bool reserve_low(void *context)
 {
+    uint8_t validity;
     (void)context;
+    validity = dpls_phy6252_adc_validity(now_ms());
+    if (!(validity & DPLS_STATE_RESERVE_VOLTAGE_VALID))
+        return true;
     return reserve_low_state;
 }
 
 static bool real_short_active(void *context)
 {
     (void)context;
+    if (!(dpls_phy6252_adc_validity(now_ms()) & DPLS_STATE_PORT_1_VALID))
+        return false;
     return auto_isolation_active;
 }
 
-/* Which STATE_REPORT fields carry a real measurement. Line-derived fields
- * (voltage, power source, auto-isolation) become valid once the line channel
- * has produced a sample; reserve once the VCAP channel has. Until the first
- * conversion lands the mask stays 0 and the app shows "—" / "Не определён"
- * instead of the cold-cache 0 mV / "from line" defaults. */
 static uint8_t measurement_validity(void *context)
 {
-    uint8_t flags = 0;
+    uint8_t flags;
     (void)context;
-    if (line_window_count != 0u)
-        flags |= DPLS_STATE_PORT_1_VALID | DPLS_STATE_POWER_VALID |
-                 DPLS_STATE_AUTOISO_VALID;
-    if (port2_window_count != 0u)
-        flags |= DPLS_STATE_PORT_2_VALID;
-    if (port_t_window_count != 0u)
-        flags |= DPLS_STATE_PORT_T_VALID;
-    if (vcap_window_count != 0u)
-        flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
-    if (line_calib_from_nv)
+    flags = dpls_phy6252_adc_validity(now_ms());
+    if (flags & DPLS_STATE_PORT_1_VALID)
+        flags |= DPLS_STATE_POWER_VALID | DPLS_STATE_AUTOISO_VALID;
+    if (dpls_phy6252_adc_fully_calibrated())
         flags |= DPLS_STATE_ADC_CALIBRATED;
     return flags;
 }
@@ -636,8 +360,6 @@ static uint8_t measurement_validity(void *context)
 static void identify_led(void *context, bool enabled)
 {
     (void)context;
-    /* The LED driver renders the 1 Hz identify blink; here we only latch that
-     * identify is the active scene so the next LED tick picks it up. */
     identify_led_active = enabled;
 }
 
@@ -672,9 +394,6 @@ static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
     else memset(out, 0, DPLS_AUTH_SALT_SIZE);
 }
 
-/* Persist the current in-RAM `settings` record (magic + CRC), read it back to
- * confirm the write, then set the VALID marker. Shared by initial commissioning
- * and the in-place name/password updates. */
 static bool persist_current_settings(void)
 {
     dpls_settings_t verified;
@@ -718,7 +437,6 @@ static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
     }
 }
 
-/* NAME_SET: replace just the user name, keep salt/verifier. */
 static bool settings_set_name(void *context, const char *name)
 {
     size_t name_length;
@@ -731,7 +449,6 @@ static bool settings_set_name(void *context, const char *name)
     return persist_current_settings();
 }
 
-/* PASSWORD_SET: replace just salt+verifier, keep the name. */
 static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
 {
     (void)context;
@@ -749,11 +466,10 @@ static void device_info(void *context, dpls_device_info_t *out)
     out->fw_minor = DPLS_FW_VERSION_MINOR;
     out->fw_patch = DPLS_FW_VERSION_PATCH;
     out->hw_revision = DPLS_HW_REVISION;
-    out->capabilities = 0u;
-    out->capabilities |= DPLS_CAP_ADC_PRESENT;
-    out->capabilities |= DPLS_CAP_MULTI_VOLTAGE_REPORT;
-    if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
-    /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
+    out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT;
+    if (dpls_phy6252_adc_fully_calibrated())
+        out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
+    /* DPLS_CAP_HW_READBACK stays clear: commanded mode is not electrical readback. */
 }
 
 static bool auth_lock_read(void *context)
@@ -803,9 +519,15 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
     return difference == 0;
 }
 
-/* Send the head of the TX queue if nothing is in flight. Runs from the OSAL
- * task (via DPLS_PHY6252_TX_EVT or the tick), never nested under the RX handler,
- * so the ATT indication buffer stays off the receive path's stack. */
+static void diagnostic_error(void *context, bool critical)
+{
+    (void)context;
+    if (!critical) return;
+    safe_normal(NULL);
+    if (connection_handle != INVALID_CONNHANDLE)
+        (void)GAPRole_TerminateConnection();
+}
+
 static void tx_pump(void)
 {
     bStatus_t rc;
@@ -813,13 +535,11 @@ static void tx_pump(void)
     rc = dpls_gatt_send_indication(connection_handle, tx_queue[tx_head].data,
                                    tx_queue[tx_head].length, task_id);
     if (rc == SUCCESS) {
-        tx_in_flight = true; /* wait for the ATT confirmation before the next */
+        tx_in_flight = true;
         tx_in_flight_since_ms = now_ms();
     } else if (rc == bleMemAllocError || rc == blePending) {
-        /* Transient: keep the head and retry from the next tick. */
+        /* transient: retry from the next task tick */
     } else {
-        /* Permanent (not subscribed / too big for MTU / not connected): drop
-         * this frame so the queue cannot deadlock behind an unsendable head. */
         tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
         if (tx_count) --tx_count;
         if (tx_count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
@@ -831,9 +551,6 @@ static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
     (void)context;
     if (length > DPLS_TX_SLOT_SIZE) return false;
     if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
-        /* Queue full: the client has stopped confirming. Fail safe rather than
-         * lose a control response — drop to Norma, reset the queue and drop the
-         * link so the reconnect starts clean. */
         safe_normal(NULL);
         tx_head = tx_tail = tx_count = 0;
         tx_in_flight = false;
@@ -873,8 +590,6 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
     if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
-    /* Full queue: NAK the write so the client retries instead of losing the
-     * frame silently. */
     if (rx_count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
     slot = &rx_queue[rx_tail];
     memcpy(slot->data, data, length);
@@ -889,16 +604,13 @@ static void clear_settings_and_bonds(void)
 {
     uint8 marker = DPLS_SETTINGS_EMPTY_MARKER;
     memset(&settings, 0, sizeof(settings));
-    /* The explicit marker is written only by the physical reset path. A bad
-     * settings record never becomes remotely commissionable by accident. */
     (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
     (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
-    /* Factory reset also lifts any persisted brute-force lock. */
     (void)auth_lock_write(NULL, false);
     settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
-    hal_gpio_write(DPLS_PIN_LED_GREEN, 1);
+    dpls_phy6252_hw_identify_led(true);
     NVIC_SystemReset();
 }
 
@@ -942,52 +654,20 @@ void dpls_phy6252_init(uint8 new_task_id)
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
     identify_led_active = false;
-    /* Drive every mode output to the safe "Norma" level before the radio or
-     * the state machine can touch them. */
-    hal_gpio_pin_init(DPLS_PIN_ISO_1, OEN);
-    hal_gpio_pin_init(DPLS_PIN_ISO_2, OEN);
-    hal_gpio_pin_init(DPLS_PIN_ISO_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_RED, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_GREEN, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_BLUE, OEN);
-    /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
-     * through sleep only while it is registered for AON retention, and the
-     * wake handler restores just those pins. Without this a mode output goes
-     * high and then silently collapses at the first sleep window — the pin is
-     * written once on the mode change and never again, so it never comes back
-     * (the LED only survived because its blink rewrites the pad). */
-    (void)hal_gpioretention_register(DPLS_PIN_ISO_1);
-    (void)hal_gpioretention_register(DPLS_PIN_ISO_2);
-    (void)hal_gpioretention_register(DPLS_PIN_ISO_T);
-    (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
-    (void)hal_gpioretention_register(DPLS_PIN_KZ_2);
-    (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_RED);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
-    mode_outputs_off();
-    hal_gpio_write(DPLS_PIN_LED_RED, 0);
-    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
-    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
-    hardware_mode = DPLS_MODE_NORMAL;
+
+    /* Target startup calls hw_init even earlier; this second call is intentionally
+     * idempotent and makes the app safe if the integration order ever changes. */
+    (void)dpls_phy6252_hw_init();
+    (void)dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
+
+    dpls_phy6252_hw_safe_normal();
+    dpls_phy6252_hw_identify_led(false);
     dpls_led_init(&status_led, status_led_output, NULL, now_ms());
-    line_window_count = line_window_pos = 0;
-    port2_window_count = port2_window_pos = 0;
-    port_t_window_count = port_t_window_pos = 0;
-    vcap_window_count = vcap_window_pos = adc_decimate = 0;
-    cached_line_mv = cached_port2_mv = cached_port_t_mv = cached_vcap_mv = 0;
-    adc_pending = 0u;
-    adc_raw_ready = false;
     power_state = DPLS_POWER_LINE;
     reserve_low_state = false;
     auto_isolation_active = false;
     line_established = false;
-    adc_busy = false;
-    load_calibration();
-    hal_adc_init();
+
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
     hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     classify_settings();
@@ -1028,6 +708,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.event_storage_read = journal_storage_read;
     hal.tx_indicate = tx_indicate;
     hal.tx_notify = tx_notify;
+    hal.diagnostic_error = diagnostic_error;
     hal.disconnect_after_setup = disconnect_after_setup;
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
@@ -1041,25 +722,20 @@ static void erase_stored_bonds(void)
 static void erase_bonds_and_drop_link(void)
 {
     erase_stored_bonds();
-    if (connection_handle != INVALID_CONNHANDLE) {
+    if (connection_handle != INVALID_CONNHANDLE)
         (void)GAPRole_TerminateConnection();
-    }
 }
 
 static void note_pre_auth_disconnect(void)
 {
     uint32_t now = now_ms();
-    if (server.authenticated || !connection_had_encryption) {
-        return;
-    }
+    if (server.authenticated || !connection_had_encryption) return;
     if (pre_auth_disconnect_window_ms == 0u ||
         (uint32_t)(now - pre_auth_disconnect_window_ms) > DPLS_BOND_DESYNC_WINDOW_MS) {
         pre_auth_disconnect_count = 0;
         pre_auth_disconnect_window_ms = now;
     }
-    if (++pre_auth_disconnect_count < DPLS_BOND_DESYNC_LIMIT) {
-        return;
-    }
+    if (++pre_auth_disconnect_count < DPLS_BOND_DESYNC_LIMIT) return;
     pre_auth_disconnect_count = 0;
     pre_auth_disconnect_window_ms = 0;
     erase_stored_bonds();
@@ -1070,27 +746,23 @@ void dpls_phy6252_connected(uint16 conn_handle)
     connection_handle = conn_handle;
     connected_at_ms = now_ms();
     connection_had_encryption = false;
-    /* Intended: keep the core awake for the whole connection, because a
-     * periodic ADC kick racing the sleep/wake clock transitions between
-     * connection events eventually freezes the OSAL loop (SDK 3.1.2, ~90 s in;
-     * on 3.1.1 the same race surfaced as watchdog resets).
-     *
-     * NOTE: this lock is currently a no-op — hal_pwrmgr_lock() only takes
-     * effect for a module previously passed to hal_pwrmgr_register(), and
-     * MOD_USR1 is never registered, so the call returns PPlus_ERR_NOT_REGISTED
-     * and sleep stays enabled. Every hardware soak so far therefore ran WITH
-     * sleep active during connections. Making it real (register MOD_USR1)
-     * raises the connected current well above the ≤0.5 mA budget and shortens
-     * the reserve autonomy, so it is left as-is until that trade-off is
-     * measured on the power board. GPIO retention above covers the output
-     * levels either way. */
-    (void)hal_pwrmgr_lock(MOD_USR1);
+
+    /* A connected session without this lock is a known unsafe state on SDK
+     * 3.1.2: ADC clock changes can race radio sleep/wake and freeze OSAL/GATT.
+     * Unlike previous releases, failure is checked and the link is terminated
+     * instead of continuing with a silently ineffective lock. */
+    if (!dpls_phy6252_hw_connection_lock()) {
+        safe_normal(NULL);
+        connected_at_ms = 0u;
+        (void)GAPRole_TerminateConnection();
+        return;
+    }
     dpls_server_connected(&server, now_ms());
 }
 
 void dpls_phy6252_disconnected(void)
 {
-    (void)hal_pwrmgr_unlock(MOD_USR1);
+    (void)dpls_phy6252_hw_connection_unlock();
     note_pre_auth_disconnect();
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
@@ -1113,54 +785,49 @@ void dpls_phy6252_process_rx(void)
     if (rx_count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
+void dpls_phy6252_process_adc(void)
+{
+    dpls_phy6252_adc_process(now_ms());
+}
+
 void dpls_phy6252_tick(void)
 {
+    uint32_t now = now_ms();
+
     if (connection_handle != INVALID_CONNHANDLE) {
-        if (link_encrypted(NULL)) {
-            connection_had_encryption = true;
-        }
+        if (link_encrypted(NULL)) connection_had_encryption = true;
         if (server.authenticated) {
             pre_auth_disconnect_count = 0;
             pre_auth_disconnect_window_ms = 0;
         }
     }
     if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) && connected_at_ms != 0u &&
-        (uint32_t)(now_ms() - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
+        (uint32_t)(now - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
         connected_at_ms = 0;
         erase_bonds_and_drop_link();
     }
     if (factory_reset_armed) {
         if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
-        else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
+        else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
             factory_reset_armed = false;
             clear_settings_and_bonds();
         }
     }
-    if (++adc_decimate >= DPLS_ADC_DECIMATE) {
-        adc_decimate = 0;
-        adc_pending = (uint8_t)DPLS_ADC_NEED_ALL;
-        adc_kick();
-    }
-    update_power_state();
-    dpls_server_tick(&server, now_ms());
-    /* Recover from a lost ATT confirmation: drop the unacknowledged head so the
-     * response pipeline cannot stay wedged behind it (see tx_in_flight_since_ms). */
-    if (tx_in_flight &&
-        (uint32_t)(now_ms() - tx_in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
+
+    dpls_phy6252_adc_tick(now);
+    update_power_state(now);
+    dpls_server_tick(&server, now);
+
+    if (tx_in_flight && (uint32_t)(now - tx_in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
         dpls_phy6252_tx_confirmed();
         return;
     }
-    /* Retry a TX head that hit a transient stack-busy error on a prior attempt. */
     tx_pump();
 }
 
 uint32 dpls_phy6252_led_tick(void)
 {
     uint32_t now = now_ms();
-    /* The only job left for this LED is "show on object": mode indication has
-     * its own lamps, and reserve/isolation state is read in the app. The driver
-     * returns the exact time to the next edge (500 ms while blinking, 1 s when
-     * idle), so the timer is re-armed straight from it — no clamping. */
     dpls_led_set_identify(&status_led, identify_led_active, now);
     return dpls_led_tick(&status_led, now);
 }

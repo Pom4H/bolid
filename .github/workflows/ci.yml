@@ -28,12 +28,12 @@ jobs:
           path: tmp/cppcheck.txt
           if-no-files-found: warn
 
-  android-contract:
-    name: Source and documentation contracts
+  source-contracts:
+    name: Source, hardware and documentation contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Verify required source contracts
+      - name: Verify application contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -55,27 +55,6 @@ jobs:
           grep -q 'isMinifyEnabled = true' TestDPLS/app/build.gradle.kts
           grep -q 'isShrinkResources = true' TestDPLS/app/build.gradle.kts
 
-          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' Firmware/phy6252/dpls_board.h
-          grep -q 'ADC_CH3P_P20' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH3N_P15' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH2N_P24' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH1P_P23' Firmware/phy6252/dpls_phy6252_app.c
-          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_PIN_LED_GREEN, on ? 1 : 0' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_ADC_NEED_ALL' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_2_VALID' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_T_VALID' Firmware/phy6252/dpls_phy6252_app.c
-
           test -f TestDPLS/BUILD.md
           test -f docs/android-compliance.md
           test -f docs/android-pmi.md
@@ -83,6 +62,7 @@ jobs:
           test -f docs/oss-register.md
           test -f docs/live-voltage-requirements.md
           test -f tools/generate_behavior_sim.py
+          test -f tools/check_phy6252_contract.py
           test ! -f docs/behavior-sim.html
           test ! -f tools/apply_four_channel_adc_release.py
           test ! -f .github/workflows/apply-four-channel-adc.yml
@@ -91,6 +71,8 @@ jobs:
           test ! -f tools/patches/android-compliance.patch
           test ! -f tools/apply_android_compliance.py
           test ! -f .github/workflows/apply-android-compliance.yml
+      - name: Verify PHY6252 electrical contract
+        run: python3 tools/check_phy6252_contract.py
       - name: Validate documentation introspection
         run: |
           python3 tools/generate_behavior_sim.py --output /tmp/test-dpls-behavior-sim.html
@@ -103,6 +85,8 @@ jobs:
           grep -q 'DPLS_PIN_LED_RED' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_LED_GREEN' /tmp/test-dpls-behavior-sim.html
           grep -q 'DPLS_PIN_LED_BLUE' /tmp/test-dpls-behavior-sim.html
+          grep -q 'connectionSleepLock' /tmp/test-dpls-behavior-sim.html
+          grep -q 'staleAdcInvalidation' /tmp/test-dpls-behavior-sim.html
 
   android:
     name: Android tests + minified release

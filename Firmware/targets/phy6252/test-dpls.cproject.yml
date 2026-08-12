@@ -163,6 +163,8 @@ project:
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
         - file: ../../phy6252/dpls_gatt_service.c
+        - file: ../../phy6252/dpls_phy6252_hw.c
+        - file: ../../phy6252/dpls_phy6252_adc.c
         - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_ble_identity.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/hmac.c

@@ -11,12 +11,10 @@
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
-#include "dpls_board.h"
+#include "dpls_phy6252_hw.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
-#include "mcu.h"
-#include "mcu_phy_bumbee.h"
 
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
@@ -99,39 +97,8 @@ static void rssi_changed(int8 rssi) { (void)rssi; }
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
     (void)conn_handle;
-    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS) {
+    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS)
         GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
-    }
-}
-
-/* P16/P17 are the module's XTAL_32K_IN/OUT pads, but this board carries no
- * 32.768 kHz crystal — the two pins are the KZ_2 and KZ_T shunt outputs. The
- * SDK selects CLK_32K_RCOSC (main.c) and then, outside the XOSC_PIN_ALLOW
- * guard we do not define, still runs "turn on 32kxtal" (clock.c), leaving the
- * crystal oscillator biased on two digital outputs for the whole run. Clearing
- * PMCTL0[28] puts the field back to the 0x05 the RCOSC branch itself
- * programmed; nothing else in the build reads a 32 kHz crystal. */
-static void disable_32k_xtal(void)
-{
-    subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00);
-}
-
-/* GPIO_OUTPUT only flips the DDR bit in this SDK; it does not pre-load the data
- * latch. If a retained/warm-boot latch contains 1, enabling an active-high mode
- * output before the later safe-normal write exposes a short pulse on the pin.
- * Prime every active-high control/LED latch low first. hal_gpio_write() updates
- * the latch before it enables output direction, so no unsafe level is exposed. */
-static void prime_safe_gpio_outputs(void)
-{
-    hal_gpio_write(DPLS_PIN_ISO_1, 0);
-    hal_gpio_write(DPLS_PIN_ISO_2, 0);
-    hal_gpio_write(DPLS_PIN_ISO_T, 0);
-    hal_gpio_write(DPLS_PIN_KZ_1, 0);
-    hal_gpio_write(DPLS_PIN_KZ_2, 0);
-    hal_gpio_write(DPLS_PIN_KZ_T, 0);
-    hal_gpio_write(DPLS_PIN_LED_RED, 0);
-    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
-    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -161,34 +128,24 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-    /* hal_init() has already run by now, so undo its 32k-crystal bias here and
-     * re-assert it on every wake — the AON domain survives sleep, but the ROM
-     * wake path reprograms the 32 kHz source, so do not assume it stays off. */
-    disable_32k_xtal();
-    prime_safe_gpio_outputs();
-    (void)hal_pwrmgr_register(MOD_USR2, NULL, disable_32k_xtal);
-    /* dpls_phy6252_connected() already locks MOD_USR1 for the lifetime of an
-     * active BLE connection. It used to be deliberately left unregistered,
-     * making that lock a no-op and re-introducing the known ADC/radio/sleep race
-     * (OSAL freeze / watchdog / GATT loss). Registering it here keeps advertising
-     * low-power but prevents sleep only while the operator is connected. It also
-     * prevents the ROM wake path from briefly re-biasing P16/P17 as 32 kHz XTAL
-     * pins in the middle of an active control session. */
-    (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
-    /* The pristine SDK 3.1.2 main.c retains only SRAM0 (0x1fff0000-0x1fff7fff)
-     * across sleep, but our scatter places the ER_IROM1 tail past 0x1fff8000
-     * (SRAM1) and ER_IROM2 at 0x1fffc000 (SRAM2). With those banks unpowered
-     * every wakeup lands on dead code and turns into a warm reboot loop.
-     * Re-assert the full-retention mask the proven 3.1.1 build used. */
+
+    /* First board-owned operation after vendor hal_init(): preload every control
+     * latch to zero, register GPIO retention, install the P16/P17 RC32K wake
+     * workaround and reserve the connection sleep-lock slot. All of those
+     * invariants live in one module now; this target layer no longer duplicates
+     * pin/sleep knowledge. */
+    (void)dpls_phy6252_hw_init();
+
+    /* SDK 3.1.2 main.c retains only SRAM0. Our scatter uses SRAM1/SRAM2 as well,
+     * so retain all three banks or a wake can return into powered-off code. */
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
-    /* osal_snv is fs-backed (USE_FS=1) and needs the fs region mounted before
-     * the first read/write. The proven 3.1.1 main.c mounted it in hal_init();
-     * the pristine 3.1.2 main.c does not, which leaves every SNV operation
-     * failing (no BLE MAC, no settings, no journal persistence). Same region
-     * as before: 3 sectors at 0x1103C000. */
+
+    /* osal_snv is fs-backed (USE_FS=1); mount the persistent region before any
+     * identity/settings/journal access. */
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
+
     dpls_ble_identity_prepare();
     apply_identity_to_adv();
     (void)LL_EXT_SetSCA(500);
@@ -232,9 +189,8 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         if (message) {
             osal_event_hdr_t *hdr = (osal_event_hdr_t *)message;
             if (hdr->event == GATT_MSG_EVENT &&
-                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
+                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM)
                 dpls_phy6252_tx_confirmed();
-            }
             osal_msg_deallocate(message);
         }
         return events ^ SYS_EVENT_MSG;
