@@ -45,6 +45,10 @@ if [ -z "$AXF" ] || [ ! -f "$AXF" ]; then
     exit 1
 fi
 
+# Production sleep retains SRAM0 only. Refuse a link that silently grows
+# ER_IROM1 into SRAM1 even if the linker itself considers that address valid.
+python3 "$ROOT/tools/check_phy6252_map.py" "$AXF.map"
+
 REGION_ROOT="$(mktemp -d)"
 REGIONS="$REGION_ROOT/regions"
 fromelf --i32 --output "$REGIONS" "$AXF"
