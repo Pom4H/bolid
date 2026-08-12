@@ -41,19 +41,19 @@ Mock-устройства и пароль демо: `password1`.
 
 ## Ярлык на рабочем столе (Windows)
 
-После сборки на Windows:
+После сборки на Windows (если PowerShell ругается на Execution Policy):
 
 ```powershell
 cd TestDPLS-Windows
-.\tools\create-desktop-shortcut.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-shortcut.ps1
 ```
 
-Или двойной клик по `tools\create-desktop-shortcut.bat`.
+Или двойной клик по `tools\create-desktop-shortcut.bat` (он уже обходит Execution Policy).
 
 Для self-contained exe в `artifacts\win-x64`:
 
 ```powershell
-.\tools\create-desktop-shortcut.ps1 -Publish
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\create-desktop-shortcut.ps1 -Publish
 ```
 
 На рабочем столе появится ярлык **Тест-ДПЛС.lnk**.
