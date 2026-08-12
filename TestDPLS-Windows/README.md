@@ -39,6 +39,25 @@ dotnet run --project src/TestDPLS.Preview/TestDPLS.Preview.csproj -c Release
 
 Mock-устройства и пароль демо: `password1`.
 
+## Ярлык на рабочем столе (Windows)
+
+После сборки на Windows:
+
+```powershell
+cd TestDPLS-Windows
+.\tools\create-desktop-shortcut.ps1
+```
+
+Или двойной клик по `tools\create-desktop-shortcut.bat`.
+
+Для self-contained exe в `artifacts\win-x64`:
+
+```powershell
+.\tools\create-desktop-shortcut.ps1 -Publish
+```
+
+На рабочем столе появится ярлык **Тест-ДПЛС.lnk**.
+
 ## Тесты протокола
 
 Ядро протокола/криптографии — отдельная библиотека `TestDPLS.Core` (без WinRT), тесты проходят и на Linux CI:

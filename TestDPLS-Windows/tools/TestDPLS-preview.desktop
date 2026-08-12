@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Тест-ДПЛС
+Comment=Клиент Тест-ДПЛС (preview)
+Exec=/workspace/TestDPLS-Windows/tools/launch-preview.sh
+Path=/workspace/TestDPLS-Windows
+Icon=applications-engineering
+Terminal=false
+Categories=Utility;
+StartupNotify=true
