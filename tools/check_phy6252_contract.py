@@ -156,15 +156,15 @@ def main() -> None:
     ):
         require(hw, symbol, HW)
 
-    # Mode semantics are electrical too: each non-normal mode must drive exactly
-    # its assigned output and no second active-high control.
     write_re = re.compile(r"hal_gpio_write\((DPLS_PIN_[A-Z0-9_]+),\s*1\s*\)")
     for mode, expected_pin in EXPECTED_MODE_OUTPUT.items():
         writes = write_re.findall(mode_block(hw, mode))
         if writes != [expected_pin]:
             fail(f"{mode}: expected active output {expected_pin}, got {writes}")
 
-    # ADC mux/callback pairing, timeout recovery and stale-data invalidation.
+    # ADC mux/callback pairing, lost-IRQ recovery, stale invalidation and a real
+    # MOD_ADCC registration probe. Vendor hal_adc_init() is void and otherwise
+    # hides pwrmgr registration failure.
     for needle in (
         "ADC_BIT(ADC_CH3P_P20)", "result_channel = ADC_CH9",
         "ADC_BIT(ADC_CH3N_P15)", "result_channel = ADC_CH4",
@@ -174,6 +174,7 @@ def main() -> None:
         "dpls_adc_assert_port1", "dpls_adc_assert_port2",
         "dpls_adc_assert_port_t", "dpls_adc_assert_vcap",
         "hal_adc_stop();", "finish_inflight_as_failed();",
+        "hal_pwrmgr_lock(MOD_ADCC)", "hal_pwrmgr_unlock(MOD_ADCC)",
     ):
         require(adc, needle, ADC)
     forbid(adc, "ADC_CH1N_P11", ADC)
@@ -186,6 +187,7 @@ def main() -> None:
         "hal.reserve_voltage_mv = reserve_voltage_mv",
         "dpls_phy6252_hw_connection_lock()",
         "dpls_phy6252_adc_tick(now)",
+        "hardware_ok = dpls_phy6252_hw_ready()",
     ):
         require(app, needle, APP)
     for forbidden in (
@@ -194,7 +196,20 @@ def main() -> None:
     ):
         forbid(app, forbidden, APP)
 
-    # BLE target is integration glue only.
+    # Factory reset must disconnect first because the pinned GAPBondMgr defers
+    # ERASE_ALLBONDS while a link is active. Reboot is only allowed after bond
+    # count, identity keys and EMPTY settings were all verified.
+    for needle in (
+        "factory_reset_pending",
+        "finish_factory_reset",
+        "GAPBOND_ERASE_ALLBONDS",
+        "GAPBOND_BOND_COUNT",
+        "dpls_ble_identity_reset_bonding_keys()",
+        "clear_settings_for_factory_reset",
+    ):
+        require(app, needle, APP)
+
+    # BLE target is integration glue and owns the early one-shot hardware init.
     require(target, "dpls_phy6252_hw_init()", TARGET)
     for forbidden in (
         "hal_pwrmgr_register(MOD_USR1", "hal_pwrmgr_register(MOD_USR2",
@@ -217,12 +232,10 @@ def main() -> None:
     require(cproject, "../../phy6252/dpls_phy6252_hw.c", CPROJECT)
     require(cproject, "../../phy6252/dpls_phy6252_adc.c", CPROJECT)
 
-    # Target adapters stay in XIP; ER_IROM1 has only a small retained-SRAM margin.
     require(scatter, "dpls_phy6252_hw.o(+RO)", SCATTER)
     require(scatter, "dpls_phy6252_adc.o(+RO)", SCATTER)
     require(scatter, "dpls_phy6252_app.o(+RO)", SCATTER)
 
-    # Human bring-up instructions are part of the electrical interface.
     for needle in (
         "P31 / P32 / P33", "P14 / P16 / P17",
         "+1=P20", "+2=P15", "+T=P24", "резерв=P23", "P34",
