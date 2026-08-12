@@ -21,7 +21,7 @@
 #include <string.h>
 
 #define DPLS_SETTINGS_MAGIC 0x534C5044u
-#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u /* "DLCK" */
+#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u
 #define DPLS_SETTINGS_SNV_ID 0x80u
 #define DPLS_SETTINGS_STATE_SNV_ID 0x81u
 #define DPLS_AUTH_LOCK_SNV_ID 0x84u
@@ -77,10 +77,8 @@ static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
 
-/* ATT Write Requests already provide RX backpressure and ATT indications permit
- * only one unconfirmed TX. Two slots therefore cover one item being processed/
- * in flight plus one queued item without retaining ten historical buffers across
- * every sleep cycle. Queue-full remains fail-safe and disconnects/NAKs. */
+/* ATT Write Requests provide RX backpressure and ATT indications permit only
+ * one unconfirmed TX. Two slots cover one in-flight plus one queued item. */
 #define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
@@ -276,9 +274,9 @@ static void update_power_state(uint32_t now)
             if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
-    } else {
-        auto_isolation_active = false;
     }
+    /* Invalid/stale P20 means unknown, not "short cleared". Preserve the last
+     * known isolation state so an ADC outage can never relax a safety interlock. */
 
     if (validity & DPLS_STATE_RESERVE_VOLTAGE_VALID) {
         uint16_t reserve = dpls_phy6252_adc_reserve_mv();
@@ -287,41 +285,12 @@ static void update_power_state(uint32_t now)
     }
 }
 
-static uint16_t voltage_mv(void *context)
-{
-    (void)context;
-    return dpls_phy6252_adc_port1_mv();
-}
-
-static uint16_t port1_voltage_mv(void *context)
-{
-    (void)context;
-    return dpls_phy6252_adc_port1_mv();
-}
-
-static uint16_t port2_voltage_mv(void *context)
-{
-    (void)context;
-    return dpls_phy6252_adc_port2_mv();
-}
-
-static uint16_t port_t_voltage_mv(void *context)
-{
-    (void)context;
-    return dpls_phy6252_adc_port_t_mv();
-}
-
-static uint16_t reserve_voltage_mv(void *context)
-{
-    (void)context;
-    return dpls_phy6252_adc_reserve_mv();
-}
-
-static dpls_power_t power_source(void *context)
-{
-    (void)context;
-    return power_state;
-}
+static uint16_t voltage_mv(void *context) { (void)context; return dpls_phy6252_adc_port1_mv(); }
+static uint16_t port1_voltage_mv(void *context) { (void)context; return dpls_phy6252_adc_port1_mv(); }
+static uint16_t port2_voltage_mv(void *context) { (void)context; return dpls_phy6252_adc_port2_mv(); }
+static uint16_t port_t_voltage_mv(void *context) { (void)context; return dpls_phy6252_adc_port_t_mv(); }
+static uint16_t reserve_voltage_mv(void *context) { (void)context; return dpls_phy6252_adc_reserve_mv(); }
+static dpls_power_t power_source(void *context) { (void)context; return power_state; }
 
 static bool reserve_low(void *context)
 {
@@ -425,9 +394,7 @@ static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
     if (settings_state == DPLS_SETTINGS_VALID) {
         memcpy(out, settings.name, DPLS_NAME_MAX);
         out[DPLS_NAME_MAX] = '\0';
-    } else {
-        out[0] = '\0';
-    }
+    } else out[0] = '\0';
 }
 
 static bool settings_set_name(void *context, const char *name)
@@ -469,8 +436,7 @@ static bool auth_lock_read(void *context)
     (void)context;
     if (osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
     if (record.magic != DPLS_AUTH_LOCK_MAGIC ||
-        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc)))
-        return false;
+        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc))) return false;
     return record.locked != 0u;
 }
 
@@ -480,16 +446,11 @@ static bool auth_lock_write(void *context, bool locked)
     dpls_auth_lock_t record;
     bool current_valid;
     (void)context;
-
     current_valid = osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(current), &current) == SUCCESS &&
                     current.magic == DPLS_AUTH_LOCK_MAGIC &&
                     current.crc == dpls_crc16((const uint8_t *)&current, offsetof(dpls_auth_lock_t, crc));
     if (current_valid && ((current.locked != 0u) == locked)) return true;
-    /* Missing/corrupt marker already means "not persistently locked". Do not
-     * burn a flash write after every successful authentication just to encode
-     * the default false state. */
     if (!current_valid && !locked) return true;
-
     record.magic = DPLS_AUTH_LOCK_MAGIC;
     record.locked = locked ? 1u : 0u;
     record.reserved = 0u;
@@ -530,6 +491,19 @@ static void diagnostic_error(void *context, bool critical)
     if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
 }
 
+static void tx_fail_closed(void)
+{
+    /* An indication is acknowledged by ATT Handle Value Confirmation only.
+     * Never fabricate that acknowledgement on timeout/error: a MODE_SET may
+     * already have changed real outputs. Make the hardware passive and force a
+     * reconnect so command-id idempotency can safely replay the result. */
+    safe_normal(NULL);
+    tx_head = tx_tail = tx_count = 0u;
+    tx_in_flight = false;
+    tx_in_flight_since_ms = 0u;
+    if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
+}
+
 static void tx_pump(void)
 {
     bStatus_t rc;
@@ -540,11 +514,10 @@ static void tx_pump(void)
         tx_in_flight = true;
         tx_in_flight_since_ms = now_ms();
     } else if (rc == bleMemAllocError || rc == blePending) {
-        /* transient: retry from the next task tick */
+        /* Transient controller pressure: keep the exact frame queued. The
+         * existing 1 Hz housekeeping tick retries without adding another wake. */
     } else {
-        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
-        if (tx_count) --tx_count;
-        if (tx_count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+        tx_fail_closed();
     }
 }
 
@@ -553,10 +526,7 @@ static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
     (void)context;
     if (length > DPLS_TX_SLOT_SIZE) return false;
     if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
-        safe_normal(NULL);
-        tx_head = tx_tail = tx_count = 0;
-        tx_in_flight = false;
-        if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
+        tx_fail_closed();
         return false;
     }
     memcpy(tx_queue[tx_tail].data, frame, length);
@@ -567,10 +537,7 @@ static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
     return true;
 }
 
-void dpls_phy6252_process_tx(void)
-{
-    tx_pump();
-}
+void dpls_phy6252_process_tx(void) { tx_pump(); }
 
 void dpls_phy6252_tx_confirmed(void)
 {
@@ -578,6 +545,7 @@ void dpls_phy6252_tx_confirmed(void)
         tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
         if (tx_count) --tx_count;
         tx_in_flight = false;
+        tx_in_flight_since_ms = 0u;
     }
     tx_pump();
 }
@@ -650,15 +618,18 @@ static void classify_settings(void)
 void dpls_phy6252_init(uint8 new_task_id)
 {
     dpls_hal_t hal;
+    bool hardware_ok;
+    bool adc_ok;
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
     rx_head = rx_tail = rx_count = 0;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
+    tx_in_flight_since_ms = 0u;
     identify_led_active = false;
 
-    (void)dpls_phy6252_hw_init();
-    (void)dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
+    hardware_ok = dpls_phy6252_hw_init();
+    adc_ok = dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
 
     dpls_phy6252_hw_safe_normal();
     dpls_phy6252_hw_identify_led(false);
@@ -673,9 +644,6 @@ void dpls_phy6252_init(uint8 new_task_id)
     classify_settings();
     factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
     factory_reset_started_ms = now_ms();
-    /* Identity preparation already produced stable IRK/CSRK before this point.
-     * An uncommissioned device must not erase/rewrite those keys on every boot;
-     * explicit factory reset remains the only identity-key reset path. */
 
     memset(&hal, 0, sizeof(hal));
     hal.link_encrypted = link_encrypted;
@@ -710,6 +678,10 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal.diagnostic_error = diagnostic_error;
     hal.disconnect_after_setup = disconnect_after_setup;
     dpls_server_init(&server, &hal, now_ms());
+    if (!hardware_ok || !adc_ok) {
+        server.critical_fault = true;
+        safe_normal(NULL);
+    }
     (void)dpls_gatt_add_service(receive_frame);
 }
 
@@ -765,6 +737,7 @@ void dpls_phy6252_disconnected(void)
     rx_head = rx_tail = rx_count = 0;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
+    tx_in_flight_since_ms = 0u;
 }
 
 void dpls_phy6252_process_rx(void)
@@ -800,12 +773,20 @@ void dpls_phy6252_tick(void)
         connected_at_ms = 0;
         erase_bonds_and_drop_link();
     }
-    if (factory_reset_armed) {
-        if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
-        else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
-            factory_reset_armed = false;
-            clear_settings_and_bonds();
+
+    /* Accept a physical factory-reset hold at any time, not only if P34 happened
+     * to be high during boot. The 5 s qualification prevents noise from erasing
+     * credentials, and this reuses the existing 1 Hz tick without another wake. */
+    if (!factory_reset_armed) {
+        if (hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
+            factory_reset_armed = true;
+            factory_reset_started_ms = now;
         }
+    } else if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
+        factory_reset_armed = false;
+    } else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
+        factory_reset_armed = false;
+        clear_settings_and_bonds();
     }
 
     dpls_phy6252_adc_tick(now);
@@ -813,7 +794,7 @@ void dpls_phy6252_tick(void)
     dpls_server_tick(&server, now);
 
     if (tx_in_flight && (uint32_t)(now - tx_in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
-        dpls_phy6252_tx_confirmed();
+        tx_fail_closed();
         return;
     }
     tx_pump();
