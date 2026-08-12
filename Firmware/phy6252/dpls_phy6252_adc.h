@@ -11,6 +11,12 @@ bool dpls_phy6252_adc_init(uint8_t task_id, uint16_t process_event);
 void dpls_phy6252_adc_tick(uint32_t now_ms);
 void dpls_phy6252_adc_process(uint32_t now_ms);
 
+/* Disconnected/advertising operation samples only +1 and reserve, the two
+ * channels used by autonomous safety logic. A connected operator session
+ * enables +2/+T as well. Safety channels remain at the same 1 Hz cadence in
+ * both modes, so the power saving does not trade away protection latency. */
+void dpls_phy6252_adc_set_full_scan(bool enabled);
+
 uint16_t dpls_phy6252_adc_port1_mv(void);
 uint16_t dpls_phy6252_adc_port2_mv(void);
 uint16_t dpls_phy6252_adc_port_t_mv(void);
