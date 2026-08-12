@@ -71,6 +71,7 @@ static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
 static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
+static bool factory_reset_pending;
 static uint32_t factory_reset_started_ms;
 static uint32_t connected_at_ms;
 static bool connection_had_encryption;
@@ -496,7 +497,7 @@ static void tx_fail_closed(void)
     /* An indication is acknowledged by ATT Handle Value Confirmation only.
      * Never fabricate that acknowledgement on timeout/error: a MODE_SET may
      * already have changed real outputs. Make the hardware passive and force a
-     * reconnect so command-id idempotency can safely replay the result. */
+     * reconnect; the client can then explicitly issue a new command. */
     safe_normal(NULL);
     tx_head = tx_tail = tx_count = 0u;
     tx_in_flight = false;
@@ -570,18 +571,74 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
     return SUCCESS;
 }
 
-static void clear_settings_and_bonds(void)
+static bool clear_settings_for_factory_reset(void)
 {
+    dpls_settings_t cleared;
+    dpls_settings_t verified;
     uint8 marker = DPLS_SETTINGS_EMPTY_MARKER;
+    uint8 verified_marker = 0u;
+
+    memset(&cleared, 0, sizeof(cleared));
+    if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(cleared), &cleared) != SUCCESS ||
+        osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(verified), &verified) != SUCCESS ||
+        memcmp(&verified, &cleared, sizeof(cleared)) != 0 ||
+        osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) != SUCCESS ||
+        osal_snv_read(DPLS_SETTINGS_STATE_SNV_ID, sizeof(verified_marker), &verified_marker) != SUCCESS ||
+        verified_marker != DPLS_SETTINGS_EMPTY_MARKER ||
+        !auth_lock_write(NULL, false))
+        return false;
+
     memset(&settings, 0, sizeof(settings));
-    (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
-    (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
-    (void)auth_lock_write(NULL, false);
     settings_state = DPLS_SETTINGS_EMPTY;
-    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
-    dpls_ble_identity_reset_bonding_keys();
+    return true;
+}
+
+static bool erase_all_bonds_now(void)
+{
+    uint8 count = 0xffu;
+    if (GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL) != SUCCESS) return false;
+    if (GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &count) != SUCCESS) return false;
+    return count == 0u;
+}
+
+static bool finish_factory_reset(void)
+{
+    if (connection_handle != INVALID_CONNHANDLE) return false;
+
+    /* GAPBondMgr only performs ERASE_ALLBONDS synchronously when no connection
+     * is active. Verify each persistent layer before reboot so a partial flash
+     * failure can never be reported as a successful factory reset. */
+    if (!erase_all_bonds_now() ||
+        !dpls_ble_identity_reset_bonding_keys() ||
+        !clear_settings_for_factory_reset())
+        return false;
+
+    factory_reset_pending = false;
     dpls_phy6252_hw_identify_led(true);
     NVIC_SystemReset();
+    return true;
+}
+
+static void factory_reset_failed(void)
+{
+    factory_reset_pending = false;
+    server.critical_fault = true;
+    safe_normal(NULL);
+}
+
+static void begin_factory_reset(void)
+{
+    factory_reset_pending = true;
+    safe_normal(NULL);
+    tx_head = tx_tail = tx_count = 0u;
+    tx_in_flight = false;
+    tx_in_flight_since_ms = 0u;
+
+    if (connection_handle != INVALID_CONNHANDLE) {
+        (void)GAPRole_TerminateConnection();
+        return;
+    }
+    if (!finish_factory_reset()) factory_reset_failed();
 }
 
 static void disconnect_after_setup(void *context)
@@ -627,8 +684,11 @@ void dpls_phy6252_init(uint8 new_task_id)
     tx_in_flight = false;
     tx_in_flight_since_ms = 0u;
     identify_led_active = false;
+    factory_reset_pending = false;
 
-    hardware_ok = dpls_phy6252_hw_init();
+    /* Target startup primes safety GPIO as early as possible. Do not initialise
+     * the owner twice; consume the result of that idempotent early init here. */
+    hardware_ok = dpls_phy6252_hw_ready();
     adc_ok = dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
 
     dpls_phy6252_hw_safe_normal();
@@ -687,7 +747,7 @@ void dpls_phy6252_init(uint8 new_task_id)
 
 static void erase_stored_bonds(void)
 {
-    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+    (void)GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
 }
 
 static void erase_bonds_and_drop_link(void)
@@ -738,6 +798,9 @@ void dpls_phy6252_disconnected(void)
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
     tx_in_flight_since_ms = 0u;
+
+    if (factory_reset_pending && !finish_factory_reset())
+        factory_reset_failed();
 }
 
 void dpls_phy6252_process_rx(void)
@@ -761,6 +824,15 @@ void dpls_phy6252_tick(void)
 {
     uint32_t now = now_ms();
 
+    if (factory_reset_pending) {
+        safe_normal(NULL);
+        if (connection_handle != INVALID_CONNHANDLE)
+            (void)GAPRole_TerminateConnection();
+        else if (!finish_factory_reset())
+            factory_reset_failed();
+        return;
+    }
+
     if (connection_handle != INVALID_CONNHANDLE) {
         if (link_encrypted(NULL)) connection_had_encryption = true;
         if (server.authenticated) {
@@ -774,9 +846,9 @@ void dpls_phy6252_tick(void)
         erase_bonds_and_drop_link();
     }
 
-    /* Accept a physical factory-reset hold at any time, not only if P34 happened
-     * to be high during boot. The 5 s qualification prevents noise from erasing
-     * credentials, and this reuses the existing 1 Hz tick without another wake. */
+    /* Accept a physical factory-reset hold at any time. The 5 s qualification
+     * reuses the existing 1 Hz housekeeping tick; no reset-only wake source is
+     * added to normal operation. */
     if (!factory_reset_armed) {
         if (hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
             factory_reset_armed = true;
@@ -786,7 +858,8 @@ void dpls_phy6252_tick(void)
         factory_reset_armed = false;
     } else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
         factory_reset_armed = false;
-        clear_settings_and_bonds();
+        begin_factory_reset();
+        return;
     }
 
     dpls_phy6252_adc_tick(now);
