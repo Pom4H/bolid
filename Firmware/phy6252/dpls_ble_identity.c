@@ -158,16 +158,27 @@ static bool ensure_identity_keys(uint8_t irk[KEYLEN], uint8_t srk[KEYLEN])
     return true;
 }
 
-void dpls_ble_identity_prepare(void)
+bool dpls_ble_identity_prepare(void)
 {
     uint8_t mac[B_ADDR_LEN];
     uint8_t irk[KEYLEN];
     uint8_t srk[KEYLEN];
-    if (!ensure_mac(mac) || !ensure_identity_keys(irk, srk)) return;
+    bStatus_t irk_status;
+    bStatus_t srk_status;
+
+    s_identity_mac_valid = false;
+    memset(s_identity_mac, 0, sizeof(s_identity_mac));
+    if (!ensure_mac(mac) || !ensure_identity_keys(irk, srk)) return false;
+
+    irk_status = GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, irk);
+    srk_status = GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, srk);
+    memset(irk, 0, sizeof(irk));
+    memset(srk, 0, sizeof(srk));
+    if (irk_status != SUCCESS || srk_status != SUCCESS) return false;
+
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_mac_valid = true;
-    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, irk);
-    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, srk);
+    return true;
 }
 
 void dpls_ble_identity_on_stack_started(void)
