@@ -9,6 +9,7 @@
 #include "adc.h"
 #include "error.h"
 #include "osal_snv.h"
+#include "pwrmgr.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -19,11 +20,12 @@
 #define DPLS_ADC_CALIB_V2_VERSION 2u
 #define DPLS_ADC_HW_CALIBRATION_WORD 0x11001000u
 
-/* One complete four-channel scan is started roughly once per second. A normal
- * conversion finishes orders of magnitude faster; 500 ms is only a recovery
- * guard for a lost IRQ/vendor-driver wedge. */
+/* One complete four-channel scan starts roughly once per second. The same 1 Hz
+ * housekeeping tick also owns lost-IRQ recovery so a watchdog costs no extra
+ * wakeups. A normal conversion is orders of magnitude faster; one full tick is
+ * therefore a conservative wedge timeout, not the expected conversion time. */
 #define DPLS_ADC_PERIOD_MS 1000u
-#define DPLS_ADC_CONVERSION_TIMEOUT_MS 500u
+#define DPLS_ADC_CONVERSION_TIMEOUT_MS 1000u
 #define DPLS_ADC_WINDOW 8u
 #define DPLS_ADC_STALE_MS 3500u
 
@@ -299,6 +301,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
 
     task_id = new_task_id;
     process_event = new_process_event;
+    initialized = false;
     memset(channels, 0, sizeof(channels));
 
     channels[0].pending_bit = DPLS_ADC_NEED_PORT1;
@@ -336,7 +339,17 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     adc_raw_ready = false;
     adc_event_failed = false;
     next_cycle_ms = 0u;
+
+    /* Vendor hal_adc_init() is void and ignores the return value from
+     * hal_pwrmgr_register(MOD_ADCC). Probe the registration once at boot; a
+     * missing MOD_ADCC slot would otherwise make hal_adc_start() run while
+     * sleep is still allowed. This lock/unlock pair is init-only and adds no
+     * recurring wake or steady-state current. */
     hal_adc_init();
+    if (hal_pwrmgr_lock(MOD_ADCC) != PPlus_SUCCESS)
+        return false;
+    (void)hal_pwrmgr_unlock(MOD_ADCC);
+
     load_hw_adc_calibration();
     initialized = true;
     return true;
@@ -347,9 +360,9 @@ void dpls_phy6252_adc_tick(uint32_t now_ms)
     if (!initialized)
         return;
 
-    /* A lost ADC IRQ must not freeze all four measurements forever. Recover the
-     * vendor driver from task context, mark only this channel failed and let the
-     * remaining channels continue from the process event. */
+    /* A lost ADC IRQ must not freeze all four measurements forever. Recovery is
+     * checked by the existing 1 Hz housekeeping tick, so no watchdog-only timer
+     * wakes the MCU. */
     if (inflight_index != DPLS_ADC_INDEX_NONE && adc_busy &&
         (uint32_t)(now_ms - inflight_started_ms) >= DPLS_ADC_CONVERSION_TIMEOUT_MS) {
         (void)hal_adc_stop();
