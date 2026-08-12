@@ -104,7 +104,7 @@ static void ble_memory_init(void)
                      gattServerInfo);
 }
 
-static void rf_init(void)
+static void dpls_rf_init(void)
 {
     g_rfPhyTxPower = RF_PHY_TX_POWER_N2DBM;
     g_rfPhyPktFmt = PKT_FMT_BLE1M;
@@ -157,7 +157,7 @@ int main(void)
     }
 #endif
 
-    rf_init();
+    dpls_rf_init();
     platform_init();
     return app_main();
 }
