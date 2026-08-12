@@ -41,34 +41,30 @@ extern void hal_rom_boot_init(void);
 
 static void low_power_io_init(void)
 {
-    /* ADC inputs must be floating while the converter is off. Pulling them to
-     * ground loads the external dividers and wastes current before first sample.
-     * Active-high control/LED outputs retain a passive pull-down until the DPLS
-     * hardware owner primes their data latches and enables output retention. */
     static const ioinit_cfg_t io_init[] = {
-        {GPIO_P02, GPIO_FLOATING},  /* SWD */
-        {GPIO_P03, GPIO_FLOATING},  /* SWD */
-        {GPIO_P09, GPIO_PULL_UP},   /* optional UART TX */
-        {GPIO_P10, GPIO_PULL_UP},   /* optional UART RX */
-        {GPIO_P11, GPIO_PULL_DOWN}, /* LED green */
-        {GPIO_P14, GPIO_PULL_DOWN}, /* KZ_1 */
-        {GPIO_P15, GPIO_FLOATING},  /* +2 ADC */
-        {GPIO_P16, GPIO_FLOATING},  /* KZ_2 / XTALI */
-        {GPIO_P18, GPIO_PULL_DOWN}, /* LED blue */
-        {GPIO_P20, GPIO_FLOATING},  /* +1 ADC */
+        {GPIO_P02, GPIO_FLOATING},
+        {GPIO_P03, GPIO_FLOATING},
+        {GPIO_P09, GPIO_PULL_UP},
+        {GPIO_P10, GPIO_PULL_UP},
+        {GPIO_P11, GPIO_PULL_DOWN},
+        {GPIO_P14, GPIO_PULL_DOWN},
+        {GPIO_P15, GPIO_FLOATING},
+        {GPIO_P16, GPIO_FLOATING},
+        {GPIO_P18, GPIO_PULL_DOWN},
+        {GPIO_P20, GPIO_FLOATING},
         {GPIO_P00, GPIO_PULL_DOWN},
         {GPIO_P01, GPIO_PULL_DOWN},
-        {GPIO_P07, GPIO_PULL_DOWN}, /* LED red */
-        {GPIO_P17, GPIO_FLOATING},  /* KZ_T / XTALO */
-        {GPIO_P23, GPIO_FLOATING},  /* reserve ADC */
-        {GPIO_P24, GPIO_FLOATING},  /* +T ADC */
+        {GPIO_P07, GPIO_PULL_DOWN},
+        {GPIO_P17, GPIO_FLOATING},
+        {GPIO_P23, GPIO_FLOATING},
+        {GPIO_P24, GPIO_FLOATING},
         {GPIO_P25, GPIO_PULL_DOWN},
         {GPIO_P26, GPIO_PULL_DOWN},
         {GPIO_P27, GPIO_PULL_DOWN},
-        {GPIO_P31, GPIO_PULL_DOWN}, /* ISO_1 */
-        {GPIO_P32, GPIO_PULL_DOWN}, /* ISO_2 */
-        {GPIO_P33, GPIO_PULL_DOWN}, /* ISO_T */
-        {GPIO_P34, GPIO_PULL_DOWN}, /* factory reset */
+        {GPIO_P31, GPIO_PULL_DOWN},
+        {GPIO_P32, GPIO_PULL_DOWN},
+        {GPIO_P33, GPIO_PULL_DOWN},
+        {GPIO_P34, GPIO_PULL_DOWN},
     };
     uint8 i;
 
@@ -79,14 +75,10 @@ static void low_power_io_init(void)
     DCDC_REF_CLK_SETTING(1);
     DIG_LDO_CURRENT_SETTING(0x01);
 
-    /* Current image still uses SRAM0+SRAM1. SRAM2 was only retained for the
-     * vendor DTM demo and is deliberately excluded in production. */
-    (void)hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1);
+    /* AC6 MAP is gated so ER_IROM1, including the 1 KiB stack, must remain
+     * entirely below 0x1fff8000. */
+    (void)hal_pwrmgr_RAM_retention(RET_SRAM0);
     (void)hal_pwrmgr_RAM_retention_set();
-    /* PHY6252 SDK 3.1.2 uses this mode in its low-power peripheral examples;
-     * it lowers the retention-domain LDO current without changing application
-     * timing or the set of retained banks. Hardware current is still measured
-     * before release because our board loads differ from the SDK examples. */
     hal_pwrmgr_LowCurrentLdo_enable();
 }
 
@@ -150,7 +142,6 @@ int main(void)
     drv_irq_init();
     init_config();
 
-    /* Peripheral-only product: no observer/DTM/demo patches. */
     {
         extern void ll_patch_slave(void);
         ll_patch_slave();
