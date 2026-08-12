@@ -83,6 +83,11 @@ static void low_power_io_init(void)
      * vendor DTM demo and is deliberately excluded in production. */
     (void)hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1);
     (void)hal_pwrmgr_RAM_retention_set();
+    /* PHY6252 SDK 3.1.2 uses this mode in its low-power peripheral examples;
+     * it lowers the retention-domain LDO current without changing application
+     * timing or the set of retained banks. Hardware current is still measured
+     * before release because our board loads differ from the SDK examples. */
+    hal_pwrmgr_LowCurrentLdo_enable();
 }
 
 static void ble_memory_init(void)
