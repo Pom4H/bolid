@@ -11,6 +11,7 @@
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
+#include "dpls_board.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
@@ -115,6 +116,24 @@ static void disable_32k_xtal(void)
     subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00);
 }
 
+/* GPIO_OUTPUT only flips the DDR bit in this SDK; it does not pre-load the data
+ * latch. If a retained/warm-boot latch contains 1, enabling an active-high mode
+ * output before the later safe-normal write exposes a short pulse on the pin.
+ * Prime every active-high control/LED latch low first. hal_gpio_write() updates
+ * the latch before it enables output direction, so no unsafe level is exposed. */
+static void prime_safe_gpio_outputs(void)
+{
+    hal_gpio_write(DPLS_PIN_ISO_1, 0);
+    hal_gpio_write(DPLS_PIN_ISO_2, 0);
+    hal_gpio_write(DPLS_PIN_ISO_T, 0);
+    hal_gpio_write(DPLS_PIN_KZ_1, 0);
+    hal_gpio_write(DPLS_PIN_KZ_2, 0);
+    hal_gpio_write(DPLS_PIN_KZ_T, 0);
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
+}
+
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
 static gapBondCBs_t bond_callbacks = { NULL, bond_pair_state_cb };
 
@@ -144,11 +163,18 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     app_task_id = task_id;
     /* hal_init() has already run by now, so undo its 32k-crystal bias here and
      * re-assert it on every wake — the AON domain survives sleep, but the ROM
-     * wake path reprograms the 32 kHz source, so do not assume it stays off.
-     * MOD_USR2, not MOD_USR1: registering USR1 would turn the deliberate no-op
-     * hal_pwrmgr_lock(MOD_USR1) in dpls_phy6252_app.c into a real sleep lock. */
+     * wake path reprograms the 32 kHz source, so do not assume it stays off. */
     disable_32k_xtal();
+    prime_safe_gpio_outputs();
     (void)hal_pwrmgr_register(MOD_USR2, NULL, disable_32k_xtal);
+    /* dpls_phy6252_connected() already locks MOD_USR1 for the lifetime of an
+     * active BLE connection. It used to be deliberately left unregistered,
+     * making that lock a no-op and re-introducing the known ADC/radio/sleep race
+     * (OSAL freeze / watchdog / GATT loss). Registering it here keeps advertising
+     * low-power but prevents sleep only while the operator is connected. It also
+     * prevents the ROM wake path from briefly re-biasing P16/P17 as 32 kHz XTAL
+     * pins in the middle of an active control session. */
+    (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
     /* The pristine SDK 3.1.2 main.c retains only SRAM0 (0x1fff0000-0x1fff7fff)
      * across sleep, but our scatter places the ER_IROM1 tail past 0x1fff8000
      * (SRAM1) and ER_IROM2 at 0x1fffc000 (SRAM2). With those banks unpowered
