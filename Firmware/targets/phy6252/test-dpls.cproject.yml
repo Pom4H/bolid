@@ -16,11 +16,7 @@ project:
         - ../../sdk/PHY62XX_SDK_3.1.2/components/ble/include
         - ../../sdk/PHY62XX_SDK_3.1.2/components/ble/hci
         - ../../sdk/PHY62XX_SDK_3.1.2/components/ble/host
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/ota_app
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/DevInfo
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/SimpleProfile
         - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/Roles
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/crc16
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/watchdog
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/clock
         - ../../sdk/PHY62XX_SDK_3.1.2/components/arch/cm0
@@ -32,11 +28,8 @@ project:
         - ../../sdk/PHY62XX_SDK_3.1.2/misc
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/log
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/cliface
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/key
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/pwm
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/flash
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/fs
-        - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/led_light
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/include
         - ../../include
         - ../../phy6252
@@ -124,12 +117,9 @@ project:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/watchdog/watchdog.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/pwrmgr/pwrmgr.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/log/my_printf.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/key/key.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/pwm/pwm.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/osal/snv/osal_snv.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/fs/fs.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/flash/flash.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/led_light/led_light.c
 
     - group: profile
       files:
