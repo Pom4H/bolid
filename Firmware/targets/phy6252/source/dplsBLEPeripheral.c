@@ -24,6 +24,7 @@
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
+static bool identity_ready;
 
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
@@ -77,8 +78,9 @@ static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED: {
-        uint8 enabled = TRUE;
-        dpls_ble_identity_on_stack_started();
+        uint8 enabled = identity_ready ? TRUE : FALSE;
+        if (identity_ready)
+            dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         break;
@@ -91,7 +93,7 @@ static void state_changed(gaprole_States_t state)
     }
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
-        uint8 enabled = TRUE;
+        uint8 enabled = identity_ready ? TRUE : FALSE;
         dpls_phy6252_disconnected();
         schedule_led_if_needed(); /* turn an interrupted identify off immediately */
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
@@ -146,8 +148,9 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
 
-    dpls_ble_identity_prepare();
-    apply_identity_to_adv();
+    identity_ready = dpls_ble_identity_prepare();
+    if (identity_ready)
+        apply_identity_to_adv();
     (void)LL_EXT_SetSCA(500);
     GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, 2);
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
@@ -178,6 +181,9 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     dpls_phy6252_init(app_task_id);
     ATT_SetMTUSizeMax(MTU_SIZE);
     llInitFeatureSetDLE(TRUE);
+    /* Start the stack even when identity preparation failed so the local OSAL
+     * housekeeping/factory-reset path remains alive. GAPROLE_STARTED keeps
+     * advertising disabled until a valid identity exists on a later reboot. */
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
 }
 
@@ -211,8 +217,6 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
-        /* IDENTIFY starts/stops only through protocol RX, so this is the point
-         * where an otherwise dormant LED state machine is armed. */
         schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
