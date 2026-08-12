@@ -76,13 +76,6 @@ static void connection_cb(uint16 conn, uint8 change) {
     }
 }
 
-bool dpls_gatt_subscribed(void) {
-    uint8 i;
-    for (i = 0; i < GATT_MAX_NUM_CONN; ++i)
-        if (tx_cccd[i].connHandle != INVALID_CONNHANDLE && tx_cccd[i].value != GATT_CFG_NO_OPERATION) return true;
-    return false;
-}
-
 bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     attHandleValueInd_t ind;
     /* Gate on the CCCD and the NEGOTIATED MTU (not the compile-time maximum), so
