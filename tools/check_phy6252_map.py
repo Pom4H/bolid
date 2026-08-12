@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Fail if the PHY6252 retained image grows outside SRAM0.
+"""Validate the PHY6252 production linker map.
 
-The production target intentionally retains only RET_SRAM0 (32 KiB,
+The target intentionally retains only RET_SRAM0 (32 KiB,
 0x1fff0000..0x1fff7fff). ER_IROM1 starts after the ROM jump/config area at
 0x1fff1838 and includes all retained RO/RW/ZI plus the stack. A successful link
 is therefore not enough: any ER_IROM1 end >= 0x1fff8000 would compile but lose
 live state on the next sleep/wake cycle.
+
+ADC raw-to-mV conversion is intentionally fixed-point. Cortex-M0 software float
+used to add ~1.4 KiB of live code and unnecessary CPU work four times per
+second, so the map must not contain a live mf_p.l contribution either.
 """
 from __future__ import annotations
 
@@ -16,6 +20,19 @@ from pathlib import Path
 EXPECTED_BASE = 0x1FFF1838
 SRAM0_END_EXCLUSIVE = 0x1FFF8000
 MIN_HEADROOM = 0x80  # keep at least 128 bytes against harmless linker drift
+FORBIDDEN_LIVE_LIBRARIES = ("mf_p.l",)
+
+
+def live_library_code_bytes(text: str, library: str) -> int:
+    # Arm linker "Library Name" summary rows are six integer columns followed by
+    # the archive name. Removed members may still occur elsewhere in --info
+    # output, so a plain substring search would produce false positives.
+    match = re.search(
+        rf"^\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+{re.escape(library)}\s*$",
+        text,
+        re.MULTILINE,
+    )
+    return int(match.group(1)) if match else 0
 
 
 def main() -> None:
@@ -51,9 +68,18 @@ def main() -> None:
             f"{headroom} bytes < {MIN_HEADROOM} bytes"
         )
 
+    for library in FORBIDDEN_LIVE_LIBRARIES:
+        live_code = live_library_code_bytes(text, library)
+        if live_code:
+            raise SystemExit(
+                "PHY6252 MAP gate: software floating-point returned to the live image: "
+                f"{library} contributes {live_code} code bytes"
+            )
+
     print(
         "PHY6252 retained MAP OK: "
-        f"ER_IROM1=0x{base:08x}..0x{end - 1:08x}, headroom={headroom} B"
+        f"ER_IROM1=0x{base:08x}..0x{end - 1:08x}, headroom={headroom} B; "
+        "software-float=0 B"
     )
 
 
