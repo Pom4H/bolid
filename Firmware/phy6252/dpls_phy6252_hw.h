@@ -9,12 +9,15 @@
  *   - glitch-free output initialisation;
  *   - GPIO retention through sleep;
  *   - the P16/P17 32 kHz XTAL-pad workaround;
- *   - the connection-scoped sleep lock used to keep ADC/radio clock changes
- *     from racing an active BLE link;
+ *   - a safety sleep guard while any active-high power-stage mode is asserted;
  *   - break-before-make mode switching and the RGB identify LED.
  *
- * The module is intentionally idempotent: the target layer calls init as early
- * as possible after hal_init(), and dpls_phy6252_app calls it again defensively.
+ * Normal BLE operation is intentionally allowed to sleep. The ADC driver owns
+ * its own MOD_ADCC lock for the short conversion window; keeping MOD_USR1 locked
+ * for an entire connection would defeat the PHY6252 low-power design.
+ *
+ * The module is idempotent: the target layer calls init as early as possible
+ * and dpls_phy6252_app calls it again defensively.
  */
 bool dpls_phy6252_hw_init(void);
 bool dpls_phy6252_hw_ready(void);
@@ -25,9 +28,9 @@ dpls_mode_t dpls_phy6252_hw_mode(void);
 
 void dpls_phy6252_hw_identify_led(bool on);
 
-/* Sleep is allowed while advertising/disconnected and locked only for the
- * lifetime of an active BLE connection. Failure is fail-safe: outputs are
- * returned to Norma and false is returned to the application. */
+/* Historical API names retained to avoid coupling the app to the power-policy
+ * implementation. Connection start/end now validate/reset hardware state but
+ * do not keep the MCU awake for an otherwise idle BLE session. */
 bool dpls_phy6252_hw_connection_lock(void);
 bool dpls_phy6252_hw_connection_unlock(void);
 
