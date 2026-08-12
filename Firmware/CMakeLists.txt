@@ -6,6 +6,7 @@ add_library(test_dpls_server
     src/dpls_server.c
     src/dpls_led.c
     src/dpls_calib.c
+    src/dpls_adc_math.c
 )
 target_include_directories(test_dpls_server PUBLIC include)
 target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
@@ -23,9 +24,13 @@ target_link_libraries(test_calib PRIVATE test_dpls_server)
 target_compile_options(test_calib PRIVATE -Wall -Wextra -Werror)
 add_executable(test_adc_irq_model tests/test_adc_irq_model.c)
 target_compile_options(test_adc_irq_model PRIVATE -Wall -Wextra -Werror)
+add_executable(test_adc_math tests/test_adc_math.c)
+target_link_libraries(test_adc_math PRIVATE test_dpls_server)
+target_compile_options(test_adc_math PRIVATE -Wall -Wextra -Werror)
 enable_testing()
 add_test(NAME server COMMAND test_dpls_server_tests)
 add_test(NAME log_journal COMMAND test_log_journal)
 add_test(NAME led COMMAND test_led)
 add_test(NAME calib COMMAND test_calib)
 add_test(NAME adc_irq_model COMMAND test_adc_irq_model)
+add_test(NAME adc_math COMMAND test_adc_math)
