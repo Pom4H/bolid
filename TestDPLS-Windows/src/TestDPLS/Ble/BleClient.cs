@@ -290,39 +290,16 @@ public sealed class BleClient : IDplsTransport, IDisposable
 
     /// <summary>
     /// Windows rejects combined Notify|Indicate enum values ("parameter is incorrect").
-    /// Enable Indicate and/or Notify according to characteristic properties, with raw CCCD fallback.
+    /// Enable Indicate (required for journal) and/or Notify via the WinRT API first,
+    /// then raw CCCD bytes. Do not lead with raw 0x0003 — it can fail the whole
+    /// subscribe path on some Windows stacks.
     /// </summary>
     private static async Task<bool> EnableTxNotificationsAsync(GattCharacteristic tx)
     {
-        // Prefer Android-compatible CCCD 0x0003 (Notify|Indicate) via raw descriptor first:
-        // journal chunks are indications; other traffic may use notifications.
-        foreach (var payload in new byte[][]
-                 {
-                     [0x03, 0x00],
-                     [0x02, 0x00],
-                     [0x01, 0x00],
-                 })
-        {
-            try
-            {
-                var descriptors = await tx.GetDescriptorsForUuidAsync(
-                    GattDescriptorUuids.ClientCharacteristicConfiguration,
-                    BluetoothCacheMode.Uncached);
-                if (descriptors.Status != GattCommunicationStatus.Success || descriptors.Descriptors.Count == 0)
-                    continue;
-                var status = await descriptors.Descriptors[0].WriteValueAsync(payload.AsBuffer());
-                if (status == GattCommunicationStatus.Success)
-                    return true;
-            }
-            catch
-            {
-                // try next payload
-            }
-        }
-
         var props = tx.CharacteristicProperties;
         var tried = new List<GattClientCharacteristicConfigurationDescriptorValue>();
 
+        // Journal LOG_CHUNK uses indications — try Indicate before Notify.
         if (props.HasFlag(GattCharacteristicProperties.Indicate))
             tried.Add(GattClientCharacteristicConfigurationDescriptorValue.Indicate);
         if (props.HasFlag(GattCharacteristicProperties.Notify))
@@ -341,19 +318,54 @@ public sealed class BleClient : IDplsTransport, IDisposable
             {
                 var status = await tx.WriteClientCharacteristicConfigurationDescriptorAsync(value);
                 if (status == GattCommunicationStatus.Success)
+                {
+                    // Best-effort: also enable both via raw CCCD like Android (0x0003).
+                    // Ignore failure — Indicate alone is enough for identify + journal.
+                    _ = await TryWriteRawCccdAsync(tx, [0x03, 0x00]);
                     return true;
+                }
             }
             catch (ArgumentException)
             {
-                // Invalid enum for this stack — try next.
+                // Invalid enum for this stack — try next / raw descriptor.
             }
             catch (Exception)
             {
-                // Continue.
+                // Continue to fallbacks.
             }
         }
 
+        // Raw CCCD write: 0x0002=indicate, 0x0001=notify, 0x0003=both (LE).
+        foreach (var payload in new byte[][]
+                 {
+                     [0x02, 0x00],
+                     [0x01, 0x00],
+                     [0x03, 0x00],
+                 })
+        {
+            if (await TryWriteRawCccdAsync(tx, payload))
+                return true;
+        }
+
         return false;
+    }
+
+    private static async Task<bool> TryWriteRawCccdAsync(GattCharacteristic tx, byte[] payload)
+    {
+        try
+        {
+            var descriptors = await tx.GetDescriptorsForUuidAsync(
+                GattDescriptorUuids.ClientCharacteristicConfiguration,
+                BluetoothCacheMode.Uncached);
+            if (descriptors.Status != GattCommunicationStatus.Success || descriptors.Descriptors.Count == 0)
+                return false;
+            var status = await descriptors.Descriptors[0].WriteValueAsync(payload.AsBuffer());
+            return status == GattCommunicationStatus.Success;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <returns>True when a new pairing was completed.</returns>
