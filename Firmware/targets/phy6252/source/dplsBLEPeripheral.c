@@ -16,16 +16,11 @@
 #include "pwrmgr.h"
 #include "fs.h"
 
-/* 1.25 ms units. The operator protocol updates at 1 Hz, so 80..120 ms with
- * slave latency 4 preserves sub-second command response without waking for the
- * vendor demo's 30 ms connection cadence when no packet is pending. */
 #define DEFAULT_MIN_CONN_INTERVAL 64
 #define DEFAULT_MAX_CONN_INTERVAL 96
 #define DEFAULT_SLAVE_LATENCY 4
 #define DEFAULT_CONN_TIMEOUT 3000
 #define DPLS_TICK_MS 1000u
-/* 0.625 ms units: 500 ms advertising cuts idle radio events by 2.5x versus the
- * previous 200 ms interval while keeping interactive discovery responsive. */
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
@@ -136,15 +131,10 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-
-    /* First board-owned operation after platform_init(): preload every control
-     * latch to zero, register GPIO retention and install the P16/P17 RC32K wake
-     * workaround. */
     (void)dpls_phy6252_hw_init();
 
-    /* Production startup removed the vendor DTM SRAM2 image. Only SRAM0+SRAM1
-     * contain retained execution/data state now. */
-    (void)hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1);
+    /* ER_IROM1 is MAP-gated below the 0x1fff8000 SRAM0 boundary. */
+    (void)hal_pwrmgr_RAM_retention(RET_SRAM0);
     (void)hal_pwrmgr_RAM_retention_set();
 
     if (!hal_fs_initialized())
