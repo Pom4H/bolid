@@ -111,14 +111,11 @@ project:
 
     - group: driver
       files:
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/uart/uart.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/clock/clock.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/gpio/gpio.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/adc/adc.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/timer/timer.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/watchdog/watchdog.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/pwrmgr/pwrmgr.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/log/my_printf.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/osal/snv/osal_snv.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/fs/fs.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/flash/flash.c
