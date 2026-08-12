@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail the build when the PHY6252 electrical contract drifts."""
+"""Fail the build when the PHY6252 electrical/power contract drifts."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ HW = ROOT / "Firmware/phy6252/dpls_phy6252_hw.c"
 ADC = ROOT / "Firmware/phy6252/dpls_phy6252_adc.c"
 APP = ROOT / "Firmware/phy6252/dpls_phy6252_app.c"
 TARGET = ROOT / "Firmware/targets/phy6252/source/dplsBLEPeripheral.c"
+MAIN = ROOT / "Firmware/targets/phy6252/source/dpls_main.c"
 CPROJECT = ROOT / "Firmware/targets/phy6252/test-dpls.cproject.yml"
 SCATTER = ROOT / "Firmware/targets/phy6252/scatter_load.sct"
 CHECKLIST = ROOT / "docs/bring-up-checklist.md"
@@ -94,12 +95,24 @@ def mode_block(hw: str, mode: str) -> str:
     return match.group(1)
 
 
+def function_block(text: str, name: str) -> str:
+    match = re.search(
+        rf"\b{name}\s*\([^)]*\)\s*\{{(.*?)\n\}}",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        fail(f"function {name} missing")
+    return match.group(1)
+
+
 def main() -> None:
     board = read(BOARD)
     hw = read(HW)
     adc = read(ADC)
     app = read(APP)
     target = read(TARGET)
+    startup = read(MAIN)
     cproject = read(CPROJECT)
     scatter = read(SCATTER)
     checklist = read(CHECKLIST)
@@ -123,14 +136,19 @@ def main() -> None:
     if resolve_pin("DPLS_PIN_LINE_ADC", defs) != EXPECTED["DPLS_PIN_PORT1_ADC"]:
         fail("DPLS_PIN_LINE_ADC must remain an alias of DPLS_PIN_PORT1_ADC")
 
-    # Digital hardware has exactly one owner and a real checked sleep lock.
+    # Digital hardware has one owner. MOD_USR1 remains a real safety guard, but
+    # it is deliberately NOT held for an idle/normal BLE connection.
     require(hw, "hal_pwrmgr_register(MOD_USR1, NULL, disable_32k_xtal)", HW)
+    require(hw, "control_sleep_guard_acquire", HW)
     require(hw, "hal_pwrmgr_lock(MOD_USR1)", HW)
     require(hw, "hal_pwrmgr_unlock(MOD_USR1)", HW)
     require(hw, "prime_all_outputs_low", HW)
     require(hw, "register_output_retention", HW)
     require(hw, "subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00)", HW)
     forbid(hw, "hal_pwrmgr_register(MOD_USR2", HW)
+    connection_start = function_block(hw, "dpls_phy6252_hw_connection_lock")
+    if "hal_pwrmgr_lock(" in connection_start:
+        fail("normal BLE connection must not hold MOD_USR1 for its whole lifetime")
     for symbol in (
         "DPLS_PIN_ISO_1", "DPLS_PIN_ISO_2", "DPLS_PIN_ISO_T",
         "DPLS_PIN_KZ_1", "DPLS_PIN_KZ_2", "DPLS_PIN_KZ_T",
@@ -183,6 +201,18 @@ def main() -> None:
         "disable_32k_xtal", "prime_safe_gpio_outputs",
     ):
         forbid(target, forbidden, TARGET)
+
+    # Production power contract: only SRAM0 is retained, and the chip's
+    # low-current retention LDO path is compiled in. The MAP gate checks the
+    # runtime consequence after every AC6 link.
+    require(startup, "hal_pwrmgr_RAM_retention(RET_SRAM0)", MAIN)
+    require(startup, "hal_pwrmgr_LowCurrentLdo_enable()", MAIN)
+    forbid(startup, "RET_SRAM1", MAIN)
+    forbid(startup, "RET_SRAM2", MAIN)
+    require(target, "hal_pwrmgr_RAM_retention(RET_SRAM0)", TARGET)
+    forbid(target, "RET_SRAM1", TARGET)
+    forbid(target, "RET_SRAM2", TARGET)
+    require(cproject, "CFG_SRAM_RETENTION_LOW_CURRENT_LDO_ENABLE", CPROJECT)
 
     require(cproject, "../../phy6252/dpls_phy6252_hw.c", CPROJECT)
     require(cproject, "../../phy6252/dpls_phy6252_adc.c", CPROJECT)
