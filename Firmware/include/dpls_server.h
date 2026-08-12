@@ -26,7 +26,8 @@ enum {
 #define DPLS_EVENT_CAPACITY 200u
 #endif
 /* Events packed into one LOG_CHUNK indication. 15 × 10 B + 3 B header = 153 B,
- * well within a 247-MTU payload; a 200-record journal exports in ~14 chunks. */
+ * within the product's negotiated ATT payload; a 200-record journal exports in
+ * roughly 14 chunks. */
 #define DPLS_LOG_CHUNK_EVENTS 15u
 #define DPLS_MODE_MAX_MS 300000u
 #define DPLS_SESSION_TIMEOUT_MS 10000u
@@ -38,11 +39,9 @@ enum {
 #define DPLS_AUTH_MIN_INTERVAL_MS 1000u
 /* Commissioning window: SETUP of an uninitialised device is only accepted for
  * this long after power-on. After it closes, a power-cycle or factory reset
- * (both physical actions) re-opens it. Tighten for production; kept generous so
- * a normal commissioning flow — and the E2E — completes inside it. */
+ * (both physical actions) re-opens it. */
 #define DPLS_SETUP_WINDOW_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
-#define DPLS_IDENTIFY_BLINK_MS 500u
 
 typedef enum {
     DPLS_MODE_NORMAL = 0,
@@ -70,11 +69,13 @@ enum {
 };
 #define DPLS_STATE_PORT_1_VALID DPLS_STATE_LINE_VOLTAGE_VALID
 #define DPLS_STATE_RESERVE_VOLTAGE_VALID DPLS_STATE_RESERVE_VALID
+
 typedef enum {
     DPLS_SETTINGS_EMPTY = 0,
     DPLS_SETTINGS_VALID = 1,
     DPLS_SETTINGS_CORRUPT = 2,
 } dpls_settings_state_t;
+
 typedef enum {
     DPLS_RETURN_OPERATOR = 0,
     DPLS_RETURN_MODE_TIMEOUT = 1,
@@ -135,28 +136,22 @@ typedef struct {
      * Empty string if the device is not commissioned. */
     void (*settings_name)(void *context, char out[DPLS_NAME_MAX + 1u]);
     /* Read-modify-write of just the name / just the password (salt+verifier) in
-     * the persisted settings record, with a read-back verify. Return false on
-     * any NV failure. Optional (NULL disables NAME_SET / PASSWORD_SET). */
+     * the persisted settings record, with a read-back verify. */
     bool (*settings_set_name)(void *context, const char *name);
     bool (*settings_set_password)(void *context, const uint8_t salt[16], const uint8_t verifier[32]);
-    /* Fill stable identity and capability facts for DEVICE_INFO_REPORT. */
     void (*device_info)(void *context, dpls_device_info_t *out);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
-    /* Optional persistent brute-force lock. auth_lock_read reports whether the
-     * device booted while locked; auth_lock_write persists (true) or clears
-     * (false) the marker and returns false if the NV write failed (the lock
-     * would then not survive a reboot — reported as a diagnostic fault). NULL
-     * on both keeps the lock RAM-only (cleared by a reboot). Cleared by factory
-     * reset alongside the password. */
+    /* Optional persistent brute-force lock. */
     bool (*auth_lock_read)(void *context);
     bool (*auth_lock_write)(void *context, bool locked);
-    /* Journal storage is persistent and sequence-addressed. The server keeps
-     * only metadata and streams one record at a time during BLE export. */
+    /* Journal storage is persistent and sequence-addressed. */
     bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
     bool (*event_storage_append)(void *context, const dpls_event_t *event);
     bool (*event_storage_read)(void *context, uint32_t sequence, dpls_event_t *event);
+    /* All server responses use ATT indications. The core never had a live
+     * notification path, so keeping a second transport callback only retained
+     * dead state and made CCCD semantics ambiguous. */
     bool (*tx_indicate)(void *context, const uint8_t *frame, size_t length);
-    bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
     void *context;
     void (*diagnostic_error)(void *context, bool critical);
     void (*disconnect_after_setup)(void *context);
@@ -176,10 +171,10 @@ typedef struct {
     bool connected;
     bool authenticated;
     bool identify_active;
-    bool identify_led_on;
     bool hello_received;
     bool critical_fault;
     bool power_state_known;
+    bool reserve_state_known;
     dpls_power_t last_power_source;
     bool last_reserve_low;
     bool real_short;
@@ -192,7 +187,6 @@ typedef struct {
     uint32_t last_authenticated_activity_ms;
     uint32_t mode_deadline_ms;
     uint32_t identify_deadline_ms;
-    uint32_t identify_blink_last_ms;
     uint32_t setup_disconnect_deadline_ms;
     uint32_t state_revision;
     uint16_t tx_sequence;
@@ -202,9 +196,7 @@ typedef struct {
     dpls_mode_t mode;
     dpls_cached_command_t command_cache[DPLS_COMMAND_CACHE_SIZE];
     uint8_t command_cache_cursor;
-    /* Outgoing frames used to be allocated on the 1 KiB Cortex-M0 stack.
-     * A journal response then nested this buffer with the decoded request and
-     * the SDK ATT indication buffer, overflowing into events[]. */
+    /* Outgoing frames used to be allocated on the 1 KiB Cortex-M0 stack. */
     uint8_t tx_encoded[DPLS_MAX_FRAME];
     uint16_t event_count;
     uint32_t next_event_sequence;
