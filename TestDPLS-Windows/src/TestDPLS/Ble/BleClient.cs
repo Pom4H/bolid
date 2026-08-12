@@ -35,6 +35,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private bool _writeInProgress;
     private bool _disposed;
     private bool _connectInProgress;
+    private bool _disconnectDuringConnect;
     private TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs>? _pairingHandler;
 
     public BleClient()
@@ -149,6 +150,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private async Task ConnectInternalAsync(string address)
     {
         _connectInProgress = true;
+        _disconnectDuringConnect = false;
         try
         {
             var btAddress = ParseAddress(address);
@@ -266,7 +268,16 @@ public sealed class BleClient : IDplsTransport, IDisposable
             _tx.ValueChanged += OnTxValueChanged;
             if (!await EnableTxNotificationsAsync(_tx))
             {
-                _session.Fail("Подписка на BLE-события не удалась");
+                _session.Fail(
+                    "Подписка на BLE-события не удалась.\n" +
+                    "Удалите устройство в параметрах Bluetooth Windows и повторите.");
+                return;
+            }
+
+            if (_disconnectDuringConnect ||
+                device.ConnectionStatus != BluetoothConnectionStatus.Connected)
+            {
+                FailIdentifyOrConnect("Связь оборвалась до запуска протокола.");
                 return;
             }
 
@@ -285,14 +296,30 @@ public sealed class BleClient : IDplsTransport, IDisposable
         finally
         {
             _connectInProgress = false;
+            // Disconnect during connect was suppressed; surface it now if still down.
+            if (_disconnectDuringConnect &&
+                _selectedAddress != null &&
+                !_session.ReachedReady &&
+                (_device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected))
+            {
+                FailIdentifyOrConnect("Связь оборвалась во время подключения.");
+            }
         }
+    }
+
+    private void FailIdentifyOrConnect(string detail)
+    {
+        if (Ui.IdentifyActive)
+            _session.OnIdentifyLinkLost(detail);
+        else
+            _session.Fail(detail + "\nПовторите подключение.");
     }
 
     /// <summary>
     /// Windows rejects combined Notify|Indicate enum values ("parameter is incorrect").
-    /// Enable Indicate (required for journal) and/or Notify via the WinRT API first,
-    /// then raw CCCD bytes. Do not lead with raw 0x0003 — it can fail the whole
-    /// subscribe path on some Windows stacks.
+    /// Enable Indicate (required for journal) or Notify via the WinRT API first.
+    /// Do not write raw CCCD 0x0003 after a successful Indicate — that churn can drop
+    /// the link on some Windows stacks and leave Identify claiming a live LED falsely.
     /// </summary>
     private static async Task<bool> EnableTxNotificationsAsync(GattCharacteristic tx)
     {
@@ -318,12 +345,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
             {
                 var status = await tx.WriteClientCharacteristicConfigurationDescriptorAsync(value);
                 if (status == GattCommunicationStatus.Success)
-                {
-                    // Best-effort: also enable both via raw CCCD like Android (0x0003).
-                    // Ignore failure — Indicate alone is enough for identify + journal.
-                    _ = await TryWriteRawCccdAsync(tx, [0x03, 0x00]);
                     return true;
-                }
             }
             catch (ArgumentException)
             {
@@ -335,12 +357,11 @@ public sealed class BleClient : IDplsTransport, IDisposable
             }
         }
 
-        // Raw CCCD write: 0x0002=indicate, 0x0001=notify, 0x0003=both (LE).
+        // Raw CCCD write only when WinRT CCCD API failed: 0x0002=indicate, 0x0001=notify.
         foreach (var payload in new byte[][]
                  {
                      [0x02, 0x00],
                      [0x01, 0x00],
-                     [0x03, 0x00],
                  })
         {
             if (await TryWriteRawCccdAsync(tx, payload))
@@ -506,8 +527,23 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Post(() =>
             {
                 if (_selectedAddress == null) return;
-                // Ignore disconnect flaps while the initial connect/pair/discover is running.
-                if (_connectInProgress) return;
+                // Ignore disconnect flaps while the initial connect/pair/discover is running,
+                // but remember them — finally-block checks the link before claiming success.
+                if (_connectInProgress)
+                {
+                    _disconnectDuringConnect = true;
+                    return;
+                }
+
+                // Identify runs before READY: never keep "LED blinking" after the link drops.
+                // Firmware stops identify on disconnect; journal shows no EVT_IDENTIFY_START
+                // when the write never took effect.
+                if (Ui.IdentifyActive && !_session.ReachedReady)
+                {
+                    FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
+                    return;
+                }
+
                 // Before READY, do not auto-reconnect — show error and wait for user retry.
                 if (!_session.ReachedReady) return;
                 _session.NotifyUnlinked(scheduleReconnectHint: true);
@@ -588,7 +624,15 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     _session.Fail($"Ошибка передачи BLE: {status}");
                     return;
                 }
-                _session.OnWriteCompleted(true);
+                // Only treat Identify as live when the ATT write succeeded AND the link is up.
+                // Windows can report write Success while the peripheral already dropped.
+                var stillUp = _device?.ConnectionStatus == BluetoothConnectionStatus.Connected;
+                _session.OnWriteCompleted(ok && stillUp);
+                if (ok && !stillUp && Ui.IdentifyActive && !_session.ReachedReady)
+                {
+                    FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
+                    return;
+                }
                 _ = DrainWriteQueueAsync();
             });
         }

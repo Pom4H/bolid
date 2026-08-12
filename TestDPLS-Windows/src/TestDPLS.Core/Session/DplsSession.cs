@@ -143,6 +143,22 @@ public sealed class DplsSession
     }
 
     /// <summary>
+    /// Link dropped during identify before the device could keep the 1 Hz LED scene.
+    /// Clears the optimistic "LED live" UI and surfaces a retryable error.
+    /// </summary>
+    public void OnIdentifyLinkLost(string? detail = null)
+    {
+        if (!Ui.IdentifyActive) return;
+        _pendingIdentifyAck = false;
+        Ui.IdentifyLedLive = false;
+        IsLinked = false;
+        _transport.ResetQueue();
+        Fail(detail is { Length: > 0 }
+            ? detail + "\nИндикация не запущена — нажмите «Повторить сопряжение»."
+            : "Связь оборвалась до запуска индикации.\nНажмите «Повторить сопряжение».");
+    }
+
+    /// <summary>
     /// BLE write failed while a journal transfer is active. Prefer re-ACK over
     /// tearing down the link — lost LOG_CHUNK indications are recovered the same way.
     /// </summary>
@@ -687,6 +703,18 @@ public sealed class DplsSession
                     RaiseUi();
                     return;
                 }
+                // Identify requires an encrypted link; code 2 here usually means
+                // bond/encryption never completed — not a blinking LED.
+                if (Ui.IdentifyActive && !_reachedReady)
+                {
+                    _pendingIdentifyAck = false;
+                    Ui.IdentifyLedLive = false;
+                    Fail(code == 2
+                        ? "Устройство отклонило Identify: нет шифрования BLE.\n" +
+                          "Удалите устройство в параметрах Bluetooth Windows и нажмите «Повторить сопряжение»."
+                        : DeviceErrorReason(code));
+                    return;
+                }
                 Fail(DeviceErrorReason(code));
                 break;
         }
@@ -1222,6 +1250,8 @@ public sealed class DplsSession
         _logAckCts?.Cancel();
         _logStallCts?.Cancel();
         _logInfoReceived = false;
+        if (Ui.IdentifyActive)
+            Ui.IdentifyLedLive = false;
         Ui.Phase = ConnectionPhase.Error;
         Ui.StatusText = message;
         Ui.Error = message;
