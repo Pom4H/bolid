@@ -122,9 +122,10 @@ public sealed class BleClient : IDplsTransport, IDisposable
     public void UpdateSetupRepeatPassword(string v) => _session.UpdateSetupRepeatPassword(v);
     public void Authenticate(string password)
     {
-        // After a pre-auth drop the UI stays on the login screen; Connect must
-        // rebuild the encrypted link + Hello before AUTH_PROOF can succeed.
-        if (!_session.IsLinked && _selectedAddress != null)
+        // After Identify the Windows link is often half-dead by the time the
+        // operator finishes typing the password. Always rebuild
+        // Connect→Pair→Hello→Challenge, then send AUTH_PROOF on the fresh challenge.
+        if (_selectedAddress != null && !Ui.Authenticated)
         {
             _session.StashPasswordForReconnect(password);
             _ = ReconnectForLoginAsync(_selectedAddress);

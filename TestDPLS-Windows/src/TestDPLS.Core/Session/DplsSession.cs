@@ -1233,10 +1233,14 @@ public sealed class DplsSession
                 {
                     if (job != _authJobId || Ui.Authenticated) return;
                     _pendingAuthProof = null;
+                    // Challenge/session are unusable after a silent timeout — force
+                    // the next «Подключиться» through a full reconnect.
+                    IsLinked = false;
+                    _transport.ResetQueue();
                     Ui.AwaitingUserPassword = true;
-                    Fail(IsLinked
-                        ? "Устройство не ответило на вход.\nПроверьте пароль и связь, затем повторите."
-                        : "Связь оборвалась во время входа.\nВведите пароль снова — будет переподключение.");
+                    Ui.CredentialsReady = true;
+                    Fail("Устройство не ответило на вход.\n" +
+                         "Введите пароль снова — будет новое подключение.");
                 });
             }
             catch (OperationCanceledException) { }
@@ -1494,6 +1498,7 @@ public sealed class DplsSession
         _logAckCts?.Cancel();
         _logStallCts?.Cancel();
         CancelAuthTimeout();
+        _pendingAuthProof = null;
         _logInfoReceived = false;
         if (Ui.IdentifyActive)
             Ui.IdentifyLedLive = false;
