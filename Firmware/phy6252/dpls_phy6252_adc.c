@@ -26,7 +26,6 @@
  * therefore a conservative wedge timeout, not the expected conversion time. */
 #define DPLS_ADC_PERIOD_MS 1000u
 #define DPLS_ADC_CONVERSION_TIMEOUT_MS 1000u
-#define DPLS_ADC_WINDOW 8u
 #define DPLS_ADC_STALE_MS 3500u
 
 #define DPLS_ADC_NEED_PORT1 0x01u
@@ -83,9 +82,6 @@ typedef struct {
     adc_CH_t result_channel;
     uint8_t validity_bit;
     dpls_calib_t calibration;
-    uint16_t window[DPLS_ADC_WINDOW];
-    uint8_t window_count;
-    uint8_t window_pos;
     volatile uint16_t cached_mv;
     uint32_t last_sample_ms;
 } dpls_adc_channel_t;
@@ -212,19 +208,6 @@ static void load_calibration(void)
         load_legacy_calibration();
 }
 
-static uint16_t fold_window(dpls_adc_channel_t *channel, uint16_t value)
-{
-    uint32_t sum = 0u;
-    uint8_t i;
-    channel->window[channel->window_pos] = value;
-    channel->window_pos = (uint8_t)((channel->window_pos + 1u) % DPLS_ADC_WINDOW);
-    if (channel->window_count < DPLS_ADC_WINDOW)
-        ++channel->window_count;
-    for (i = 0u; i < channel->window_count; ++i)
-        sum += channel->window[i];
-    return (uint16_t)(sum / channel->window_count);
-}
-
 static void finish_inflight_as_failed(void)
 {
     adc_busy = false;
@@ -234,7 +217,7 @@ static void finish_inflight_as_failed(void)
 }
 
 /* ISR is deliberately minimal: copy raw words, record completion and wake the
- * OSAL task. No conversion/calibration/averaging/flash/BLE runs here. */
+ * OSAL task. No conversion/calibration/flash/BLE runs here. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i;
@@ -325,8 +308,6 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     channels[3].validity_bit = DPLS_STATE_RESERVE_VOLTAGE_VALID;
 
     for (i = 0; i < DPLS_ADC_CHANNEL_COUNT; ++i) {
-        channels[i].window_count = 0u;
-        channels[i].window_pos = 0u;
         channels[i].cached_mv = 0u;
         channels[i].last_sample_ms = 0u;
     }
@@ -395,8 +376,10 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
                 adc_hw_calibration_negative,
                 adc_hw_calibration_positive,
                 adc_Lambda[channel->result_channel]);
-            uint16_t measured = dpls_calib_apply(&channel->calibration, pin_mv);
-            channel->cached_mv = fold_window(channel, measured);
+            /* dpls_adc_single_ended_mv() already averages the complete vendor
+             * conversion packet. A second 8-cycle moving average delayed safety
+             * decisions by up to ~8 s and retained an unnecessary ring buffer. */
+            channel->cached_mv = dpls_calib_apply(&channel->calibration, pin_mv);
             channel->last_sample_ms = now_ms;
         }
 
@@ -413,7 +396,7 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
 
 static bool channel_fresh(const dpls_adc_channel_t *channel, uint32_t now_ms)
 {
-    return channel->window_count != 0u &&
+    return channel->last_sample_ms != 0u &&
            (uint32_t)(now_ms - channel->last_sample_ms) <= DPLS_ADC_STALE_MS;
 }
 
