@@ -28,6 +28,7 @@ project:
         - ../../sdk/PHY62XX_SDK_3.1.2/misc
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/log
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/cliface
+        - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/key
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/flash
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/fs
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/include
