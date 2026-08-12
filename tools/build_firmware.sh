@@ -21,6 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 bash "$ROOT/tools/fetch_phy6252_sdk.sh"
+python3 "$ROOT/tools/patch_phy6252_sdk.py"
 
 for tool in cbuild fromelf; do
     if ! command -v "$tool" >/dev/null 2>&1; then
