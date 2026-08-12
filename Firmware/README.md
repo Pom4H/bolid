@@ -10,7 +10,7 @@
 
 - `phy6252/dpls_phy6252_hw.c` — **единственный владелец цифрового железа**:
   безопасная инициализация GPIO, retention, break-before-make, RGB identify,
-  P16/P17 32 kHz workaround и connection-scoped sleep-lock;
+  P16/P17 32 kHz workaround и sleep guard активного силового режима;
 - `phy6252/dpls_phy6252_adc.c` — **единственный владелец ADC**: четыре
   single-ended канала, последовательный state machine, freshness/validity и
   per-channel calibration;
@@ -42,7 +42,7 @@ legacy-алиас +1/P20, а не отдельный физический вхо
 
 `hal_gpio_pin_init(..., GPIO_OUTPUT)` в PHY62XX SDK меняет DDR, но не
 предзагружает data latch. После warm/retained reset это могло кратко показать
-старую `1` на активном-high выходе. Hardware adapter использует
+старую `1` на active-high выходе. Hardware adapter использует
 `hal_gpio_write(pin, 0)`, который сначала записывает latch и лишь затем включает
 output direction, после чего регистрирует retention.
 
@@ -50,11 +50,17 @@ P16/P17 одновременно являются XTAL_32K pads PHY6252. На Te
 используется RC32K, поэтому hardware adapter снимает vendor XTAL bias на старте
 и в wake callback.
 
-Известная ADC↔radio/sleep гонка SDK 3.1.2 устраняется реальным
-`hal_pwrmgr_lock(MOD_USR1)` на время активного BLE connection. Регистрация и
-lock проверяются: при ошибке устройство возвращает выходы в Norma и не
-продолжает опасную connected-сессию с no-op lock. Advertising/disconnected
-остаются low-power.
+У SDK 3.1.2 `INTERRUPT_MODE` ошибочно выбирал compare/debug ISR вместо обычного
+one-shot ADC handler. Product build детерминированно патчит этот выбор на
+`hal_ADC_IRQHandler`; тот завершает conversion через штатный cleanup и снимает
+собственный `MOD_ADCC` power lock. Поэтому обычное BLE-соединение и ADC idle
+могут спать.
+
+`MOD_USR1` зарегистрирован hardware owner-ом, но блокирует sleep **только пока
+активен ненормальный силовой режим** (`OPEN_*` / `SHORT_*`). Это консервативная
+safety-граница: физический управляющий выход остаётся активным без sleep/wake
+переходов, а после возврата в `NORMAL` guard сразу снимается. Connect/disconnect
+сами по себе sleep не блокируют.
 
 ## ADC revision 2
 
@@ -103,14 +109,19 @@ Generated HTML не хранится в git: модель интроспекти
 
 ## Vendor SDK 3.1.2: обязательные интеграционные поправки
 
-`targets/phy6252/source/dplsBLEPeripheral.c` сохраняет две проверенные
-особенности target:
+Product target сохраняет только реально необходимые особенности vendor runtime:
 
-1. полное SRAM retention (`RET_SRAM0|RET_SRAM1|RET_SRAM2`), потому что scatter
-   использует все три банка;
-2. mount fs @ `0x1103C000`, 3 sectors до первого `osal_snv` access.
+1. retained только `SRAM0`; linker MAP gate (`tools/check_phy6252_map.py`)
+   блокирует сборку, если live `ER_IROM1` снова пересечёт границу SRAM0. `SRAM1`
+   и `SRAM2` намеренно не удерживаются во сне;
+2. mount fs @ `0x1103C000`, 3 sectors до первого `osal_snv` access;
+3. vendor ADC source патчится `tools/patch_phy6252_sdk.py` по точному тексту
+   закреплённого SDK commit; upstream drift делает build красным вместо fuzzy
+   patch;
+4. product startup не содержит vendor DTM/demo-вход по P20: P20 принадлежит
+   измерению +1 и не может использоваться как boot-mode selector.
 
-Удалять их без нового hardware soak нельзя.
+Менять retention или ADC cleanup без нового MAP check и hardware soak нельзя.
 
 ## Persistent storage
 
@@ -134,5 +145,6 @@ Generated HTML не хранится в git: модель интроспекти
 - ≥15 минут BLE + постоянный четырёхканальный ADC без GATT loss;
 - изменение каждого потенциометра влияет только на свой +1/+2/+T/reserve;
 - ошибка/обрыв одного ADC не останавливает остальные;
+- измерить advertising, connected-idle и active-mode current отдельно;
 - target AC6 build и все CI checks зелёные;
 - после заводской калибровки отдельно подтверждена точность каждого DPLS-входа.
