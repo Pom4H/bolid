@@ -16,6 +16,5 @@ bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback);
  * not connected / too big for the negotiated MTU). */
 bStatus_t dpls_gatt_send_indication(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
 bool dpls_gatt_send_notification(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
-bool dpls_gatt_subscribed(void);
 
 #endif
