@@ -8,6 +8,8 @@
 #include "dpls_phy6252_hw.h"
 #include "dpls_server.h"
 #include "OSAL.h"
+#include "error.h"
+#include "fs.h"
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
@@ -78,8 +80,6 @@ static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
 
-/* ATT Write Requests provide RX backpressure and ATT indications permit only
- * one unconfirmed TX. Two slots cover one in-flight plus one queued item. */
 #define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
@@ -276,8 +276,6 @@ static void update_power_state(uint32_t now)
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
     }
-    /* Invalid/stale P20 means unknown, not "short cleared". Preserve the last
-     * known isolation state so an ADC outage can never relax a safety interlock. */
 
     if (validity & DPLS_STATE_RESERVE_VOLTAGE_VALID) {
         uint16_t reserve = dpls_phy6252_adc_reserve_mv();
@@ -494,10 +492,6 @@ static void diagnostic_error(void *context, bool critical)
 
 static void tx_fail_closed(void)
 {
-    /* An indication is acknowledged by ATT Handle Value Confirmation only.
-     * Never fabricate that acknowledgement on timeout/error: a MODE_SET may
-     * already have changed real outputs. Make the hardware passive and force a
-     * reconnect; the client can then explicitly issue a new command. */
     safe_normal(NULL);
     tx_head = tx_tail = tx_count = 0u;
     tx_in_flight = false;
@@ -514,10 +508,7 @@ static void tx_pump(void)
     if (rc == SUCCESS) {
         tx_in_flight = true;
         tx_in_flight_since_ms = now_ms();
-    } else if (rc == bleMemAllocError || rc == blePending) {
-        /* Transient controller pressure: keep the exact frame queued. The
-         * existing 1 Hz housekeeping tick retries without adding another wake. */
-    } else {
+    } else if (rc != bleMemAllocError && rc != blePending) {
         tx_fail_closed();
     }
 }
@@ -604,10 +595,6 @@ static bool erase_all_bonds_now(void)
 static bool finish_factory_reset(void)
 {
     if (connection_handle != INVALID_CONNHANDLE) return false;
-
-    /* GAPBondMgr only performs ERASE_ALLBONDS synchronously when no connection
-     * is active. Verify each persistent layer before reboot so a partial flash
-     * failure can never be reported as a successful factory reset. */
     if (!erase_all_bonds_now() ||
         !dpls_ble_identity_reset_bonding_keys() ||
         !clear_settings_for_factory_reset())
@@ -649,27 +636,43 @@ static void disconnect_after_setup(void *context)
 
 static void classify_settings(void)
 {
-    uint16_t expected_crc;
-    uint8 marker = 0;
-    uint8 state_read;
+    dpls_settings_t stored;
+    uint8 marker = 0u;
+    uint8 verify_marker = 0u;
+    int settings_rc;
+    int marker_rc;
+
     memset(&settings, 0, sizeof(settings));
-    state_read = osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
-    if (state_read != SUCCESS) {
-        settings_state = DPLS_SETTINGS_EMPTY;
-        return;
-    }
-    expected_crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
-    if (settings.magic == DPLS_SETTINGS_MAGIC && settings.crc == expected_crc) {
+    memset(&stored, 0, sizeof(stored));
+    settings_rc = hal_fs_item_read(DPLS_SETTINGS_SNV_ID, (uint8_t *)&stored, sizeof(stored), NULL);
+    marker_rc = hal_fs_item_read(DPLS_SETTINGS_STATE_SNV_ID, &marker, sizeof(marker), NULL);
+
+    if (settings_rc == PPlus_SUCCESS && stored.magic == DPLS_SETTINGS_MAGIC &&
+        stored.crc == dpls_crc16((const uint8_t *)&stored, offsetof(dpls_settings_t, crc))) {
+        settings = stored;
         settings_state = DPLS_SETTINGS_VALID;
         return;
     }
-    if (osal_snv_read(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) == SUCCESS &&
-        marker == DPLS_SETTINGS_EMPTY_MARKER) {
+
+    if (marker_rc == PPlus_SUCCESS && marker == DPLS_SETTINGS_EMPTY_MARKER) {
         settings_state = DPLS_SETTINGS_EMPTY;
         return;
     }
+
+    /* Both IDs absent is the only implicit EMPTY state: a pristine filesystem.
+     * Establish an explicit marker immediately. Every other FS/read error is
+     * corruption and must never open commissioning. */
+    if (settings_rc == PPlus_ERR_FS_NOT_FIND_ID && marker_rc == PPlus_ERR_FS_NOT_FIND_ID) {
+        marker = DPLS_SETTINGS_EMPTY_MARKER;
+        if (hal_fs_item_write(DPLS_SETTINGS_STATE_SNV_ID, &marker, sizeof(marker)) == PPlus_SUCCESS &&
+            hal_fs_item_read(DPLS_SETTINGS_STATE_SNV_ID, &verify_marker, sizeof(verify_marker), NULL) == PPlus_SUCCESS &&
+            verify_marker == DPLS_SETTINGS_EMPTY_MARKER) {
+            settings_state = DPLS_SETTINGS_EMPTY;
+            return;
+        }
+    }
+
     settings_state = DPLS_SETTINGS_CORRUPT;
-    memset(&settings, 0, sizeof(settings));
 }
 
 void dpls_phy6252_init(uint8 new_task_id)
@@ -686,8 +689,6 @@ void dpls_phy6252_init(uint8 new_task_id)
     identify_led_active = false;
     factory_reset_pending = false;
 
-    /* Target startup primes safety GPIO as early as possible. Do not initialise
-     * the owner twice; consume the result of that idempotent early init here. */
     hardware_ok = dpls_phy6252_hw_ready();
     adc_ok = dpls_phy6252_adc_init(task_id, DPLS_PHY6252_ADC_EVT);
 
@@ -846,9 +847,6 @@ void dpls_phy6252_tick(void)
         erase_bonds_and_drop_link();
     }
 
-    /* Accept a physical factory-reset hold at any time. The 5 s qualification
-     * reuses the existing 1 Hz housekeeping tick; no reset-only wake source is
-     * added to normal operation. */
     if (!factory_reset_armed) {
         if (hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
             factory_reset_armed = true;
