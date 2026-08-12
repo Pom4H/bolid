@@ -438,8 +438,11 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
             send_auth_result(s, 1, 0); break;
         }
         s->last_auth_proof_ms = now_ms;
-        memcpy(s->client_nonce, f.payload, 16);
-        if (s->hal.verify_auth_proof(s->hal.context, s->device_nonce, s->client_nonce, s->session_id, f.payload + 16)) {
+        /* AUTH_PROOF repeats the HELLO nonce for transcript binding. Never let
+         * the proof packet replace the challenge input: a mismatched nonce is an
+         * ordinary failed proof and participates in the same brute-force limit. */
+        if (memcmp(f.payload, s->client_nonce, DPLS_AUTH_NONCE_SIZE) == 0 &&
+            s->hal.verify_auth_proof(s->hal.context, s->device_nonce, s->client_nonce, s->session_id, f.payload + 16)) {
             if (!s->authenticated) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
             s->authenticated = true; s->failed_auth_attempts = 0; s->last_authenticated_activity_ms = now_ms;
             if (s->hal.auth_lock_write) (void)s->hal.auth_lock_write(s->hal.context, false);
