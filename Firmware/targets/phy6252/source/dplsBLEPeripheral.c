@@ -10,6 +10,7 @@
 #include "ll_common.h"
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
+#include "dpls_phy6252_adc.h"
 #include "dpls_phy6252_app.h"
 #include "dpls_phy6252_hw.h"
 #include "simpleBLEPeripheral.h"
@@ -81,6 +82,7 @@ static void state_changed(gaprole_States_t state)
         uint8 enabled = identity_ready ? TRUE : FALSE;
         if (identity_ready)
             dpls_ble_identity_on_stack_started();
+        dpls_phy6252_adc_set_full_scan(false);
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         break;
@@ -88,14 +90,16 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
+        dpls_phy6252_adc_set_full_scan(true);
         dpls_phy6252_connected(handle);
         break;
     }
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
         uint8 enabled = identity_ready ? TRUE : FALSE;
+        dpls_phy6252_adc_set_full_scan(false);
         dpls_phy6252_disconnected();
-        schedule_led_if_needed(); /* turn an interrupted identify off immediately */
+        schedule_led_if_needed();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         break;
     }
@@ -181,9 +185,6 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     dpls_phy6252_init(app_task_id);
     ATT_SetMTUSizeMax(MTU_SIZE);
     llInitFeatureSetDLE(TRUE);
-    /* Start the stack even when identity preparation failed so the local OSAL
-     * housekeeping/factory-reset path remains alive. GAPROLE_STARTED keeps
-     * advertising disabled until a valid identity exists on a later reboot. */
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
 }
 
