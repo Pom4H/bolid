@@ -4,6 +4,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Enumeration;
+using Windows.Foundation;
 using TestDPLS.Models;
 using TestDPLS.Session;
 
@@ -23,6 +24,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
 
     private BluetoothLEAdvertisementWatcher? _watcher;
     private BluetoothLEDevice? _device;
+    private GattSession? _gattSession;
     private GattDeviceService? _service;
     private GattCharacteristic? _rx;
     private GattCharacteristic? _tx;
@@ -32,6 +34,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private CancellationTokenSource? _reconnectCts;
     private bool _writeInProgress;
     private bool _disposed;
+    private TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs>? _pairingHandler;
 
     public BleClient()
     {
@@ -155,59 +158,56 @@ public sealed class BleClient : IDplsTransport, IDisposable
             _device = device;
             device.ConnectionStatusChanged += OnConnectionStatusChanged;
 
-            // Trigger Windows pairing/bonding for encrypted GATT writes.
+            var access = await device.RequestAccessAsync();
+            if (access != DeviceAccessStatus.Allowed)
+            {
+                _session.Fail($"Нет доступа к Bluetooth-устройству ({access}). Проверьте параметры конфиденциальности Windows.");
+                return;
+            }
+
+            // Keep the link up while discovering GATT (Windows otherwise drops quickly).
             try
             {
-                var pairingResult = await device.DeviceInformation.Pairing.PairAsync();
-                if (pairingResult.Status is not (DevicePairingResultStatus.Paired
-                    or DevicePairingResultStatus.AlreadyPaired))
-                {
-                    // Continue — some stacks pair on first encrypted write.
-                }
+                _gattSession = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                _gattSession.MaintainConnection = true;
             }
             catch
             {
-                // Pairing API may be unavailable; continue to GATT.
+                // Older stacks may not support GattSession; continue.
             }
+
+            Ui.Phase = ConnectionPhase.Pairing;
+            Ui.StatusText = "Сопряжение…";
+            Raise();
+            await EnsurePairedAsync(device);
 
             Ui.Phase = ConnectionPhase.Discovering;
-            Ui.StatusText = "Подключение…";
+            Ui.StatusText = "Поиск службы Test-DPLS…";
             Raise();
 
-            var services = await device.GetGattServicesForUuidAsync(DplsSession.ServiceUuid, BluetoothCacheMode.Uncached);
-            if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
+            var service = await FindDplsServiceAsync(device);
+            if (service == null)
             {
-                _session.Fail("Служба Test-DPLS не найдена");
+                _session.Fail(
+                    "Служба Test-DPLS не найдена. Убедитесь, что плата прошита Test-DPLS, " +
+                    "Bluetooth включён, устройство рядом, и в параметрах Windows нет «сломанного» сопряжения с ним.");
                 return;
             }
 
-            _service = services.Services[0];
-            var chars = await _service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
-            if (chars.Status != GattCommunicationStatus.Success)
+            _service = service;
+            var chars = await ResolveCharacteristicsAsync(service);
+            if (chars == null)
             {
-                _session.Fail("Характеристики недоступны");
+                _session.Fail("Характеристики RX/TX недоступны. Повторите сопряжение или удалите устройство в параметрах Bluetooth Windows.");
                 return;
             }
 
-            _rx = chars.Characteristics.FirstOrDefault(c => c.Uuid == DplsSession.RxUuid);
-            _tx = chars.Characteristics.FirstOrDefault(c => c.Uuid == DplsSession.TxUuid);
-            if (_rx == null || _tx == null)
-            {
-                _session.Fail("Служба Test-DPLS не найдена");
-                return;
-            }
-
-            // Prefer a larger write limit when the stack reports one.
-            _session.NegotiatedWriteLimit = Math.Max(20, (int)_rx.AttributeHandle > 0 ? 180 : 20);
-            try
-            {
-                // Windows does not expose ATT MTU directly; 180 is safe for DPLS frames.
-                _session.NegotiatedWriteLimit = 180;
-            }
-            catch { /* ignore */ }
+            _rx = chars.Value.Rx;
+            _tx = chars.Value.Tx;
+            _session.NegotiatedWriteLimit = 180;
 
             Ui.Phase = ConnectionPhase.Subscribing;
-            Ui.StatusText = "Подключение…";
+            Ui.StatusText = "Подписка на уведомления…";
             Raise();
 
             _tx.ValueChanged += OnTxValueChanged;
@@ -222,7 +222,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     GattClientCharacteristicConfigurationDescriptorValue.Notify);
                 if (cccd != GattCommunicationStatus.Success)
                 {
-                    _session.Fail("Подписка на BLE-события не удалась");
+                    _session.Fail($"Подписка на BLE-события не удалась ({cccd})");
                     return;
                 }
             }
@@ -238,6 +238,90 @@ public sealed class BleClient : IDplsTransport, IDisposable
             else
                 _session.Fail($"Ошибка BLE: {ex.Message}");
         }
+    }
+
+    private async Task EnsurePairedAsync(BluetoothLEDevice device)
+    {
+        try
+        {
+            if (device.DeviceInformation.Pairing.IsPaired) return;
+
+            // Just-Works style pairing used by the firmware (no PIN).
+            var custom = device.DeviceInformation.Pairing.Custom;
+            _pairingHandler = (_, args) => args.Accept();
+            custom.PairingRequested += _pairingHandler;
+            try
+            {
+                _ = await custom.PairAsync(
+                    DevicePairingKinds.ConfirmOnly,
+                    DevicePairingProtectionLevel.Encryption);
+            }
+            finally
+            {
+                if (_pairingHandler != null)
+                    custom.PairingRequested -= _pairingHandler;
+                _pairingHandler = null;
+            }
+        }
+        catch
+        {
+            // Pairing may complete later on first encrypted RX write.
+        }
+    }
+
+    private static async Task<GattDeviceService?> FindDplsServiceAsync(BluetoothLEDevice device)
+    {
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            // Full discovery is more reliable on Windows than ForUuid alone.
+            var all = await device.GetGattServicesAsync(
+                attempt % 2 == 0 ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached);
+            if (all.Status == GattCommunicationStatus.Success)
+            {
+                var found = all.Services.FirstOrDefault(s => s.Uuid == DplsSession.ServiceUuid);
+                if (found != null) return found;
+            }
+
+            var byUuid = await device.GetGattServicesForUuidAsync(
+                DplsSession.ServiceUuid,
+                attempt % 2 == 0 ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached);
+            if (byUuid.Status == GattCommunicationStatus.Success && byUuid.Services.Count > 0)
+                return byUuid.Services[0];
+
+            await Task.Delay(400 * (attempt + 1));
+        }
+
+        return null;
+    }
+
+    private static async Task<(GattCharacteristic Rx, GattCharacteristic Tx)?> ResolveCharacteristicsAsync(
+        GattDeviceService service)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var mode = attempt == 0 ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached;
+            var chars = await service.GetCharacteristicsAsync(mode);
+            if (chars.Status == GattCommunicationStatus.Success)
+            {
+                var rx = chars.Characteristics.FirstOrDefault(c => c.Uuid == DplsSession.RxUuid);
+                var tx = chars.Characteristics.FirstOrDefault(c => c.Uuid == DplsSession.TxUuid);
+                if (rx != null && tx != null) return (rx, tx);
+            }
+
+            var rxResult = await service.GetCharacteristicsForUuidAsync(DplsSession.RxUuid, mode);
+            var txResult = await service.GetCharacteristicsForUuidAsync(DplsSession.TxUuid, mode);
+            if (rxResult.Status == GattCommunicationStatus.Success &&
+                txResult.Status == GattCommunicationStatus.Success &&
+                rxResult.Characteristics.Count > 0 &&
+                txResult.Characteristics.Count > 0)
+            {
+                return (rxResult.Characteristics[0], txResult.Characteristics[0]);
+            }
+
+            await Task.Delay(300 * (attempt + 1));
+        }
+
+        return null;
     }
 
     private void OnAdvertisementReceived(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementReceivedEventArgs args)
@@ -449,6 +533,16 @@ public sealed class BleClient : IDplsTransport, IDisposable
         _rx = null;
         try { _service?.Dispose(); } catch { /* ignore */ }
         _service = null;
+        try
+        {
+            if (_gattSession != null)
+            {
+                _gattSession.MaintainConnection = false;
+                _gattSession.Dispose();
+            }
+        }
+        catch { /* ignore */ }
+        _gattSession = null;
         if (_device != null)
         {
             try { _device.ConnectionStatusChanged -= OnConnectionStatusChanged; } catch { /* ignore */ }
