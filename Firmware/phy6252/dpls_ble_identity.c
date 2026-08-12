@@ -77,6 +77,7 @@ static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
     memcpy(out, record.addr, B_ADDR_LEN);
     return true;
 }
+
 static bool write_mac_snv(const uint8_t mac[B_ADDR_LEN])
 {
     dpls_ble_mac_record_t record;
@@ -189,12 +190,25 @@ void dpls_ble_identity_on_stack_started(void)
     (void)HCI_LE_AddDevToResolvingListCmd(addr_type, hci_addr, zero_irk, irk);
 }
 
-void dpls_ble_identity_reset_bonding_keys(void)
+bool dpls_ble_identity_reset_bonding_keys(void)
 {
-    uint8_t erased[KEYLEN];
-    memset(erased, 0xFF, sizeof(erased));
-    (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
-    (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
+    uint8_t irk[KEYLEN];
+    uint8_t srk[KEYLEN];
+    uint8_t verify[KEYLEN];
+
+    /* Persist fresh keys before reboot instead of writing an erased marker and
+     * relying on the next boot's RNG. A failed reset therefore remains on the
+     * current, known-good runtime and can be retried without partial security
+     * state being mistaken for success. */
+    if (!random_bytes(irk, KEYLEN) || !random_bytes(srk, KEYLEN)) return false;
+    if (key_is_invalid(irk) || key_is_invalid(srk)) return false;
+    if (!write_key_snv(BLE_NVID_IRK, irk) || !write_key_snv(BLE_NVID_CSRK, srk)) return false;
+    if (!read_key_snv(BLE_NVID_IRK, verify) || memcmp(verify, irk, KEYLEN) != 0) return false;
+    if (!read_key_snv(BLE_NVID_CSRK, verify) || memcmp(verify, srk, KEYLEN) != 0) return false;
+    memset(irk, 0, sizeof(irk));
+    memset(srk, 0, sizeof(srk));
+    memset(verify, 0, sizeof(verify));
+    return true;
 }
 
 uint32_t dpls_ble_identity_device_id(void)
