@@ -151,6 +151,7 @@ project:
         - file: ../../src/dpls_server.c
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
+        - file: ../../src/dpls_adc_math.c
         - file: ../../phy6252/dpls_gatt_service.c
         - file: ../../phy6252/dpls_phy6252_hw.c
         - file: ../../phy6252/dpls_phy6252_adc.c
