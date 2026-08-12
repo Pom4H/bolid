@@ -11,14 +11,12 @@
 
 static bool initialized;
 static bool ready;
-static bool connection_locked;
+static bool control_sleep_locked;
 static dpls_mode_t current_mode = DPLS_MODE_NORMAL;
 
 /* P16/P17 are XTAL_32K_IN/OUT on PHY6252, but the Test-DPLS board uses RC32K
- * and repurposes those pads as KZ_2/KZ_T. The vendor startup/wake path still
- * biases the crystal oscillator unless PMCTL0[28] is cleared again. Register
- * this function as the wake callback of the SAME pwrmgr slot that is locked
- * while connected: one owner, one slot, no MOD_USR1/MOD_USR2 split-brain. */
+ * and repurposes those pads as KZ_2/KZ_T. Restore that mux condition after each
+ * low-power wake. GPIO retention keeps their output level while sleeping. */
 static void disable_32k_xtal(void)
 {
     subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00);
@@ -37,9 +35,8 @@ static const gpio_pin_e retained_outputs[] = {
 };
 
 /* hal_gpio_write() writes swporta_dr BEFORE it switches DDR to output. That is
- * the only safe initialisation primitive for an active-high output whose latch
- * may retain a previous 1 across a warm reset. Never replace this with
- * hal_gpio_pin_init(..., GPIO_OUTPUT/OEN) followed by a later write. */
+ * the safe initialisation primitive for an active-high output whose latch may
+ * retain a previous 1 across a warm reset. */
 static void prime_all_outputs_low(void)
 {
     size_t i;
@@ -57,7 +54,7 @@ static bool register_output_retention(void)
     return true;
 }
 
-void dpls_phy6252_hw_safe_normal(void)
+static void drive_controls_low(void)
 {
     hal_gpio_write(DPLS_PIN_ISO_1, 0);
     hal_gpio_write(DPLS_PIN_ISO_2, 0);
@@ -68,6 +65,38 @@ void dpls_phy6252_hw_safe_normal(void)
     current_mode = DPLS_MODE_NORMAL;
 }
 
+static bool control_sleep_guard_acquire(void)
+{
+    if (control_sleep_locked)
+        return true;
+    if (hal_pwrmgr_lock(MOD_USR1) != PPlus_SUCCESS)
+        return false;
+    control_sleep_locked = true;
+    return true;
+}
+
+static bool control_sleep_guard_release(void)
+{
+    if (!control_sleep_locked)
+        return true;
+    if (hal_pwrmgr_unlock(MOD_USR1) != PPlus_SUCCESS) {
+        control_sleep_locked = false;
+        ready = false;
+        return false;
+    }
+    control_sleep_locked = false;
+    return true;
+}
+
+void dpls_phy6252_hw_safe_normal(void)
+{
+    /* Drop every active-high control before allowing sleep again. This ordering
+     * means a failed/unexpected transition always leaves the power stage passive. */
+    drive_controls_low();
+    if (!control_sleep_guard_release())
+        ready = false;
+}
+
 bool dpls_phy6252_hw_init(void)
 {
     int rc;
@@ -76,32 +105,28 @@ bool dpls_phy6252_hw_init(void)
         return ready;
     initialized = true;
 
-    /* The order is deliberate: remove the XTAL bias, preload every latch low,
-     * then register GPIO retention. hal_gpioretention_register() itself changes
-     * the direction to output, so doing it before the low write would recreate
-     * the startup pulse fixed by this module. */
     disable_32k_xtal();
     prime_all_outputs_low();
 
     if (!register_output_retention()) {
-        dpls_phy6252_hw_safe_normal();
+        drive_controls_low();
         ready = false;
         return false;
     }
 
-    /* MOD_USR1 is owned exclusively by this module. Its wake callback restores
-     * the RC32K/P16/P17 condition after every low-power wake. The same module is
-     * locked while BLE is connected, which eliminates the ADC/radio/sleep race
-     * without consuming a second pwrmgr registration slot. */
+    /* One user pwrmgr slot owns both policies: wake restores the RC32K/P16/P17
+     * mux, and the slot is locked only while a non-normal power-stage output is
+     * asserted. Ordinary BLE and ADC sampling can therefore use system sleep;
+     * the ADC driver independently owns MOD_ADCC during each conversion. */
     rc = hal_pwrmgr_register(MOD_USR1, NULL, disable_32k_xtal);
     if (rc != PPlus_SUCCESS) {
-        dpls_phy6252_hw_safe_normal();
+        drive_controls_low();
         ready = false;
         return false;
     }
 
-    connection_locked = false;
-    dpls_phy6252_hw_safe_normal();
+    control_sleep_locked = false;
+    drive_controls_low();
     dpls_phy6252_hw_identify_led(false);
     ready = true;
     return true;
@@ -119,12 +144,25 @@ bool dpls_phy6252_hw_apply_mode(dpls_mode_t mode)
         return false;
     }
 
+    if (mode == DPLS_MODE_NORMAL) {
+        dpls_phy6252_hw_safe_normal();
+        return dpls_phy6252_hw_ready();
+    }
+
+    /* Safety beats power while a physical fault/open simulation is active. Keep
+     * the core awake for this bounded test window, then safe_normal() releases
+     * the guard. Normal connected operation remains low-power. */
+    if (!control_sleep_guard_acquire()) {
+        ready = false;
+        drive_controls_low();
+        return false;
+    }
+
     /* Break-before-make is centralized here so no protocol path can accidentally
-     * assert two power-stage controls at once. */
-    dpls_phy6252_hw_safe_normal();
+     * assert two power-stage controls at once. Do not call safe_normal() here:
+     * that would also release the guard we just acquired. */
+    drive_controls_low();
     switch (mode) {
-    case DPLS_MODE_NORMAL:
-        break;
     case DPLS_MODE_OPEN_T:
         hal_gpio_write(DPLS_PIN_ISO_T, 1);
         break;
@@ -140,7 +178,9 @@ bool dpls_phy6252_hw_apply_mode(dpls_mode_t mode)
     case DPLS_MODE_SHORT_T:
         hal_gpio_write(DPLS_PIN_KZ_T, 1);
         break;
+    case DPLS_MODE_NORMAL:
     default:
+        dpls_phy6252_hw_safe_normal();
         return false;
     }
     current_mode = mode;
@@ -154,8 +194,6 @@ dpls_mode_t dpls_phy6252_hw_mode(void)
 
 void dpls_phy6252_hw_identify_led(bool on)
 {
-    /* Common-cathode RGB LED, active-high. Unused colours are forced low on
-     * every update so a retained value can never produce a mixed colour. */
     hal_gpio_write(DPLS_PIN_LED_RED, 0);
     hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
@@ -163,33 +201,21 @@ void dpls_phy6252_hw_identify_led(bool on)
 
 bool dpls_phy6252_hw_connection_lock(void)
 {
+    /* Historical API name. A normal connected session must be allowed to sleep;
+     * this entry point only validates the hardware owner and restores the XTAL
+     * pad configuration before traffic starts. */
     if (!dpls_phy6252_hw_ready()) {
         dpls_phy6252_hw_safe_normal();
         return false;
     }
-    if (connection_locked)
-        return true;
-
-    if (hal_pwrmgr_lock(MOD_USR1) != PPlus_SUCCESS) {
-        ready = false;
-        dpls_phy6252_hw_safe_normal();
-        return false;
-    }
-    connection_locked = true;
+    disable_32k_xtal();
     return true;
 }
 
 bool dpls_phy6252_hw_connection_unlock(void)
 {
-    if (!connection_locked)
-        return true;
-
-    if (hal_pwrmgr_unlock(MOD_USR1) != PPlus_SUCCESS) {
-        connection_locked = false;
-        ready = false;
-        dpls_phy6252_hw_safe_normal();
-        return false;
-    }
-    connection_locked = false;
-    return true;
+    /* Disconnect is another fail-safe boundary: outputs go passive first and
+     * any active-mode sleep guard is released afterwards. */
+    dpls_phy6252_hw_safe_normal();
+    return dpls_phy6252_hw_ready();
 }
