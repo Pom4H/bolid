@@ -9,8 +9,10 @@ void dpls_ble_identity_prepare(void);
 /* Sync RPA with IRK after GAP_DeviceInit (GAPROLE_STARTED). */
 void dpls_ble_identity_on_stack_started(void);
 
-/* Erases persisted bonding keys; MAC is kept. Reboot after calling. */
-void dpls_ble_identity_reset_bonding_keys(void);
+/* Replace persisted IRK/CSRK with fresh random keys while keeping the stable MAC.
+ * Returns false on RNG/NV/read-back failure so factory reset can fail closed
+ * instead of rebooting with only part of its security state cleared. */
+bool dpls_ble_identity_reset_bonding_keys(void);
 
 /* Stable 32-bit device id derived from the identity MAC (0 if not ready).
  * Reported in DEVICE_INFO_REPORT and used by the app to key its name cache. */
