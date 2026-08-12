@@ -3,8 +3,10 @@
 
 #include "bcomdef.h"
 
-/* Must run before GAPRole_StartDevice(). */
-void dpls_ble_identity_prepare(void);
+/* Must run before GAPRole_StartDevice(). Returns false when the stable identity
+ * or its IRK/CSRK cannot be loaded/generated/persisted; callers must not start
+ * advertising with a partial or zero identity. */
+bool dpls_ble_identity_prepare(void);
 
 /* Sync RPA with IRK after GAP_DeviceInit (GAPROLE_STARTED). */
 void dpls_ble_identity_on_stack_started(void);
