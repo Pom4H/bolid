@@ -12,7 +12,15 @@
 
 - Windows 10 2004+ / Windows 11
 - Bluetooth LE (Bluetooth 4.0+)
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (x64 installer)
+
+Проверка:
+
+```powershell
+dotnet --list-sdks
+```
+
+В списке должна быть строка вида `8.0.xxx [...]`. Если SDK нет — установите и **переоткройте** PowerShell.
 
 ## Сборка и запуск
 
