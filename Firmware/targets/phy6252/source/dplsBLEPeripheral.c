@@ -16,9 +16,17 @@
 #include "pwrmgr.h"
 #include "fs.h"
 
-#define DEFAULT_MIN_CONN_INTERVAL 24
-#define DEFAULT_MAX_CONN_INTERVAL 80
+/* 1.25 ms units. The operator protocol updates at 1 Hz, so 80..120 ms with
+ * slave latency 4 preserves sub-second command response without waking for the
+ * vendor demo's 30 ms connection cadence when no packet is pending. */
+#define DEFAULT_MIN_CONN_INTERVAL 64
+#define DEFAULT_MAX_CONN_INTERVAL 96
+#define DEFAULT_SLAVE_LATENCY 4
 #define DEFAULT_CONN_TIMEOUT 3000
+#define DPLS_TICK_MS 1000u
+/* 0.625 ms units: 500 ms advertising cuts idle radio events by 2.5x versus the
+ * previous 200 ms interval while keeping interactive discovery responsive. */
+#define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
 
@@ -70,7 +78,7 @@ static void state_changed(gaprole_States_t state)
         uint8 enabled = TRUE;
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, 50);
         break;
     }
@@ -113,9 +121,9 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint16 advertising_off_time = 0;
     uint16 min_interval = DEFAULT_MIN_CONN_INTERVAL;
     uint16 max_interval = DEFAULT_MAX_CONN_INTERVAL;
-    uint16 latency = 0;
+    uint16 latency = DEFAULT_SLAVE_LATENCY;
     uint16 timeout = DEFAULT_CONN_TIMEOUT;
-    uint16 advertising_interval = 320;
+    uint16 advertising_interval = DPLS_ADV_INTERVAL;
     uint32 passkey = 0;
     uint8 pairing_mode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
     uint8 mitm = FALSE;
@@ -129,20 +137,16 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
 
     app_task_id = task_id;
 
-    /* First board-owned operation after vendor hal_init(): preload every control
-     * latch to zero, register GPIO retention, install the P16/P17 RC32K wake
-     * workaround and reserve the connection sleep-lock slot. All of those
-     * invariants live in one module now; this target layer no longer duplicates
-     * pin/sleep knowledge. */
+    /* First board-owned operation after platform_init(): preload every control
+     * latch to zero, register GPIO retention and install the P16/P17 RC32K wake
+     * workaround. */
     (void)dpls_phy6252_hw_init();
 
-    /* SDK 3.1.2 main.c retains only SRAM0. Our scatter uses SRAM1/SRAM2 as well,
-     * so retain all three banks or a wake can return into powered-off code. */
-    hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
-    hal_pwrmgr_RAM_retention_set();
+    /* Production startup removed the vendor DTM SRAM2 image. Only SRAM0+SRAM1
+     * contain retained execution/data state now. */
+    (void)hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1);
+    (void)hal_pwrmgr_RAM_retention_set();
 
-    /* osal_snv is fs-backed (USE_FS=1); mount the persistent region before any
-     * identity/settings/journal access. */
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
 
@@ -176,7 +180,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GGS_AddService(GATT_ALL_SERVICES);
     GATTServApp_AddService(GATT_ALL_SERVICES);
     dpls_phy6252_init(app_task_id);
-    ATT_SetMTUSizeMax(247);
+    ATT_SetMTUSizeMax(MTU_SIZE);
     llInitFeatureSetDLE(TRUE);
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
 }
@@ -202,7 +206,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         return events ^ SBP_DPLS_TICK_EVT;
     }
     if (events & SBP_DPLS_LED_EVT) {
