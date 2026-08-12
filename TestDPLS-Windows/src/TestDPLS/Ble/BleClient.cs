@@ -264,19 +264,10 @@ public sealed class BleClient : IDplsTransport, IDisposable
             Raise();
 
             _tx.ValueChanged += OnTxValueChanged;
-            var cccdValue = (GattClientCharacteristicConfigurationDescriptorValue)(
-                (int)GattClientCharacteristicConfigurationDescriptorValue.Notify |
-                (int)GattClientCharacteristicConfigurationDescriptorValue.Indicate);
-            var cccd = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(cccdValue);
-            if (cccd != GattCommunicationStatus.Success)
+            if (!await EnableTxNotificationsAsync(_tx))
             {
-                cccd = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue.Notify);
-                if (cccd != GattCommunicationStatus.Success)
-                {
-                    _session.Fail($"Подписка на BLE-события не удалась ({cccd})");
-                    return;
-                }
+                _session.Fail("Подписка на BLE-события не удалась");
+                return;
             }
 
             _session.NotifyLinked();
@@ -295,6 +286,73 @@ public sealed class BleClient : IDplsTransport, IDisposable
         {
             _connectInProgress = false;
         }
+    }
+
+    /// <summary>
+    /// Windows rejects combined Notify|Indicate enum values ("parameter is incorrect").
+    /// Enable Indicate and/or Notify according to characteristic properties, with raw CCCD fallback.
+    /// </summary>
+    private static async Task<bool> EnableTxNotificationsAsync(GattCharacteristic tx)
+    {
+        var props = tx.CharacteristicProperties;
+        var tried = new List<GattClientCharacteristicConfigurationDescriptorValue>();
+
+        if (props.HasFlag(GattCharacteristicProperties.Indicate))
+            tried.Add(GattClientCharacteristicConfigurationDescriptorValue.Indicate);
+        if (props.HasFlag(GattCharacteristicProperties.Notify))
+            tried.Add(GattClientCharacteristicConfigurationDescriptorValue.Notify);
+
+        // If properties were not reported, try both singly (never OR-combined).
+        if (tried.Count == 0)
+        {
+            tried.Add(GattClientCharacteristicConfigurationDescriptorValue.Indicate);
+            tried.Add(GattClientCharacteristicConfigurationDescriptorValue.Notify);
+        }
+
+        foreach (var value in tried)
+        {
+            try
+            {
+                var status = await tx.WriteClientCharacteristicConfigurationDescriptorAsync(value);
+                if (status == GattCommunicationStatus.Success)
+                    return true;
+            }
+            catch (ArgumentException)
+            {
+                // Invalid enum for this stack — try next / raw descriptor.
+            }
+            catch (Exception)
+            {
+                // Continue to fallbacks.
+            }
+        }
+
+        // Raw CCCD write: 0x0002=indicate, 0x0001=notify, 0x0003=both (LE).
+        foreach (var payload in new byte[][]
+                 {
+                     [0x02, 0x00],
+                     [0x01, 0x00],
+                     [0x03, 0x00],
+                 })
+        {
+            try
+            {
+                var descriptors = await tx.GetDescriptorsForUuidAsync(
+                    GattDescriptorUuids.ClientCharacteristicConfiguration,
+                    BluetoothCacheMode.Uncached);
+                if (descriptors.Status != GattCommunicationStatus.Success || descriptors.Descriptors.Count == 0)
+                    continue;
+                var status = await descriptors.Descriptors[0].WriteValueAsync(payload.AsBuffer());
+                if (status == GattCommunicationStatus.Success)
+                    return true;
+            }
+            catch
+            {
+                // try next payload
+            }
+        }
+
+        return false;
     }
 
     /// <returns>True when a new pairing was completed.</returns>
