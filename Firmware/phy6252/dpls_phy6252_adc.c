@@ -20,10 +20,8 @@
 #define DPLS_ADC_CALIB_V2_VERSION 2u
 #define DPLS_ADC_HW_CALIBRATION_WORD 0x11001000u
 
-/* One complete four-channel scan starts roughly once per second. The same 1 Hz
- * housekeeping tick also owns lost-IRQ recovery so a watchdog costs no extra
- * wakeups. A normal conversion is orders of magnitude faster; one full tick is
- * therefore a conservative wedge timeout, not the expected conversion time. */
+/* One complete scan starts roughly once per second. The same 1 Hz housekeeping
+ * tick also owns lost-IRQ recovery so a watchdog costs no extra wakeups. */
 #define DPLS_ADC_PERIOD_MS 1000u
 #define DPLS_ADC_CONVERSION_TIMEOUT_MS 1000u
 #define DPLS_ADC_STALE_MS 3500u
@@ -34,21 +32,17 @@
 #define DPLS_ADC_NEED_VCAP 0x08u
 #define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
                            DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
+#define DPLS_ADC_NEED_SAFETY (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP)
 #define DPLS_ADC_INDEX_NONE 0xffu
 #define DPLS_ADC_CHANNEL_COUNT 4u
 
-/* Reserve divider is independent from the 1/31 DPLS line dividers. 2.000 is
- * still provisional until the power board is measured. */
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
 #define DPLS_VCAP_GAIN_MIN_MILLI 1000u
 #define DPLS_VCAP_GAIN_MAX_MILLI 5000u
 #define DPLS_VCAP_OFFSET_LIMIT_MV 2000
 
-/* adc_Lambda is a public const table in the pinned vendor adc.c. Referencing the
- * table avoids duplicating package-specific QFN32 coefficients in product code. */
 extern const unsigned int adc_Lambda[ADC_CH_NUM];
 
-/* Legacy SNV 0x83 layout used by 1.1.0..1.1.3-rc.1. */
 typedef struct {
     uint32_t magic;
     uint32_t line_gain_milli;
@@ -58,19 +52,9 @@ typedef struct {
     uint16_t crc;
 } dpls_calib_nv_v1_t;
 
-/* V2 is encoded explicitly, not through a C struct, so the persistent format is
- * independent of compiler padding/ABI:
- *   0..3   magic
- *   4      version (=2)
- *   5..7   reserved zero
- *   8..39  four {gain:u32, offset:i32}: +1,+2,+T,reserve
- *   40..41 CRC16 over bytes 0..39
- */
 #define DPLS_CALIB_V2_DATA_SIZE 40u
 #define DPLS_CALIB_V2_SIZE 42u
 
-/* Compile-time electrical contract: changing board.h without changing the ADC
- * mux mapping must fail the target build rather than sample another net. */
 typedef char dpls_adc_assert_port1[(DPLS_PIN_PORT1_ADC == GPIO_P20) ? 1 : -1];
 typedef char dpls_adc_assert_port2[(DPLS_PIN_PORT2_ADC == GPIO_P15) ? 1 : -1];
 typedef char dpls_adc_assert_port_t[(DPLS_PIN_PORT_T_ADC == GPIO_P24) ? 1 : -1];
@@ -93,6 +77,7 @@ static uint16_t process_event;
 static bool initialized;
 static volatile bool adc_busy;
 static uint8_t adc_pending;
+static uint8_t scan_mask = DPLS_ADC_NEED_SAFETY;
 static uint8_t inflight_index = DPLS_ADC_INDEX_NONE;
 static uint32_t inflight_started_ms;
 static uint32_t next_cycle_ms;
@@ -183,8 +168,6 @@ static void load_legacy_calibration(void)
         nv.crc != dpls_crc16((const uint8_t *)&nv, offsetof(dpls_calib_nv_v1_t, crc)))
         return;
 
-    /* Legacy line calibration was measured on P20 only. Do not copy its
-     * component-specific correction to the independent +2/+T dividers. */
     {
         dpls_calib_t line = {nv.line_gain_milli, nv.line_offset_mv};
         if (dpls_calib_valid(&line)) {
@@ -216,8 +199,6 @@ static void finish_inflight_as_failed(void)
     osal_set_event(task_id, process_event);
 }
 
-/* ISR is deliberately minimal: copy raw words, record completion and wake the
- * OSAL task. No conversion/calibration/flash/BLE runs here. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i;
@@ -285,6 +266,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     task_id = new_task_id;
     process_event = new_process_event;
     initialized = false;
+    scan_mask = DPLS_ADC_NEED_SAFETY;
     memset(channels, 0, sizeof(channels));
 
     channels[0].pending_bit = DPLS_ADC_NEED_PORT1;
@@ -321,11 +303,6 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     adc_event_failed = false;
     next_cycle_ms = 0u;
 
-    /* Vendor hal_adc_init() is void and ignores the return value from
-     * hal_pwrmgr_register(MOD_ADCC). Probe the registration once at boot; a
-     * missing MOD_ADCC slot would otherwise make hal_adc_start() run while
-     * sleep is still allowed. This lock/unlock pair is init-only and adds no
-     * recurring wake or steady-state current. */
     hal_adc_init();
     if (hal_pwrmgr_lock(MOD_ADCC) != PPlus_SUCCESS)
         return false;
@@ -336,14 +313,23 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     return true;
 }
 
+void dpls_phy6252_adc_set_full_scan(bool enabled)
+{
+    scan_mask = enabled ? DPLS_ADC_NEED_ALL : DPLS_ADC_NEED_SAFETY;
+    adc_pending &= scan_mask;
+    if (!enabled) {
+        /* +2/+T are presentation-only while disconnected. Drop validity
+         * immediately rather than showing a pre-disconnect value as live. */
+        channels[1].last_sample_ms = 0u;
+        channels[2].last_sample_ms = 0u;
+    }
+}
+
 void dpls_phy6252_adc_tick(uint32_t now_ms)
 {
     if (!initialized)
         return;
 
-    /* A lost ADC IRQ must not freeze all four measurements forever. Recovery is
-     * checked by the existing 1 Hz housekeeping tick, so no watchdog-only timer
-     * wakes the MCU. */
     if (inflight_index != DPLS_ADC_INDEX_NONE && adc_busy &&
         (uint32_t)(now_ms - inflight_started_ms) >= DPLS_ADC_CONVERSION_TIMEOUT_MS) {
         (void)hal_adc_stop();
@@ -351,10 +337,9 @@ void dpls_phy6252_adc_tick(uint32_t now_ms)
         return;
     }
 
-    /* Never overwrite a cycle still in flight. */
     if (adc_pending == 0u && !adc_busy && !adc_raw_ready &&
         inflight_index == DPLS_ADC_INDEX_NONE && elapsed(now_ms, next_cycle_ms)) {
-        adc_pending = DPLS_ADC_NEED_ALL;
+        adc_pending = scan_mask;
         next_cycle_ms = now_ms + DPLS_ADC_PERIOD_MS;
         adc_kick();
     }
@@ -367,7 +352,8 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
 
     if (inflight_index != DPLS_ADC_INDEX_NONE) {
         dpls_adc_channel_t *channel = &channels[inflight_index];
-        if (!adc_event_failed && adc_raw_ready && adc_raw_size != 0u &&
+        if ((channel->pending_bit & scan_mask) != 0u &&
+            !adc_event_failed && adc_raw_ready && adc_raw_size != 0u &&
             adc_raw_channel == channel->result_channel) {
             uint16_t pin_mv = dpls_adc_single_ended_mv(
                 (uint8_t)channel->result_channel,
@@ -376,15 +362,13 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
                 adc_hw_calibration_negative,
                 adc_hw_calibration_positive,
                 adc_Lambda[channel->result_channel]);
-            /* dpls_adc_single_ended_mv() already averages the complete vendor
-             * conversion packet. A second 8-cycle moving average delayed safety
-             * decisions by up to ~8 s and retained an unnecessary ring buffer. */
+            /* The conversion helper already averages the complete vendor sample
+             * packet. A second multi-second moving average delayed safety state
+             * and retained an unnecessary ring buffer. */
             channel->cached_mv = dpls_calib_apply(&channel->calibration, pin_mv);
             channel->last_sample_ms = now_ms;
         }
 
-        /* Success, explicit failure and timeout all consume exactly one channel.
-         * It is retried next cycle; one fault can never starve the other three. */
         adc_pending = (uint8_t)(adc_pending & (uint8_t)~channel->pending_bit);
         adc_raw_ready = false;
         adc_event_failed = false;
