@@ -1,5 +1,6 @@
 #include "dpls_phy6252_adc.h"
 
+#include "dpls_adc_math.h"
 #include "dpls_board.h"
 #include "dpls_calib.h"
 #include "dpls_protocol.h"
@@ -16,6 +17,7 @@
 #define DPLS_ADC_CALIB_MAGIC_V1 0x434C5044u
 #define DPLS_ADC_CALIB_MAGIC_V2 0x324C5044u /* "DPL2" little-endian */
 #define DPLS_ADC_CALIB_V2_VERSION 2u
+#define DPLS_ADC_HW_CALIBRATION_WORD 0x11001000u
 
 /* One complete four-channel scan is started roughly once per second. A normal
  * conversion finishes orders of magnitude faster; 500 ms is only a recovery
@@ -40,6 +42,10 @@
 #define DPLS_VCAP_GAIN_MIN_MILLI 1000u
 #define DPLS_VCAP_GAIN_MAX_MILLI 5000u
 #define DPLS_VCAP_OFFSET_LIMIT_MV 2000
+
+/* adc_Lambda is a public const table in the pinned vendor adc.c. Referencing the
+ * table avoids duplicating package-specific QFN32 coefficients in product code. */
+extern const unsigned int adc_Lambda[ADC_CH_NUM];
 
 /* Legacy SNV 0x83 layout used by 1.1.0..1.1.3-rc.1. */
 typedef struct {
@@ -98,6 +104,8 @@ static volatile uint8_t adc_raw_size;
 static volatile adc_CH_t adc_raw_channel;
 static volatile bool adc_raw_ready;
 static volatile bool adc_event_failed;
+static uint16_t adc_hw_calibration_negative;
+static uint16_t adc_hw_calibration_positive;
 
 static bool elapsed(uint32_t now, uint32_t deadline)
 {
@@ -113,6 +121,14 @@ static uint32_t rd32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void load_hw_adc_calibration(void)
+{
+    const volatile uint32_t *word = (const volatile uint32_t *)(uintptr_t)DPLS_ADC_HW_CALIBRATION_WORD;
+    uint32_t raw = *word;
+    adc_hw_calibration_negative = (uint16_t)(raw & 0x0fffu);
+    adc_hw_calibration_positive = (uint16_t)((raw >> 16) & 0x0fffu);
 }
 
 static void set_default_calibration(void)
@@ -216,7 +232,7 @@ static void finish_inflight_as_failed(void)
 }
 
 /* ISR is deliberately minimal: copy raw words, record completion and wake the
- * OSAL task. No float/calibration/averaging/flash/BLE here. */
+ * OSAL task. No conversion/calibration/averaging/flash/BLE runs here. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i;
@@ -321,6 +337,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     adc_event_failed = false;
     next_cycle_ms = 0u;
     hal_adc_init();
+    load_hw_adc_calibration();
     initialized = true;
     return true;
 }
@@ -358,13 +375,13 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
         dpls_adc_channel_t *channel = &channels[inflight_index];
         if (!adc_event_failed && adc_raw_ready && adc_raw_size != 0u &&
             adc_raw_channel == channel->result_channel) {
-            float pin_volts = hal_adc_value_cal(channel->result_channel,
-                                                (uint16_t *)adc_raw,
-                                                adc_raw_size,
-                                                FALSE,
-                                                FALSE);
-            uint32_t pin_mv = pin_volts <= 0.0f ? 0u :
-                              (uint32_t)(pin_volts * 1000.0f + 0.5f);
+            uint16_t pin_mv = dpls_adc_single_ended_mv(
+                (uint8_t)channel->result_channel,
+                (const uint16_t *)adc_raw,
+                adc_raw_size,
+                adc_hw_calibration_negative,
+                adc_hw_calibration_positive,
+                adc_Lambda[channel->result_channel]);
             uint16_t measured = dpls_calib_apply(&channel->calibration, pin_mv);
             channel->cached_mv = fold_window(channel, measured);
             channel->last_sample_ms = now_ms;
