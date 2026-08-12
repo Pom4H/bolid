@@ -38,6 +38,8 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private bool _disconnectDuringConnect;
     private bool _forceUnpair;
     private bool _lastConnectLookedLikeStaleBond;
+    private bool _identifySawLed;
+    private int _identifyRetryAttempt;
     private TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs>? _pairingHandler;
 
     public BleClient()
@@ -105,6 +107,8 @@ public sealed class BleClient : IDplsTransport, IDisposable
     {
         CancelReconnect();
         _reconnectAttempt = 0;
+        _identifyRetryAttempt = 0;
+        _identifySawLed = false;
         // «Повторить сопряжение» and auto-repair clear the Windows side of a
         // desynced bond (firmware may have erased LTK while Windows kept it).
         _forceUnpair = repairBond;
@@ -367,6 +371,7 @@ public sealed class BleClient : IDplsTransport, IDisposable
             _session.NotifyLinked();
             _session.OnGattReady(startIdentify: Ui.IdentifyActive);
             _reconnectAttempt = 0;
+            // Successful GATT ready during identify — allow more retries only on later drops.
             return true;
         }
         catch (Exception ex)
@@ -463,9 +468,63 @@ public sealed class BleClient : IDplsTransport, IDisposable
     private void FailIdentifyOrConnect(string detail)
     {
         if (Ui.IdentifyActive)
-            _session.OnIdentifyLinkLost(detail);
+            ScheduleIdentifyRetry(detail);
         else
             _session.Fail(detail + "\nПовторите подключение.");
+    }
+
+    /// <summary>
+    /// Windows often drops the link once right after IDENTIFY_START (LED flashes
+    /// once then stops). Retry Connect→Identify a few times before surfacing an error.
+    /// </summary>
+    private void ScheduleIdentifyRetry(string detail)
+    {
+        if (!Ui.IdentifyActive || _selectedAddress == null)
+        {
+            _session.OnIdentifyLinkLost(detail);
+            return;
+        }
+
+        if (_identifyRetryAttempt >= 4)
+        {
+            _session.OnIdentifyLinkLost(_identifySawLed
+                ? "Индикация прервалась — связь нестабильна.\nНажмите «Повторить сопряжение»."
+                : "Связь оборвалась до устойчивой индикации.\nНажмите «Повторить сопряжение».");
+            return;
+        }
+
+        if (_connectInProgress) return;
+
+        _identifyRetryAttempt++;
+        // Keep bond on first retry; then force Unpair — classic Windows LTK desync.
+        _forceUnpair = _identifyRetryAttempt >= 2;
+        var address = _selectedAddress;
+        var delay = 350 * _identifyRetryAttempt;
+
+        CloseCurrentGatt();
+        ResetQueue();
+        _session.NotifyUnlinked(scheduleReconnectHint: false);
+        _session.PrepareIdentifyRetry(
+            _forceUnpair
+                ? $"Сброс сопряжения и повтор ({_identifyRetryAttempt}/4)…"
+                : $"Связь нестабильна — повтор Identify ({_identifyRetryAttempt}/4)…");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay);
+                Post(() =>
+                {
+                    if (_disposed || !Ui.IdentifyActive || _selectedAddress != address) return;
+                    Connect(address);
+                });
+            }
+            catch
+            {
+                // ignore
+            }
+        });
     }
 
     /// <summary>
@@ -688,10 +747,15 @@ public sealed class BleClient : IDplsTransport, IDisposable
                     return;
                 }
 
-                // Identify runs before READY: never keep "LED blinking" after the link drops.
+                // Identify: one drop after IDENTIFY_START is common on Windows
+                // (LED blinks once). Auto-retry instead of hard-failing immediately.
                 if (Ui.IdentifyActive && !_session.ReachedReady)
                 {
-                    FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
+                    if (Ui.IdentifyLedLive) _identifySawLed = true;
+                    ScheduleIdentifyRetry(
+                        Ui.IdentifyLedLive
+                            ? "Связь оборвалась во время индикации."
+                            : "Связь оборвалась до запуска индикации.");
                     return;
                 }
 
@@ -797,9 +861,14 @@ public sealed class BleClient : IDplsTransport, IDisposable
                 // Windows can report write Success while the peripheral already dropped.
                 var stillUp = _device?.ConnectionStatus == BluetoothConnectionStatus.Connected;
                 _session.OnWriteCompleted(stillUp);
+                if (stillUp && Ui.IdentifyLedLive)
+                    _identifySawLed = true;
                 if (!stillUp && Ui.IdentifyActive && !_session.ReachedReady)
                 {
-                    FailIdentifyOrConnect("Связь оборвалась до запуска индикации.");
+                    FailIdentifyOrConnect(
+                        _identifySawLed || Ui.IdentifyLedLive
+                            ? "Связь оборвалась во время индикации."
+                            : "Связь оборвалась до запуска индикации.");
                     return;
                 }
                 _ = DrainWriteQueueAsync();

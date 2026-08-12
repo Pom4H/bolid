@@ -340,7 +340,9 @@ public partial class MainWindow : Window
                 ? "Подтвердите сопряжение\nв системном диалоге Bluetooth"
                 : ledReady
                     ? "Светодиод на устройстве\nмигает с частотой 1 Гц"
-                    : "Подключение к устройству…");
+                    : !string.IsNullOrWhiteSpace(S.StatusText)
+                        ? S.StatusText
+                        : "Подключение к устройству…");
 
         var center = new StackPanel
         {

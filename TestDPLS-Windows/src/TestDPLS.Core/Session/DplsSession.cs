@@ -218,6 +218,16 @@ public sealed class DplsSession
     public void UpdateSetupPassword(string password) => Ui.SetupPassword = password;
     public void UpdateSetupRepeatPassword(string password) => Ui.SetupRepeatPassword = password;
 
+    public void PrepareIdentifyRetry(string status)
+    {
+        Ui.IdentifyActive = true;
+        Ui.IdentifyLedLive = false;
+        Ui.Error = null;
+        Ui.Phase = ConnectionPhase.Reconnecting;
+        Ui.StatusText = status;
+        RaiseUi();
+    }
+
     public void PrepareAuthReconnect()
     {
         Ui.Phase = ConnectionPhase.Connecting;
