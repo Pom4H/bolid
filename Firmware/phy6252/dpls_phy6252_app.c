@@ -123,14 +123,27 @@ static void journal_wr32(uint8_t *p, uint32_t value)
     p[3] = (uint8_t)(value >> 24);
 }
 
-static uint8_t *journal_load_block(uint8_t block_index)
+static bool journal_load_block(uint8_t block_index, uint8_t **out)
 {
-    if (journal_cached_block == block_index) return journal_block_cache;
-    memset(journal_block_cache, 0, sizeof(journal_block_cache));
-    (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                        (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
+    int rc;
+    if (journal_cached_block == block_index) {
+        *out = journal_block_cache;
+        return true;
+    }
+
+    rc = hal_fs_item_read((uint16_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
+                          journal_block_cache, DPLS_JOURNAL_BLOCK_SIZE, NULL);
+    if (rc == PPlus_ERR_FS_NOT_FIND_ID) {
+        memset(journal_block_cache, 0, sizeof(journal_block_cache));
+    } else if (rc != PPlus_SUCCESS) {
+        journal_cached_block = 0xffu;
+        memset(journal_block_cache, 0, sizeof(journal_block_cache));
+        return false;
+    }
+
     journal_cached_block = block_index;
-    return journal_block_cache;
+    *out = journal_block_cache;
+    return true;
 }
 
 static bool journal_decode_record(const uint8_t record[DPLS_JOURNAL_RECORD_SIZE], dpls_event_t *event)
@@ -169,7 +182,7 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
 
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         hal_watchdog_feed();
-        block = journal_load_block((uint8_t)block_index);
+        if (!journal_load_block((uint8_t)block_index, &block)) return false;
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
             if (journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &event) &&
@@ -185,7 +198,7 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
 
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         hal_watchdog_feed();
-        block = journal_load_block((uint8_t)block_index);
+        if (!journal_load_block((uint8_t)block_index, &block)) return false;
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
             uint32_t age;
@@ -209,15 +222,21 @@ static bool journal_storage_append(void *context, const dpls_event_t *event)
     uint8_t *block;
     uint16_t slot;
     uint8_t block_index, record_index;
+    int rc;
     (void)context;
     if (!event || event->sequence == 0u) return false;
     slot = (uint16_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY);
     block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
     record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
-    block = journal_load_block(block_index);
+    if (!journal_load_block(block_index, &block)) return false;
     journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event);
-    return osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, block) == SUCCESS;
+    rc = hal_fs_item_write((uint16_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
+                           block, DPLS_JOURNAL_BLOCK_SIZE);
+    if (rc != PPlus_SUCCESS) {
+        journal_cached_block = 0xffu;
+        return false;
+    }
+    return true;
 }
 
 static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t *event)
@@ -230,7 +249,7 @@ static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t 
     slot = (uint16_t)((sequence - 1u) % DPLS_EVENT_CAPACITY);
     block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
     record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
-    block = journal_load_block(block_index);
+    if (!journal_load_block(block_index, &block)) return false;
     return journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event) &&
            event->sequence == sequence;
 }
@@ -429,13 +448,22 @@ static void device_info(void *context, dpls_device_info_t *out)
     if (dpls_phy6252_adc_fully_calibrated()) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
 }
 
+static bool auth_lock_record_valid(const dpls_auth_lock_t *record)
+{
+    return record->magic == DPLS_AUTH_LOCK_MAGIC &&
+           record->crc == dpls_crc16((const uint8_t *)record, offsetof(dpls_auth_lock_t, crc)) &&
+           record->locked <= 1u;
+}
+
 static bool auth_lock_read(void *context)
 {
     dpls_auth_lock_t record;
+    int rc;
     (void)context;
-    if (osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
-    if (record.magic != DPLS_AUTH_LOCK_MAGIC ||
-        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc))) return false;
+    memset(&record, 0, sizeof(record));
+    rc = hal_fs_item_read(DPLS_AUTH_LOCK_SNV_ID, (uint8_t *)&record, sizeof(record), NULL);
+    if (rc == PPlus_ERR_FS_NOT_FIND_ID) return false; /* pristine device */
+    if (rc != PPlus_SUCCESS || !auth_lock_record_valid(&record)) return true; /* fail closed */
     return record.locked != 0u;
 }
 
@@ -443,18 +471,27 @@ static bool auth_lock_write(void *context, bool locked)
 {
     dpls_auth_lock_t current;
     dpls_auth_lock_t record;
-    bool current_valid;
+    dpls_auth_lock_t verify;
+    int rc;
     (void)context;
-    current_valid = osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(current), &current) == SUCCESS &&
-                    current.magic == DPLS_AUTH_LOCK_MAGIC &&
-                    current.crc == dpls_crc16((const uint8_t *)&current, offsetof(dpls_auth_lock_t, crc));
-    if (current_valid && ((current.locked != 0u) == locked)) return true;
-    if (!current_valid && !locked) return true;
+
+    memset(&current, 0, sizeof(current));
+    rc = hal_fs_item_read(DPLS_AUTH_LOCK_SNV_ID, (uint8_t *)&current, sizeof(current), NULL);
+    if (rc == PPlus_SUCCESS && auth_lock_record_valid(&current) &&
+        ((current.locked != 0u) == locked)) return true;
+    if (rc == PPlus_ERR_FS_NOT_FIND_ID && !locked) return true;
+    if (rc != PPlus_SUCCESS && rc != PPlus_ERR_FS_NOT_FIND_ID) return false;
+
     record.magic = DPLS_AUTH_LOCK_MAGIC;
     record.locked = locked ? 1u : 0u;
     record.reserved = 0u;
     record.crc = dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc));
-    return osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) == SUCCESS;
+    if (hal_fs_item_write(DPLS_AUTH_LOCK_SNV_ID, (uint8_t *)&record, sizeof(record)) != PPlus_SUCCESS)
+        return false;
+    memset(&verify, 0, sizeof(verify));
+    if (hal_fs_item_read(DPLS_AUTH_LOCK_SNV_ID, (uint8_t *)&verify, sizeof(verify), NULL) != PPlus_SUCCESS)
+        return false;
+    return auth_lock_record_valid(&verify) && verify.locked == record.locked;
 }
 
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
@@ -584,12 +621,36 @@ static bool clear_settings_for_factory_reset(void)
     return true;
 }
 
+static bool fs_item_absent(uint16_t id)
+{
+    uint8_t byte = 0u;
+    return hal_fs_item_read(id, &byte, 1u, NULL) == PPlus_ERR_FS_NOT_FIND_ID;
+}
+
+static bool bond_records_absent(void)
+{
+    uint8_t index;
+    for (index = 0u; index < GAP_BONDINGS_MAX; ++index) {
+        uint16_t main_id = (uint16_t)(BLE_NVID_GAP_BOND_START + index);
+        uint16_t local_id = (uint16_t)(BLE_NVID_GAP_BOND_START + GAP_BONDINGS_MAX + index);
+        uint16_t peer_id = (uint16_t)(BLE_NVID_GAP_BOND_START + 2u * GAP_BONDINGS_MAX + index);
+        uint16_t ccc_id = (uint16_t)(BLE_NVID_GATT_CFG_START + index);
+        if (!fs_item_absent(main_id) || !fs_item_absent(local_id) ||
+            !fs_item_absent(peer_id) || !fs_item_absent(ccc_id))
+            return false;
+    }
+    return true;
+}
+
 static bool erase_all_bonds_now(void)
 {
     uint8 count = 0xffu;
     if (GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL) != SUCCESS) return false;
-    if (GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &count) != SUCCESS) return false;
-    return count == 0u;
+    if (GAPBondMgr_GetParameter(GAPBOND_BOND_COUNT, &count) != SUCCESS || count != 0u) return false;
+    /* BondMgr's RAM count alone is insufficient: its reload path treats any NV
+     * read error as an empty record. Verify the vendor bond/security/CCC IDs at
+     * the underlying filesystem layer before considering reset successful. */
+    return bond_records_absent();
 }
 
 static bool finish_factory_reset(void)
@@ -659,9 +720,6 @@ static void classify_settings(void)
         return;
     }
 
-    /* Both IDs absent is the only implicit EMPTY state: a pristine filesystem.
-     * Establish an explicit marker immediately. Every other FS/read error is
-     * corruption and must never open commissioning. */
     if (settings_rc == PPlus_ERR_FS_NOT_FIND_ID && marker_rc == PPlus_ERR_FS_NOT_FIND_ID) {
         marker = DPLS_SETTINGS_EMPTY_MARKER;
         if (hal_fs_item_write(DPLS_SETTINGS_STATE_SNV_ID, &marker, sizeof(marker)) == PPlus_SUCCESS &&
@@ -790,7 +848,7 @@ void dpls_phy6252_connected(uint16 conn_handle)
 void dpls_phy6252_disconnected(void)
 {
     (void)dpls_phy6252_hw_connection_unlock();
-    note_pre_auth_disconnect();
+    if (!factory_reset_pending) note_pre_auth_disconnect();
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
     connected_at_ms = 0;
