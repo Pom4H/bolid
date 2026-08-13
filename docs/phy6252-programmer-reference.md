@@ -404,10 +404,14 @@ Production pinout Test-DPLS:
 | P14 | `KZ_1` | short +1 |
 | P16 | `KZ_2` | short +2 |
 | P17 | `KZ_T` | short +T |
-| P20 | `DPLS_V_ADC` | line voltage ADC |
+| P20 | `PORT1_ADC` | voltage ADC +1 (also the legacy line channel) |
+| P15 | `PORT2_ADC` | voltage ADC +2 |
+| P24 | `PORT_T_ADC` | voltage ADC +T |
 | P23 | `VCAP_ADC` | reserve capacitor ADC |
-| P24 | `FACTORY_RESET` | physical password reset |
-| P7 | `STATUS_LED` | status LED |
+| P07 | `LED_RED` | status light, red channel |
+| P11 | `LED_GREEN` | status light, green channel |
+| P18 | `LED_BLUE` | status light, blue channel |
+| P34 | `FACTORY_RESET` | physical password reset |
 
 Источник project pinout: [`Firmware/README.md`](../Firmware/README.md) и `Firmware/phy6252/dpls_board.h`.
 
