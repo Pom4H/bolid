@@ -89,10 +89,10 @@ static uint32_t pre_auth_disconnect_window_ms;
 #define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
 #define DPLS_FRAGMENT_HEADER_SIZE 3u
+#define DPLS_RX_SETTLE_MS 700u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
-static uint8 rx_radio_events_to_skip;
 static uint8 fragment_buffer[DPLS_RX_SLOT_SIZE];
 static uint8 fragment_transfer_id, fragment_total, fragment_received;
 
@@ -654,11 +654,13 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
      * completed. */
     if (connection_handle == INVALID_CONNHANDLE) {
         osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
-    } else {
-        /* The notice for the event that delivered this write can still be
-         * pending. Skip it, then release the command after the next complete
-         * radio event, in which the ATT write response is transmitted. */
-        rx_radio_events_to_skip = 1u;
+    } else if (rx_count == 1u) {
+        /* PHY62XX can keep the ATT write response in flight for several
+         * connection intervals. Starting an indication or AUTH crypto from
+         * inside the write callback wedges Samsung's GATT queue. Release the
+         * complete command from OSAL after a bounded quiet interval; ADC stays
+         * independently gated by the LL connection-event notice. */
+        (void)osal_start_timerEx(task_id, DPLS_PHY6252_RX_EVT, DPLS_RX_SETTLE_MS);
     }
     return SUCCESS;
 }
@@ -820,7 +822,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     bool adc_ok;
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
-    rx_head = rx_tail = rx_count = rx_radio_events_to_skip = 0;
+    rx_head = rx_tail = rx_count = 0;
     fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
@@ -934,7 +936,7 @@ void dpls_phy6252_disconnected(void)
     connection_handle = INVALID_CONNHANDLE;
     connected_at_ms = 0;
     connection_had_encryption = false;
-    rx_head = rx_tail = rx_count = rx_radio_events_to_skip = 0;
+    rx_head = rx_tail = rx_count = 0;
     fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
@@ -942,16 +944,6 @@ void dpls_phy6252_disconnected(void)
 
     if (factory_reset_pending && !finish_factory_reset())
         factory_reset_failed();
-}
-
-void dpls_phy6252_rx_after_radio_event(void)
-{
-    if (rx_count == 0u) return;
-    if (rx_radio_events_to_skip != 0u) {
-        --rx_radio_events_to_skip;
-        return;
-    }
-    osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
 void dpls_phy6252_process_rx(void)
@@ -963,10 +955,12 @@ void dpls_phy6252_process_rx(void)
     slot->length = 0;
     rx_head = (uint8)((rx_head + 1u) % DPLS_RX_QUEUE_DEPTH);
     --rx_count;
-    /* While connected, process at most one complete command per radio event.
-     * The next LL event notice releases the next slot. */
-    if (rx_count != 0u && connection_handle == INVALID_CONNHANDLE)
-        osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    if (rx_count != 0u) {
+        if (connection_handle == INVALID_CONNHANDLE)
+            osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+        else
+            (void)osal_start_timerEx(task_id, DPLS_PHY6252_RX_EVT, DPLS_RX_SETTLE_MS);
+    }
 }
 
 void dpls_phy6252_process_adc(void)
