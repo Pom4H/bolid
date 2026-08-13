@@ -384,6 +384,18 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     return true;
 }
 
+static dpls_led_scene_t led_scene_for_mode(dpls_mode_t mode)
+{
+    switch (mode) {
+    case DPLS_MODE_OPEN_T: return DPLS_LED_SCENE_OPEN_T;
+    case DPLS_MODE_OPEN_MAIN: return DPLS_LED_SCENE_OPEN_MAIN;
+    case DPLS_MODE_SHORT_1: return DPLS_LED_SCENE_SHORT_1;
+    case DPLS_MODE_SHORT_2: return DPLS_LED_SCENE_SHORT_2;
+    case DPLS_MODE_SHORT_T: return DPLS_LED_SCENE_SHORT_T;
+    default: return DPLS_LED_SCENE_NORMAL;
+    }
+}
+
 static void status_led_output(void *context, bool on)
 {
     (void)context;
