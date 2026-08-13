@@ -35,6 +35,7 @@ import java.nio.ByteOrder
 import java.io.File
 import java.security.SecureRandom
 import java.util.UUID
+import java.util.concurrent.Executors
 import javax.crypto.Mac
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
@@ -46,6 +47,7 @@ class BleClient(context: Context) {
     private val adapter = appContext.getSystemService(BluetoothManager::class.java).adapter
     private val handler = Handler(Looper.getMainLooper())
     private val random = SecureRandom()
+    private val cryptoExecutor = Executors.newSingleThreadExecutor()
     private val _uiState = MutableStateFlow(DplsUiState())
     val uiState: StateFlow<DplsUiState> = _uiState.asStateFlow()
 
@@ -57,6 +59,7 @@ class BleClient(context: Context) {
     private var reconnectAttempt = 0
     private var negotiatedMtu = 23
     private var sequence = 1
+    private var fragmentTransferId = 1
     private var commandId = 1L
     private var sessionId = 0L
     private var sessionToken = ByteArray(8)
@@ -72,6 +75,7 @@ class BleClient(context: Context) {
     private var interruptedNewVerifier: ByteArray? = null
     private var triedInterruptedVerifier = false
     private var pendingSetupName: String? = null
+    private var cryptoGeneration = 0L
 
     /** One in-flight settings change. Typed so a NAME_SET result can never be
      * mistaken for a PASSWORD_SET result: the new verifier is adopted only when
@@ -316,6 +320,7 @@ class BleClient(context: Context) {
     fun connect(address: String) {
         stopScan()
         cancelReconnect()
+        invalidateCryptoWork()
         val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
             ?: return fail("Некорректный адрес устройства")
         selectedAddress = address
@@ -391,13 +396,11 @@ class BleClient(context: Context) {
     }
 
     fun fillSetupFormForE2e(name: String, password: String) {
-        _uiState.update { it.copy(setupName = name, setupPassword = password, setupRepeatPassword = password) }
-        handler.post { setup(name, password.toCharArray()) }
+        setup(name, password.toCharArray())
     }
 
     fun fillLoginFormForE2e(password: String) {
-        _uiState.update { it.copy(setupPassword = password) }
-        handler.post { authenticate(password.toCharArray()) }
+        authenticate(password.toCharArray())
     }
 
     fun setNameForE2e(name: String) {
@@ -417,29 +420,43 @@ class BleClient(context: Context) {
     }
 
     fun authenticate(password: CharArray) {
-        if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
-        handler.removeCallbacks(preAuthKeepAlive)
+        Log.i(TAG, "E2E authenticate start")
+        if (password.size < 8) {
+            password.fill('\u0000')
+            return fail("Пароль должен содержать не менее 8 символов")
+        }
         // The user supplied a password explicitly — any stashed interrupted-change
         // verifier is no longer relevant.
         clearInterruptedVerifier()
-        val verifier = deriveVerifier(password, authSalt)
-        password.fill('\u0000')
-        cachedVerifier = verifier
-        sendAuthProof(verifier)
+        _uiState.update { it.copy(statusText = "Проверка пароля…", error = null) }
+        deriveVerifierAsync(password, authSalt.copyOf(), "Не удалось проверить пароль") { verifier ->
+            cachedVerifier?.fill(0)
+            cachedVerifier = verifier
+            sendAuthProof(verifier)
+        }
     }
 
     fun setup(deviceName: String, password: CharArray) {
-        if (deviceName.isBlank()) return fail("Введите имя устройства")
-        if (password.size < 8) return fail("Пароль должен содержать не менее 8 символов")
+        if (deviceName.isBlank()) {
+            password.fill('\u0000')
+            return fail("Введите имя устройства")
+        }
+        if (password.size < 8) {
+            password.fill('\u0000')
+            return fail("Пароль должен содержать не менее 8 символов")
+        }
         val salt = ByteArray(16).also(random::nextBytes)
-        val verifier = deriveVerifier(password, salt)
-        password.fill('\u0000')
-        cachedVerifier = verifier
         pendingSetupName = deviceName.trim()
         val name = utf8Truncate(pendingSetupName!!, 31)
-        val payload = ByteBuffer.allocate(4 + 1 + name.size + salt.size + verifier.size)
-            .order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).put(name.size.toByte()).put(name).put(salt).put(verifier).array()
-        send(DplsProtocol.Type.SETUP, payload)
+        _uiState.update { it.copy(statusText = "Сохранение настроек…", error = null) }
+        deriveVerifierAsync(password, salt, "Не удалось подготовить пароль") { verifier ->
+            cachedVerifier?.fill(0)
+            cachedVerifier = verifier
+            val payload = ByteBuffer.allocate(4 + 1 + name.size + salt.size + verifier.size)
+                .order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).put(name.size.toByte())
+                .put(name).put(salt).put(verifier).array()
+            send(DplsProtocol.Type.SETUP, payload)
+        }
     }
 
     fun requestMode(mode: DplsMode) {
@@ -523,24 +540,37 @@ class BleClient(context: Context) {
         // Verify the current password locally against the cached verifier before
         // touching the device: the firmware replaces the verifier unconditionally,
         // so this guard prevents an accidental change from a mistyped old password.
-        val cached = cachedVerifier
-        val currentVerifier = deriveVerifier(current, authSalt)
-        current.fill('\u0000')
-        if (cached == null || !currentVerifier.contentEquals(cached)) {
-            new.fill('\u0000')
-            _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Неверный текущий пароль") }
-            return
-        }
-        val newSalt = ByteArray(16).also(random::nextBytes)
-        val newVerifier = deriveVerifier(new, newSalt)
-        new.fill('\u0000')
-        val id = commandId++
-        armPendingSettings(PendingSettings.Password(id, newVerifier))
-        val payload = ByteBuffer.allocate(12 + 4 + 16 + 32).order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
-            .put(newSalt).put(newVerifier).array()
         _uiState.update { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null) }
-        send(DplsProtocol.Type.PASSWORD_SET, payload)
+        val cached = cachedVerifier?.copyOf()
+        deriveVerifierAsync(
+            current,
+            authSalt.copyOf(),
+            "Не удалось проверить текущий пароль",
+            onAborted = {
+                cached?.fill(0)
+                new.fill('\u0000')
+            },
+        ) { currentVerifier ->
+            val matches = cached != null && currentVerifier.contentEquals(cached)
+            currentVerifier.fill(0)
+            cached?.fill(0)
+            if (!matches) {
+                new.fill('\u0000')
+                _uiState.update {
+                    it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Неверный текущий пароль")
+                }
+                return@deriveVerifierAsync
+            }
+            val newSalt = ByteArray(16).also(random::nextBytes)
+            deriveVerifierAsync(new, newSalt, "Не удалось подготовить новый пароль") { newVerifier ->
+                val id = commandId++
+                armPendingSettings(PendingSettings.Password(id, newVerifier))
+                val payload = ByteBuffer.allocate(12 + 4 + 16 + 32).order(ByteOrder.LITTLE_ENDIAN)
+                    .putInt(sessionId.toInt()).put(sessionToken).putInt(id.toInt())
+                    .put(newSalt).put(newVerifier).array()
+                send(DplsProtocol.Type.PASSWORD_SET, payload)
+            }
+        }
     }
 
     fun runTestModeForE2e(wire: Int) {
@@ -744,6 +774,7 @@ class BleClient(context: Context) {
     fun release() {
         disconnect()
         appContext.unregisterReceiver(bluetoothReceiver)
+        cryptoExecutor.shutdownNow()
     }
 
     @SuppressLint("MissingPermission")
@@ -1416,9 +1447,43 @@ class BleClient(context: Context) {
     }
 
     private fun sendAuthProof(verifier: ByteArray) {
-        val signed = deviceNonce + clientNonce + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).array()
-        val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(verifier, "HmacSHA256")) }.doFinal(signed)
-        send(DplsProtocol.Type.AUTH_PROOF, clientNonce + mac)
+        Log.i(TAG, "E2E auth proof schedule")
+        val generation = cryptoGeneration
+        val connection = gatt
+        val key = verifier.copyOf()
+        val nonce = clientNonce.copyOf()
+        val signed = deviceNonce.copyOf() + nonce +
+            ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(sessionId.toInt()).array()
+        cryptoExecutor.execute {
+            Log.i(TAG, "E2E auth proof worker start generation=$generation")
+            val result = runCatching {
+                val mac = Mac.getInstance("HmacSHA256")
+                    .apply { init(SecretKeySpec(key, "HmacSHA256")) }
+                    .doFinal(signed)
+                nonce + mac
+            }
+            key.fill(0)
+            Log.i(TAG, "E2E auth proof worker done generation=$generation success=${result.isSuccess}")
+            handler.post {
+                Log.i(TAG, "E2E auth proof result main generation=$generation current=$cryptoGeneration sameGatt=${gatt === connection}")
+                if (generation != cryptoGeneration || gatt !== connection) {
+                    result.getOrNull()?.fill(0)
+                    return@post
+                }
+                result.fold(
+                    onSuccess = { payload ->
+                        Log.i(TAG, "E2E auth proof sending bytes=${payload.size}")
+                        send(DplsProtocol.Type.AUTH_PROOF, payload)
+                        Log.i(TAG, "E2E auth proof send returned")
+                        payload.fill(0)
+                    },
+                    onFailure = {
+                        Log.e(TAG, "Не удалось подготовить подтверждение пароля", it)
+                        fail("Не удалось подготовить подтверждение пароля")
+                    },
+                )
+            }
+        }
     }
 
     private fun deriveVerifier(password: CharArray, salt: ByteArray): ByteArray {
@@ -1426,12 +1491,50 @@ class BleClient(context: Context) {
         return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded.also { spec.clearPassword() }
     }
 
+    private fun deriveVerifierAsync(
+        password: CharArray,
+        salt: ByteArray,
+        errorMessage: String,
+        onAborted: () -> Unit = {},
+        onReady: (ByteArray) -> Unit,
+    ) {
+        val generation = ++cryptoGeneration
+        val connection = gatt
+        cryptoExecutor.execute {
+            Log.i(TAG, "E2E password derivation worker start generation=$generation")
+            val result = runCatching { deriveVerifier(password, salt) }
+            Log.i(TAG, "E2E password derivation worker done generation=$generation success=${result.isSuccess}")
+            password.fill('\u0000')
+            handler.post {
+                Log.i(TAG, "E2E password result main generation=$generation current=$cryptoGeneration sameGatt=${gatt === connection}")
+                if (generation != cryptoGeneration || gatt !== connection) {
+                    result.getOrNull()?.fill(0)
+                    onAborted()
+                    return@post
+                }
+                result.fold(onSuccess = onReady) {
+                    onAborted()
+                    Log.e(TAG, errorMessage, it)
+                    fail(errorMessage)
+                }
+            }
+        }
+    }
+
+    private fun invalidateCryptoWork() {
+        cryptoGeneration++
+    }
+
     private fun authenticatedPayload(): ByteArray = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
         .putInt(sessionId.toInt()).put(sessionToken).array()
 
     @SuppressLint("MissingPermission")
     private fun send(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf()) {
-        enqueueWrite(DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload)))
+        Log.i(TAG, "E2E send enter type=$type")
+        val bytes = DplsProtocol.encode(DplsProtocol.Frame(type, nextSequence(), payload = payload))
+        Log.i(TAG, "E2E send encoded type=$type bytes=${bytes.size}")
+        enqueueWrite(bytes)
+        Log.i(TAG, "E2E send exit type=$type")
     }
 
     private fun sendPriority(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf(), flush: Boolean = false) {
@@ -1444,7 +1547,7 @@ class BleClient(context: Context) {
                 fail("Кадр ${bytes.size} байт не помещается в MTU $negotiatedMtu")
                 return@post
             }
-            writeQueue.addFirst(bytes)
+            fragmentClientWrite(bytes).asReversed().forEach(writeQueue::addFirst)
             drainWriteQueue()
         }
     }
@@ -1454,15 +1557,42 @@ class BleClient(context: Context) {
             fail("Кадр ${bytes.size} байт не помещается в MTU $negotiatedMtu")
             return
         }
-        handler.post {
-            if (_uiState.value.logProgress != null) return@post
-            if (front) writeQueue.addFirst(bytes) else writeQueue.addLast(bytes)
+        val enqueue = enqueue@{
+            Log.i(TAG, "E2E enqueue enter bytes=${bytes.size} progress=${_uiState.value.logProgress}")
+            if (_uiState.value.logProgress != null) return@enqueue
+            val transportFrames = fragmentClientWrite(bytes)
+            if (front) {
+                transportFrames.asReversed().forEach(writeQueue::addFirst)
+            } else {
+                transportFrames.forEach(writeQueue::addLast)
+            }
+            Log.i(TAG, "E2E enqueue queued size=${writeQueue.size} inProgress=$writeInProgress")
             drainWriteQueue()
+        }
+        if (Looper.myLooper() == handler.looper) {
+            enqueue()
+        } else {
+            handler.post(enqueue)
+        }
+    }
+
+    private fun fragmentClientWrite(bytes: ByteArray): List<ByteArray> {
+        if (bytes.size <= LEGACY_GATT_WRITE_SIZE) return listOf(bytes)
+        require(bytes.size <= 0xff)
+        val transferId = fragmentTransferId.also { fragmentTransferId = (it + 1) and 0xff }
+        return bytes.asList().chunked(CLIENT_FRAGMENT_DATA_SIZE).mapIndexed { index, chunk ->
+            val offset = index * CLIENT_FRAGMENT_DATA_SIZE
+            val payload = byteArrayOf(transferId.toByte(), bytes.size.toByte(), offset.toByte()) +
+                chunk.toByteArray()
+            DplsProtocol.encode(
+                DplsProtocol.Frame(DplsProtocol.Type.CLIENT_FRAGMENT, nextSequence(), payload = payload),
+            )
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun drainWriteQueue() {
+        Log.i(TAG, "E2E drain enter queue=${writeQueue.size} inProgress=$writeInProgress gatt=${gatt != null} rx=${rx != null}")
         if (writeInProgress) return
         val current = gatt ?: return
         val characteristic = rx ?: return
@@ -1470,6 +1600,7 @@ class BleClient(context: Context) {
         writeInProgress = true
         pendingWrite = bytes
         val result = writeCharacteristicCompat(current, characteristic, bytes)
+        Log.i(TAG, "E2E drain write returned result=$result")
         if (result != GATT_WRITE_SUCCESS) {
             writeInProgress = false
             handleWriteFailure(result)
@@ -1607,6 +1738,7 @@ class BleClient(context: Context) {
         cancelPairingTimeout()
         cancelReconnect()
         clearPendingSettings()
+        invalidateCryptoWork()
         awaitingDeviceInfo = false
         closeCurrentGatt()
         scanning = false
@@ -1632,6 +1764,7 @@ class BleClient(context: Context) {
 
     private fun scheduleReconnect() {
         if (reconnectRunnable != null) return
+        invalidateCryptoWork()
         handler.removeCallbacks(preAuthKeepAlive)
         rx = null
         tx = null
@@ -1704,6 +1837,7 @@ class BleClient(context: Context) {
         cancelPairingTimeout()
         cancelReconnect()
         clearPendingSettings()
+        invalidateCryptoWork()
         awaitingDeviceInfo = false
         closeCurrentGatt()
         rx = null
@@ -1815,6 +1949,8 @@ class BleClient(context: Context) {
         private const val SETTINGS_OP_TIMEOUT_MS = 10_000L
         private const val PBKDF2_ITERATIONS = 10_000
         private const val PREFERRED_MTU = 247
+        private const val LEGACY_GATT_WRITE_SIZE = 20
+        private const val CLIENT_FRAGMENT_DATA_SIZE = 8
         private const val MANUFACTURER_ID = 0x0B01
         private const val GATT_WRITE_SUCCESS = 0
         private const val GATT_WRITE_FAILED = -1

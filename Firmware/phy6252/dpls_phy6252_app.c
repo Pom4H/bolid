@@ -88,9 +88,12 @@ static uint32_t pre_auth_disconnect_window_ms;
 
 #define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
+#define DPLS_FRAGMENT_HEADER_SIZE 3u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
+static uint8 fragment_buffer[DPLS_RX_SLOT_SIZE];
+static uint8 fragment_transfer_id, fragment_total, fragment_received;
 
 #define DPLS_TX_QUEUE_DEPTH 2u
 #define DPLS_TX_SLOT_SIZE 168u
@@ -594,6 +597,48 @@ static bool tx_notify(void *context, const uint8_t *frame, size_t length)
 static uint8 receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
+    if (length >= DPLS_PROTOCOL_OVERHEAD && data[0] == DPLS_PROTOCOL_VERSION &&
+        data[1] == DPLS_MSG_CLIENT_FRAGMENT) {
+        uint16 payload_length = (uint16)(data[5] | ((uint16)data[6] << 8));
+        const uint8 *payload = data + 7;
+        uint8 transfer_id;
+        uint8 total;
+        uint8 offset;
+        uint8 chunk_length;
+
+        if (payload_length < DPLS_FRAGMENT_HEADER_SIZE ||
+            length != (uint16)(DPLS_PROTOCOL_OVERHEAD + payload_length) ||
+            (uint16)(data[length - 2] | ((uint16)data[length - 1] << 8)) !=
+                dpls_crc16(data, length - 2u))
+            return ATT_ERR_INVALID_VALUE;
+
+        transfer_id = payload[0];
+        total = payload[1];
+        offset = payload[2];
+        chunk_length = (uint8)(payload_length - DPLS_FRAGMENT_HEADER_SIZE);
+        if (total < DPLS_PROTOCOL_OVERHEAD || total > DPLS_RX_SLOT_SIZE ||
+            offset > total || chunk_length == 0u ||
+            (uint16)offset + chunk_length > total)
+            return ATT_ERR_INVALID_VALUE_SIZE;
+
+        if (offset == 0u) {
+            fragment_transfer_id = transfer_id;
+            fragment_total = total;
+            fragment_received = 0u;
+        }
+        if (transfer_id != fragment_transfer_id || total != fragment_total ||
+            offset != fragment_received)
+            return ATT_ERR_INVALID_OFFSET;
+
+        memcpy(fragment_buffer + offset, payload + DPLS_FRAGMENT_HEADER_SIZE, chunk_length);
+        fragment_received = (uint8)(fragment_received + chunk_length);
+        if (fragment_received != fragment_total)
+            return SUCCESS;
+
+        data = fragment_buffer;
+        length = fragment_total;
+        fragment_received = fragment_total = 0u;
+    }
     if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
     if (rx_count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
     slot = &rx_queue[rx_tail];
@@ -763,6 +808,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
     rx_head = rx_tail = rx_count = 0;
+    fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
     tx_in_flight_since_ms = 0u;
@@ -876,6 +922,7 @@ void dpls_phy6252_disconnected(void)
     connected_at_ms = 0;
     connection_had_encryption = false;
     rx_head = rx_tail = rx_count = 0;
+    fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
     tx_in_flight_since_ms = 0u;

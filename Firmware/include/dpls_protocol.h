@@ -34,6 +34,7 @@ typedef enum {
     DPLS_MSG_LOG_FINISH = 0x24,
     DPLS_MSG_LOG_RESULT = 0x25,
     DPLS_MSG_KEEP_ALIVE = 0x30,
+    DPLS_MSG_CLIENT_FRAGMENT = 0x31,
     DPLS_MSG_ERROR = 0x7f
 } dpls_message_type_t;
 

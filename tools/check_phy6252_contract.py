@@ -237,6 +237,8 @@ def main() -> None:
     require(target, "dpls_phy6252_adc_set_full_scan(true)", TARGET)
     require(target, "dpls_phy6252_adc_set_radio_gated(true)", TARGET)
     require(target, "dpls_phy6252_adc_after_radio_event()", TARGET)
+    require(app, "DPLS_MSG_CLIENT_FRAGMENT", APP)
+    require(app, "fragment_buffer", APP)
     require(sdk_patch, "peer-address slave ID key override", SDK_PATCH)
     require(sdk_patch, "Respect GAPBOND_KEY_DIST_LIST", SDK_PATCH)
     for forbidden in (

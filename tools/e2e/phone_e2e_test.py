@@ -251,7 +251,11 @@ def dump_nodes(retries: int | None = None) -> list[Node]:
 
 
 def e2e_broadcast(action: str, **extras: str | int) -> None:
-    args = ["shell", "am", "broadcast", "-a", action]
+    args = [
+        "shell", "am", "broadcast",
+        "--receiver-foreground", "--receiver-include-background",
+        "-a", action,
+    ]
     for key, value in extras.items():
         flag = "--ei" if isinstance(value, int) else "--es"
         args.extend([flag, key, str(value)])

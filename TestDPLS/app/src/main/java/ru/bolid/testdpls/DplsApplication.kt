@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.util.Log
 import androidx.core.content.ContextCompat
 import ru.bolid.testdpls.ble.BleClient
 
@@ -18,6 +19,7 @@ class DplsApplication : Application() {
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) return
         e2eReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
+                Log.i("TestDplsBle", "E2E action ${intent?.action}")
                 when (intent?.action) {
                     ACTION_E2E_FILL_SETUP -> {
                         val name = intent.getStringExtra(EXTRA_E2E_NAME) ?: return
