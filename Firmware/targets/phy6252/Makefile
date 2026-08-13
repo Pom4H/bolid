@@ -24,6 +24,7 @@ VPATH := source
 VPATH += $(PRODUCT_ROOT)/src
 VPATH += $(PRODUCT_ROOT)/phy6252
 VPATH += $(ROOT)/components/libraries/tinycrypt-0.2.8/lib/source
+VPATH += $(ROOT)/components/driver/adc
 VPATH += $(PROJ_ROOT)
 VPATH += $(PROJ_ROOT)/source
 
@@ -62,6 +63,7 @@ SRC_RAW += dpls_ble_identity.c
 SRC_RAW += hmac.c
 SRC_RAW += sha256.c
 SRC_RAW += utils.c
+SRC_RAW += adc.c
 SRC_RAW += $(CSRCS)
 
 STARTUP_RAW := phy6222_start.s
