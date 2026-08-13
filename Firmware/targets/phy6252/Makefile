@@ -139,8 +139,11 @@ OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SDK_SOURCES:.c=.o))) \
 	$(addprefix $(BUILD)/,$(notdir $(APP_SOURCES:.c=.o))) \
 	$(BUILD)/startup_phy6252.o
 DEPS := $(OBJECTS:.o=.d)
-RF_LIB := $(SDK)/lib/rf.lib
-BLE_LIB := $(SDK)/lib/ble_host.lib
+RF_LIB_SRC := $(SDK)/lib/rf.lib
+BLE_LIB_SRC := $(SDK)/lib/ble_host.lib
+RF_LIB := $(BUILD)/rf.lib
+BLE_LIB := $(BUILD)/ble_host.lib
+FIX_AR := $(FW)/../tools/fix_armcc_archive.py
 
 .PHONY: all size clean
 all: $(HEX)
@@ -170,9 +173,16 @@ $(BUILD)/dpls_phy6252_app.o: APP_CFLAGS += -Wno-unused-function
 $(BUILD)/startup_phy6252.o: startup_phy6252.S | $(BUILD)
 	$(CC) $(ARCH) -x assembler-with-cpp -MMD -MP -c $< -o $@
 
+$(RF_LIB): $(RF_LIB_SRC) $(FIX_AR) | $(BUILD)
+	python3 $(FIX_AR) $< $@
+
+$(BLE_LIB): $(BLE_LIB_SRC) $(FIX_AR) | $(BUILD)
+	python3 $(FIX_AR) $< $@
+
 $(ELF): $(OBJECTS) $(ROM_LD) $(LDSCRIPT) $(RF_LIB) $(BLE_LIB)
 	$(CC) $(ARCH) -nostartfiles -nostdlib \
 		-Wl,-Map,$(MAP),--cref,--gc-sections,--undefined=jump_table_base,--undefined=global_config \
+		-Wl,--no-warn-mismatch \
 		-T $(LDSCRIPT) -T $(ROM_LD) -o $@ $(OBJECTS) \
 		-Wl,--start-group $(RF_LIB) $(BLE_LIB) -lgcc -Wl,--end-group
 	$(SIZE) $@
