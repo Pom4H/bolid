@@ -16,6 +16,7 @@ MAIN = ROOT / "Firmware/targets/phy6252/source/dpls_main.c"
 CPROJECT = ROOT / "Firmware/targets/phy6252/test-dpls.cproject.yml"
 SCATTER = ROOT / "Firmware/targets/phy6252/scatter_load.sct"
 CHECKLIST = ROOT / "docs/bring-up-checklist.md"
+SDK_PATCH = ROOT / "tools/patch_phy6252_sdk.py"
 
 DEFINE_RE = re.compile(r"^\s*#define\s+(DPLS_PIN_[A-Z0-9_]+)\s+([^/\r\n]+)", re.MULTILINE)
 
@@ -116,6 +117,7 @@ def main() -> None:
     cproject = read(CPROJECT)
     scatter = read(SCATTER)
     checklist = read(CHECKLIST)
+    sdk_patch = read(SDK_PATCH)
 
     defs = {name: value.strip() for name, value in DEFINE_RE.findall(board)}
     resolved = {name: resolve_pin(name, defs) for name in EXPECTED}
@@ -222,6 +224,8 @@ def main() -> None:
     require(target, "GAPBOND_KEYDIST_MENCKEY", TARGET)
     require(target, "GAPBOND_KEYDIST_MIDKEY", TARGET)
     forbid(target, "GAPBOND_KEYDIST_SIDKEY", TARGET)
+    require(sdk_patch, "peer-address slave ID key override", SDK_PATCH)
+    require(sdk_patch, "Respect GAPBOND_KEY_DIST_LIST", SDK_PATCH)
     for forbidden in (
         "hal_pwrmgr_register(MOD_USR1", "hal_pwrmgr_register(MOD_USR2",
         "disable_32k_xtal", "prime_safe_gpio_outputs",
