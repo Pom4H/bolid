@@ -71,7 +71,9 @@ void dpls_led_init(dpls_led_t *led, dpls_led_output_fn output, void *context, ui
 void dpls_led_set(dpls_led_t *led, dpls_led_scene_t scene, bool reserve, uint32_t now_ms);
 
 /* Advance the timeline, drive the output, and return the number of milliseconds
- * until the caller should tick again. */
+ * until the caller should tick again. Zero means the light is idle and the
+ * caller must not hold a periodic timer for it: the driver owns the flash shape
+ * only, so re-arming is the adapter's job once the scene changes. */
 uint32_t dpls_led_tick(dpls_led_t *led, uint32_t now_ms);
 
 #endif

@@ -41,7 +41,9 @@ static void build_timeline(dpls_led_t *led)
     switch (led->scene) {
     case DPLS_LED_SCENE_NORMAL:
         if (!led->reserve) {
-            seg_add(led, false, DPLS_LED_NORMAL_PERIOD_MS);
+            /* Nothing to show: leave the timeline empty so dpls_led_tick() can
+             * report "no work" and the adapter drops its periodic timer. A
+             * single all-off segment would keep waking the core forever. */
         } else {
             seg_add(led, true, DPLS_LED_RESERVE_TICK_MS);
             seg_add(led, false, DPLS_LED_RESERVE_GAP_MS);
@@ -62,7 +64,7 @@ static void build_timeline(dpls_led_t *led)
     case DPLS_LED_SCENE_SHORT_T: shorts = 3u; break;
     case DPLS_LED_SCENE_OPEN_MAIN: has_long = true; shorts = 2u; break;
     case DPLS_LED_SCENE_OPEN_T: has_long = true; shorts = 3u; break;
-    default: seg_add(led, false, DPLS_LED_NORMAL_PERIOD_MS); break;
+    default: break; /* unknown scene: stay dark and idle */
     }
 
     if (shorts != 0u || has_long) {
@@ -119,7 +121,10 @@ uint32_t dpls_led_tick(dpls_led_t *led, uint32_t now_ms)
 
     if (led->cycle_length_ms == 0u || led->segment_count == 0u) {
         apply_level(led, false);
-        return DPLS_LED_NORMAL_PERIOD_MS;
+        /* Zero means there is no future LED work, so the adapter must not keep a
+         * periodic timer running. It re-arms the scheduler when a command or a
+         * measurement changes the scene. */
+        return 0u;
     }
 
     elapsed = now_ms - led->cycle_start_ms;

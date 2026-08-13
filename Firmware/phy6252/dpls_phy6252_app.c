@@ -1181,6 +1181,9 @@ uint32 dpls_phy6252_led_tick(void)
     else scene = led_scene_for_mode(hardware_mode);
     dpls_led_set(&status_led, scene, reserve, now);
     delay = dpls_led_tick(&status_led, now);
+    /* Pass a zero straight through: it is the "nothing to show" answer, and
+     * clamping it to the minimum would keep the core waking up in Norma. */
+    if (delay == 0u) return 0u;
     if (delay < DPLS_LED_TICK_MIN_MS) delay = DPLS_LED_TICK_MIN_MS;
     if (delay > DPLS_LED_TICK_MAX_MS) delay = DPLS_LED_TICK_MAX_MS;
     return delay;

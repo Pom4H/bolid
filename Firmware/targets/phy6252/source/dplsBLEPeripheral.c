@@ -62,6 +62,17 @@ static void apply_identity_to_adv(void)
     advertising_data[28] = (uint8)(id >> 24);
 }
 
+/* Runs one LED step and keeps the timer only while there is something to show,
+ * so Norma costs no wake-ups at all. Every path that can change the scene calls
+ * this: a received command, the periodic tick that spots auto-isolation or a
+ * switch to reserve power, and the loss of a link during identify. */
+static void schedule_led_if_needed(void)
+{
+    uint32 next_ms = dpls_phy6252_led_tick();
+    if (next_ms != 0u)
+        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+}
+
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
@@ -70,7 +81,7 @@ static void state_changed(gaprole_States_t state)
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
-        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, 50);
+        schedule_led_if_needed();
         break;
     }
     case GAPROLE_CONNECTED: {
@@ -83,6 +94,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
         uint8 enabled = TRUE;
         dpls_phy6252_disconnected();
+        schedule_led_if_needed(); /* turn an interrupted identify off immediately */
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         break;
     }
@@ -199,16 +211,17 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();
+        schedule_led_if_needed();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
         return events ^ SBP_DPLS_TICK_EVT;
     }
     if (events & SBP_DPLS_LED_EVT) {
-        uint32 next_ms = dpls_phy6252_led_tick();
-        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+        schedule_led_if_needed();
         return events ^ SBP_DPLS_LED_EVT;
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
+        schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & DPLS_PHY6252_TX_EVT) {

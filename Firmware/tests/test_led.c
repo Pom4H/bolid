@@ -65,9 +65,20 @@ static unsigned count_flashes(dpls_led_scene_t scene, bool reserve)
     return edges;
 }
 
+/* Norma without reserve must cost no wake-ups: an empty timeline, a tick that
+ * reports "no work", and an output driven off. */
+static void expect_dormant_in_norma(void)
+{
+    dpls_led_set(&led, DPLS_LED_SCENE_NORMAL, false, 0u);
+    assert(led.segment_count == 0u);
+    assert(led.cycle_length_ms == 0u);
+    assert(dpls_led_tick(&led, 0u) == 0u);
+    assert(!led.level);
+    assert(dpls_led_tick(&led, 10000u) == 0u);
+}
+
 int main(void)
 {
-    static const dpls_led_segment_t normal[] = {{false, 3000u}};
     static const dpls_led_segment_t normal_res[] = {
         {true, 40u}, {false, 120u}, {true, 40u}, {false, 2800u}};
     static const dpls_led_segment_t short1[] = {{true, 150u}, {false, 1600u}};
@@ -89,7 +100,7 @@ int main(void)
 
     dpls_led_init(&led, record, &log, 0u);
 
-    expect_segments(DPLS_LED_SCENE_NORMAL, false, normal, 1u, "normal");
+    expect_dormant_in_norma();
     expect_segments(DPLS_LED_SCENE_NORMAL, true, normal_res, 4u, "normal+reserve");
     expect_segments(DPLS_LED_SCENE_SHORT_1, false, short1, 2u, "short1");
     expect_segments(DPLS_LED_SCENE_SHORT_2, false, short2, 4u, "short2");
