@@ -11,9 +11,7 @@
 
 static bool initialized;
 static bool ready;
-static bool sleep_locked;
-static bool connection_requires_awake;
-static bool control_requires_awake;
+static bool control_sleep_locked;
 static dpls_mode_t current_mode = DPLS_MODE_NORMAL;
 
 /* P16/P17 are XTAL_32K_IN/OUT on PHY6252, but the Test-DPLS board uses RC32K
@@ -67,38 +65,27 @@ static void drive_controls_low(void)
     current_mode = DPLS_MODE_NORMAL;
 }
 
-static bool reconcile_sleep_guard(void)
-{
-    bool required = connection_requires_awake || control_requires_awake;
-    if (required && !sleep_locked) {
-        if (hal_pwrmgr_lock(MOD_USR1) != PPlus_SUCCESS)
-            return false;
-        sleep_locked = true;
-    } else if (!required && sleep_locked) {
-        if (hal_pwrmgr_unlock(MOD_USR1) != PPlus_SUCCESS) {
-            sleep_locked = false;
-            ready = false;
-            return false;
-        }
-        sleep_locked = false;
-    }
-    return true;
-}
-
 static bool control_sleep_guard_acquire(void)
 {
-    control_requires_awake = true;
-    if (!reconcile_sleep_guard()) {
-        control_requires_awake = false;
+    if (control_sleep_locked)
+        return true;
+    if (hal_pwrmgr_lock(MOD_USR1) != PPlus_SUCCESS)
         return false;
-    }
+    control_sleep_locked = true;
     return true;
 }
 
 static bool control_sleep_guard_release(void)
 {
-    control_requires_awake = false;
-    return reconcile_sleep_guard();
+    if (!control_sleep_locked)
+        return true;
+    if (hal_pwrmgr_unlock(MOD_USR1) != PPlus_SUCCESS) {
+        control_sleep_locked = false;
+        ready = false;
+        return false;
+    }
+    control_sleep_locked = false;
+    return true;
 }
 
 void dpls_phy6252_hw_safe_normal(void)
@@ -138,9 +125,7 @@ bool dpls_phy6252_hw_init(void)
         return false;
     }
 
-    sleep_locked = false;
-    connection_requires_awake = false;
-    control_requires_awake = false;
+    control_sleep_locked = false;
     drive_controls_low();
     dpls_phy6252_hw_identify_led(false);
     ready = true;
@@ -216,20 +201,14 @@ void dpls_phy6252_hw_identify_led(bool on)
 
 bool dpls_phy6252_hw_connection_lock(void)
 {
-    /* Keep the core awake for the whole interactive BLE session. Hardware tests
-     * with this PHY62xx SDK show that sleep/wake can lose the ATT write response
-     * for a full AUTH_PROOF, leaving Android's serialized GATT queue wedged. */
+    /* The connection itself may sleep. ADC work is synchronized to the quiet
+     * interval after each radio event, while MOD_USR1 remains reserved for an
+     * asserted power-stage output. */
     if (!dpls_phy6252_hw_ready()) {
         dpls_phy6252_hw_safe_normal();
         return false;
     }
     disable_32k_xtal();
-    connection_requires_awake = true;
-    if (!reconcile_sleep_guard()) {
-        connection_requires_awake = false;
-        dpls_phy6252_hw_safe_normal();
-        return false;
-    }
     return true;
 }
 
@@ -237,7 +216,6 @@ bool dpls_phy6252_hw_connection_unlock(void)
 {
     /* Disconnect is another fail-safe boundary: outputs go passive first and
      * any active-mode sleep guard is released afterwards. */
-    connection_requires_awake = false;
     dpls_phy6252_hw_safe_normal();
     return dpls_phy6252_hw_ready();
 }
