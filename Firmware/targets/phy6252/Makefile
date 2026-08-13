@@ -54,42 +54,47 @@ DEFS := \
 	-DBROADCASTER_CFG=0x01 -DOBSERVER_CFG=0x02 \
 	-DPERIPHERAL_CFG=0x04 -DCENTRAL_CFG=0x08
 
-INCLUDES := \
+# SDK headers are -isystem so unused static prototypes in adc.h (and friends)
+# do not fail the app objects under -Werror. Those warnings fire at end of TU,
+# after a local diagnostic pragma around the include has already been popped.
+APP_INCLUDES := \
 	-Isource \
-	-I$(SDK)/example/ble_peripheral/simpleBlePeripheral/source \
-	-I$(SDK)/components/inc \
-	-I$(SDK)/components/ble/controller \
-	-I$(SDK)/components/osal/include \
-	-I$(SDK)/components/common \
-	-I$(SDK)/components/ble/include \
-	-I$(SDK)/components/ble/hci \
-	-I$(SDK)/components/ble/host \
-	-I$(SDK)/components/profiles/ota_app \
-	-I$(SDK)/components/profiles/DevInfo \
-	-I$(SDK)/components/profiles/SimpleProfile \
-	-I$(SDK)/components/profiles/Roles \
-	-I$(SDK)/components/profiles/GATT \
-	-I$(SDK)/components/libraries/crc16 \
-	-I$(SDK)/components/driver/watchdog \
-	-I$(SDK)/components/driver/clock \
-	-I$(SDK)/components/arch/cm0 \
-	-I$(SDK)/components/gcc/CMSIS/include \
-	-I$(SDK)/components/driver/pwrmgr \
-	-I$(SDK)/components/driver/uart \
-	-I$(SDK)/components/driver/gpio \
-	-I$(SDK)/components/driver/adc \
-	-I$(SDK)/components/driver/timer \
-	-I$(SDK)/misc \
-	-I$(SDK)/components/driver/log \
-	-I$(SDK)/components/libraries/cliface \
-	-I$(SDK)/components/driver/key \
-	-I$(SDK)/components/driver/pwm \
-	-I$(SDK)/components/driver/flash \
-	-I$(SDK)/components/libraries/fs \
-	-I$(SDK)/components/driver/led_light \
-	-I$(SDK)/components/libraries/tinycrypt-0.2.8/lib/include \
 	-I$(FW)/include \
 	-I$(FW)/phy6252
+SDK_INCLUDES := \
+	-isystem $(SDK)/example/ble_peripheral/simpleBlePeripheral/source \
+	-isystem $(SDK)/components/inc \
+	-isystem $(SDK)/components/ble/controller \
+	-isystem $(SDK)/components/osal/include \
+	-isystem $(SDK)/components/common \
+	-isystem $(SDK)/components/ble/include \
+	-isystem $(SDK)/components/ble/hci \
+	-isystem $(SDK)/components/ble/host \
+	-isystem $(SDK)/components/profiles/ota_app \
+	-isystem $(SDK)/components/profiles/DevInfo \
+	-isystem $(SDK)/components/profiles/SimpleProfile \
+	-isystem $(SDK)/components/profiles/Roles \
+	-isystem $(SDK)/components/profiles/GATT \
+	-isystem $(SDK)/components/libraries/crc16 \
+	-isystem $(SDK)/components/driver/watchdog \
+	-isystem $(SDK)/components/driver/clock \
+	-isystem $(SDK)/components/arch/cm0 \
+	-isystem $(SDK)/components/gcc/CMSIS/include \
+	-isystem $(SDK)/components/driver/pwrmgr \
+	-isystem $(SDK)/components/driver/uart \
+	-isystem $(SDK)/components/driver/gpio \
+	-isystem $(SDK)/components/driver/adc \
+	-isystem $(SDK)/components/driver/timer \
+	-isystem $(SDK)/misc \
+	-isystem $(SDK)/components/driver/log \
+	-isystem $(SDK)/components/libraries/cliface \
+	-isystem $(SDK)/components/driver/key \
+	-isystem $(SDK)/components/driver/pwm \
+	-isystem $(SDK)/components/driver/flash \
+	-isystem $(SDK)/components/libraries/fs \
+	-isystem $(SDK)/components/driver/led_light \
+	-isystem $(SDK)/components/libraries/tinycrypt-0.2.8/lib/include
+INCLUDES := $(APP_INCLUDES) $(SDK_INCLUDES)
 
 SDK_SOURCES := \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/main.c \

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,14 +18,29 @@ SRC_NAMES = ("dpls_protocol.c", "dpls_server.c", "dpls_led.c", "dpls_calib.c")
 
 
 def find_gcov() -> list[str]:
-    xcrun = subprocess.run(["xcrun", "--find", "llvm-cov"], capture_output=True, text=True)
-    if xcrun.returncode == 0:
-        llvm_cov = xcrun.stdout.strip()
-        if llvm_cov:
-            return [llvm_cov, "gcov"]
-    for candidate in ("llvm-cov", "gcov"):
-        if subprocess.run(["which", candidate], capture_output=True).returncode == 0:
-            return [candidate] if candidate == "gcov" else [candidate, "gcov"]
+    override = os.environ.get("GCOV")
+    if override:
+        return override.split()
+    if sys.platform == "darwin":
+        try:
+            xcrun = subprocess.run(
+                ["xcrun", "--find", "llvm-cov"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            xcrun = None
+        if xcrun is not None and xcrun.returncode == 0:
+            llvm_cov = xcrun.stdout.strip()
+            if llvm_cov:
+                return [llvm_cov, "gcov"]
+    llvm_cov = shutil.which("llvm-cov")
+    if llvm_cov:
+        return [llvm_cov, "gcov"]
+    gcov = shutil.which("gcov")
+    if gcov:
+        return [gcov]
     raise SystemExit("gcov / llvm-cov not found")
 
 

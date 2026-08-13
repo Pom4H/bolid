@@ -67,7 +67,7 @@ jobs:
           grep -q 'DPLS_STATE_PORT_2_VALID' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_STATE_PORT_T_VALID' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'STATE_REFRESH_MS = 1_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
-          grep -q 'port2VoltageValid' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'port2VoltageValid' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/DplsWire.kt
           test -f docs/live-voltage-requirements.md
 
   android:
