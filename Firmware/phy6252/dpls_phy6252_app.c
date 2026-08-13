@@ -45,12 +45,13 @@
  * still cheap during the long inter-series pauses. */
 #define DPLS_LED_TICK_MIN_MS 10u
 #define DPLS_LED_TICK_MAX_MS 250u
-/* Line-voltage ADC: sample about once a second (every Nth 200 ms tick) and
- * average over a short window against noise, keeping the pulsed draw within the
- * ≤0.5 mA budget. The ISR is deliberately minimal — raw copy plus a task wake —
- * with all scaling and calibration done in the OSAL task, so a conversion never
- * competes with the radio inside interrupt context. */
-#define DPLS_ADC_DECIMATE 5u
+/* Line-voltage ADC: sample about once a second — the tick itself now runs at
+ * 1 Hz, so no decimation is needed — and average over a short window against
+ * noise, keeping the pulsed draw within the ≤0.5 mA budget. The ISR is
+ * deliberately minimal — raw copy plus a task wake — with all scaling and
+ * calibration done in the OSAL task, so a conversion never competes with the
+ * radio inside interrupt context. */
+#define DPLS_ADC_DECIMATE 1u
 #define DPLS_ADC_WINDOW 8u
 /* Channels are kicked one at a time: the SDK 3.1.2 ADCC handler only drains the
  * IRQ when status == all_channels, so a dual-channel kick whose conversions

@@ -18,6 +18,13 @@
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
 #define DEFAULT_CONN_TIMEOUT 3000
+/* The operator protocol polls state at 1 Hz and the ADC now samples on this
+ * tick, so a 1 Hz housekeeping period keeps telemetry fresh at a fifth of the
+ * previous wake rate. */
+#define DPLS_TICK_MS 1000u
+/* 0.625 ms units: 500 ms advertising cuts idle radio events by 2.5x versus the
+ * vendor demo's 200 ms while keeping interactive discovery responsive. */
+#define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
 
@@ -80,7 +87,7 @@ static void state_changed(gaprole_States_t state)
         uint8 enabled = TRUE;
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         schedule_led_if_needed();
         break;
     }
@@ -127,7 +134,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint16 max_interval = DEFAULT_MAX_CONN_INTERVAL;
     uint16 latency = 0;
     uint16 timeout = DEFAULT_CONN_TIMEOUT;
-    uint16 advertising_interval = 320;
+    uint16 advertising_interval = DPLS_ADV_INTERVAL;
     uint32 passkey = 0;
     uint8 pairing_mode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
     uint8 mitm = FALSE;
@@ -212,7 +219,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();
         schedule_led_if_needed();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, 200);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         return events ^ SBP_DPLS_TICK_EVT;
     }
     if (events & SBP_DPLS_LED_EVT) {
