@@ -54,7 +54,7 @@ fun DplsScreen(viewModel: MainViewModel, onExportCsv: () -> Unit, onExportJson: 
         state, viewModel::startScan, viewModel::selectDevice, viewModel::identify, viewModel::stopIdentify,
         viewModel::confirmIdentifiedDevice, viewModel::updateSetupName, viewModel::updateSetupPassword,
         viewModel::updateSetupRepeatPassword, viewModel::authenticate, viewModel::setup, viewModel::requestMode, viewModel::cancelMode,
-        viewModel::confirmMode, viewModel::returnToNormal, viewModel::loadEventLog, viewModel::refreshState, viewModel::disconnect,
+        viewModel::confirmMode, viewModel::returnToNormal, viewModel::loadEventLog, viewModel::disconnect,
         viewModel::setDeviceName, viewModel::changePassword, viewModel::requestDeviceInfo, viewModel::clearSettingsOp,
         onExportCsv, onExportJson, modifier,
     )
@@ -67,7 +67,7 @@ private fun App(
     onSetupName: (String) -> Unit, onSetupPassword: (String) -> Unit, onSetupRepeat: (String) -> Unit,
     auth: (CharArray) -> Unit, setup: (String, CharArray) -> Unit,
     requestMode: (DplsMode) -> Unit, cancelMode: () -> Unit, confirmMode: () -> Unit,
-    normal: () -> Unit, loadLog: () -> Unit, refreshState: () -> Unit, disconnect: () -> Unit,
+    normal: () -> Unit, loadLog: () -> Unit, disconnect: () -> Unit,
     setName: (String) -> Unit, changePassword: (CharArray, CharArray) -> Unit,
     requestDeviceInfo: () -> Unit, clearSettingsOp: () -> Unit, exportCsv: () -> Unit,
     exportTxt: () -> Unit, modifier: Modifier,
@@ -91,28 +91,8 @@ private fun App(
         }
     }
 
-    LaunchedEffect(page, state.state?.mode?.dangerous, state.authenticated) {
-        if (page == Page.MAIN && state.authenticated && state.state?.mode?.isActiveTest() == true) {
-            refreshState()
-        }
-    }
-
     LaunchedEffect(state.authenticated) {
         if (state.authenticated) identifying = null
-    }
-
-    // Self-heal a stuck authenticated session: if the link drifts to a
-    // non-READY phase (e.g. ERROR after a reconnect) the controls grey out with
-    // no way back through the UI. Nudge a STATE_GET each second — a fresh
-    // STATE_REPORT drives the phase back to READY. Cancels the moment controls
-    // come back (the key flips).
-    LaunchedEffect(state.authenticated, state.controlsEnabled) {
-        if (state.authenticated && !state.controlsEnabled && state.state != null) {
-            while (true) {
-                delay(1500)
-                refreshState()
-            }
-        }
     }
 
     Scaffold(modifier = modifier.background(Bg), containerColor = Bg, bottomBar = {

@@ -9,6 +9,7 @@ wch-driver/
 pvvx-PHY62x2/.venv/
 
 Firmware/build/
+Firmware/build-cov/
 Firmware/sdk/PHY62XX_SDK_3.1.2/
 Firmware/sdk/release_bbb_sdk-*/
 Firmware/sdk/**/ac6/out/

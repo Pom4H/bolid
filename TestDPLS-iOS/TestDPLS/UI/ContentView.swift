@@ -127,18 +127,11 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onChange(of: state.state?.mode?.rawValue) { _ in
-            if state.state?.mode?.dangerous == true { pickingTest = false }
+        .onChange(of: state.state?.mode.rawValue) { _ in
+            if state.state?.mode.dangerous == true { pickingTest = false }
         }
         .onChange(of: state.authenticated) { authed in
             if authed { identifying = nil }
-        }
-        .task(id: "\(state.authenticated)-\(state.controlsEnabled)") {
-            guard state.authenticated, !state.controlsEnabled, state.state != nil else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                client.refreshState()
-            }
         }
         .sheet(item: $showShare) { payload in
             ActivityView(activityItems: payload.fileURLs)

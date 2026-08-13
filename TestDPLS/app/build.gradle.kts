@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kover)
 }
 
 val keystoreProperties = Properties().apply {
@@ -21,8 +22,8 @@ android {
         applicationId = "ru.bolid.testdpls"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
     }
 
     signingConfigs {
@@ -57,8 +58,44 @@ android {
         jvmTarget = "17"
     }
 
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        // Catalog nags stay informational. Adaptive-icon XML must live in
+        // mipmap-anydpi-v26 even when minSdk is 33.
+        disable += setOf(
+            "AndroidGradlePluginVersion",
+            "GradleDependency",
+            "NewerVersionAvailable",
+            "ObsoleteSdkInt",
+            "OldTargetApi",
+        )
+    }
+
     buildFeatures {
         compose = true
+    }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.allWarningsAsErrors.set(true)
+}
+
+kover {
+    reports {
+        filters {
+            includes {
+                packages("ru.bolid.testdpls.protocol", "ru.bolid.testdpls.ble")
+            }
+            excludes {
+                classes("ru.bolid.testdpls.ble.BleClient", "ru.bolid.testdpls.ble.BleClient$*")
+            }
+        }
+        verify {
+            rule {
+                minBound(80)
+            }
+        }
     }
 }
 

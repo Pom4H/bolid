@@ -89,8 +89,10 @@ static bool set_password(void *c, const uint8_t s[16], const uint8_t v[32]) {
     fake_t *f = c; memcpy(f->last_salt, s, 16); memcpy(f->last_verifier, v, 32); f->password_set = true; return true;
 }
 static void dev_info(void *c, dpls_device_info_t *out) {
-    (void)c; out->device_id = 0x0a0b0c0du; out->fw_major = 1; out->fw_minor = 1;
-    out->fw_patch = 0; out->hw_revision = 1; out->capabilities = DPLS_CAP_ADC_PRESENT;
+    (void)c; out->device_id = 0x0a0b0c0du;
+    out->fw_major = DPLS_FW_VERSION_MAJOR;
+    out->fw_minor = DPLS_FW_VERSION_MINOR;
+    out->fw_patch = DPLS_FW_VERSION_PATCH; out->hw_revision = 1; out->capabilities = DPLS_CAP_ADC_PRESENT;
 }
 
 static size_t request(uint8_t type, const uint8_t *p, uint16_t n, uint8_t *out) {
@@ -147,7 +149,8 @@ static void test_device_settings(void) {
     assert(resp.type == DPLS_MSG_DEVICE_INFO_REPORT);
     assert(resp.payload[0] == 0x0d && resp.payload[3] == 0x0a);      /* device_id LE */
     assert(resp.payload[4] == DPLS_PROTOCOL_VERSION);
-    assert(resp.payload[5] == 1 && resp.payload[6] == 1);            /* fw major.minor */
+    assert(resp.payload[5] == DPLS_FW_VERSION_MAJOR &&
+           resp.payload[6] == DPLS_FW_VERSION_MINOR);
     assert(resp.payload[9] == DPLS_CAP_ADC_PRESENT);
     assert(resp.payload[11] == 13);                                  /* name length */
     assert(memcmp(resp.payload + 12, "Test-DPLS-old", 13) == 0);

@@ -6,9 +6,10 @@
 #   tools/build_firmware.sh gcc tmp/test-dpls.hex
 
 SHELL := /bin/bash
-CC ?= arm-none-eabi-gcc
-OBJCOPY ?= arm-none-eabi-objcopy
-SIZE ?= arm-none-eabi-size
+CROSS ?= arm-none-eabi-
+CC := $(CROSS)gcc
+OBJCOPY := $(CROSS)objcopy
+SIZE := $(CROSS)size
 
 FW := ../..
 SDK := $(FW)/sdk/PHY62XX_SDK_3.1.2
@@ -23,8 +24,9 @@ LDSCRIPT := phy6252.ld
 ARCH := -mcpu=cortex-m0 -mthumb
 CFLAGS := $(ARCH) -std=c99 -Os -g3 \
 	-funsigned-char -fshort-enums -fshort-wchar \
-	-ffunction-sections -fdata-sections -fno-common \
-	-Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
+	-ffunction-sections -fdata-sections -fno-common
+VENDOR_CFLAGS := $(CFLAGS) -w
+APP_CFLAGS := $(CFLAGS) -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
 
 DEFS := \
 	-DCFG_CP \
@@ -89,7 +91,7 @@ INCLUDES := \
 	-I$(FW)/include \
 	-I$(FW)/phy6252
 
-C_SOURCES := \
+SDK_SOURCES := \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/main.c \
 	$(SDK)/components/driver/uart/uart.c \
 	$(SDK)/components/driver/clock/clock.c \
@@ -112,8 +114,13 @@ C_SOURCES := \
 	$(SDK)/components/profiles/GATT/gattservapp.c \
 	$(SDK)/misc/jump_table.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/OSAL_SimpleBLEPeripheral.c \
-	source/dplsBLEPeripheral.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/SimpleBLEPeripheral_Main.c \
+	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/hmac.c \
+	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c \
+	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/utils.c
+
+APP_SOURCES := \
+	source/dplsBLEPeripheral.c \
 	$(FW)/src/dpls_protocol.c \
 	$(FW)/src/dpls_server.c \
 	$(FW)/src/dpls_led.c \
@@ -121,12 +128,11 @@ C_SOURCES := \
 	$(FW)/phy6252/dpls_gatt_service.c \
 	$(FW)/phy6252/dpls_phy6252_app.c \
 	$(FW)/phy6252/dpls_ble_identity.c \
-	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/hmac.c \
-	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c \
-	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/utils.c \
 	system_gcc.c
 
-OBJECTS := $(addprefix $(BUILD)/,$(notdir $(C_SOURCES:.c=.o))) $(BUILD)/startup_phy6252.o
+OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SDK_SOURCES:.c=.o))) \
+	$(addprefix $(BUILD)/,$(notdir $(APP_SOURCES:.c=.o))) \
+	$(BUILD)/startup_phy6252.o
 DEPS := $(OBJECTS:.o=.d)
 RF_LIB := $(SDK)/lib/rf.lib
 BLE_LIB := $(SDK)/lib/ble_host.lib
@@ -140,11 +146,17 @@ $(BUILD):
 $(ROM_LD): $(ROM_SYM) | $(BUILD)
 	@awk '$$1 ~ /^0x[0-9A-Fa-f]+$$/ && $$3 ~ /^[A-Za-z_.$$][A-Za-z0-9_.$$]*$$/ { print "PROVIDE(" $$3 " = " $$1 ");" }' $< > $@
 
-define COMPILE_C
+define COMPILE_SDK
 $(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
-	$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
+	$(CC) $(VENDOR_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
 endef
-$(foreach src,$(C_SOURCES),$(eval $(call COMPILE_C,$(src))))
+$(foreach src,$(SDK_SOURCES),$(eval $(call COMPILE_SDK,$(src))))
+
+define COMPILE_APP
+$(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
+	$(CC) $(APP_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
+endef
+$(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 
 $(BUILD)/startup_phy6252.o: startup_phy6252.S | $(BUILD)
 	$(CC) $(ARCH) -x assembler-with-cpp -MMD -MP -c $< -o $@

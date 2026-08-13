@@ -4,13 +4,15 @@
 (`targets/phy6252/`). Vendor SDK 3.1.2 подтягивается в `sdk/PHY62XX_SDK_3.1.2/`
 (не в git) по SHA из `sdk/phy6252-sdk.env`.
 
-Версия прошивки: **1.2.0**.
+Версия прошивки: **1.2.1**.
 
 ## Сборка
 
 ```sh
 cmake -S . -B build && cmake --build build
 ctest --test-dir build --output-on-failure
+../tools/lint_firmware.sh
+../tools/coverage_firmware.sh   # ctest + ≥80% строк Firmware/src
 
 # из корня репозитория
 tools/build_firmware.sh keil tmp/test-dpls.hex   # релизный образ, Keil/AC6
@@ -19,7 +21,8 @@ tools/build_firmware.sh gcc  tmp/test-dpls.hex   # GNU Arm, та же раскл
 
 Keil: CMSIS-solution `targets/phy6252/test-dpls.csolution.yml` +
 `scatter_load.sct`. GCC: `targets/phy6252/Makefile` + `phy6252.ld`. Список
-исходников и дефайны совпадают. Релизный HEX — Keil.
+исходников и дефайны совпадают. Релизный HEX — Keil. Vendor SDK собирается
+с `-w`, наш код — `-Werror`. `tools/build_firmware.sh` падает на warning в логе.
 
 `fromelf` пишет entry-point в каждый регион; скрипт оставляет его только в
 ER_IROM1, иначе флешер pvvx обрывает разбор.

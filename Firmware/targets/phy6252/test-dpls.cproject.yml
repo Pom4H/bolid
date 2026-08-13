@@ -92,6 +92,8 @@ project:
             - -fno-exceptions
           ASM:
             - -masm=auto
+            - -Wno-unused-command-line-argument
+            - -Wa,--diag_suppress=1950
           Link:
             - --library_type=microlib
             - --map
@@ -114,10 +116,18 @@ project:
 
   groups:
     - group: arch
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/example/ble_peripheral/simpleBlePeripheral/main.c
 
     - group: driver
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/uart/uart.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/clock/clock.c
@@ -135,6 +145,10 @@ project:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/driver/led_light/led_light.c
 
     - group: profile
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/Roles/gap.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/Roles/gapbondmgr.c
@@ -143,6 +157,10 @@ project:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/GATT/gattservapp.c
 
     - group: jump
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/misc/jump_table.c
 
@@ -152,13 +170,31 @@ project:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/lib/ble_host.lib
 
     - group: application
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
         - file: ../../sdk/PHY62XX_SDK_3.1.2/example/ble_peripheral/simpleBlePeripheral/source/OSAL_SimpleBLEPeripheral.c
-        - file: source/dplsBLEPeripheral.c
         - file: ../../sdk/PHY62XX_SDK_3.1.2/example/ble_peripheral/simpleBlePeripheral/source/SimpleBLEPeripheral_Main.c
 
-    - group: dpls
+    - group: tinycrypt
+      warnings: off
+      misc:
+        - C-CPP:
+            - -w
       files:
+        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/hmac.c
+        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c
+        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/utils.c
+
+    - group: dpls
+      warnings: all
+      misc:
+        - C-CPP:
+            - -Werror
+      files:
+        - file: source/dplsBLEPeripheral.c
         - file: ../../src/dpls_protocol.c
         - file: ../../src/dpls_server.c
         - file: ../../src/dpls_led.c
@@ -166,13 +202,16 @@ project:
         - file: ../../phy6252/dpls_gatt_service.c
         - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_ble_identity.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/hmac.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c
-        - file: ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/tinycrypt-0.2.8/lib/source/utils.c
 
   components:
     - component: ARM::CMSIS:CORE
+      warnings: off
     - component: ARM::Device:Startup
+      warnings: off
       misc:
-        - ASM:
+        - C-CPP:
+            - -w
+          ASM:
             - -masm=auto
+            - -Wno-unused-command-line-argument
+            - -Wa,--diag_suppress=1950

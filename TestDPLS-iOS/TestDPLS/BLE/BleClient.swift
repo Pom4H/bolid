@@ -616,6 +616,7 @@ final class BleClient: NSObject, ObservableObject {
             adcPresent: (caps & 0x01) != 0,
             hardwareReadback: (caps & 0x02) != 0,
             adcCalibrated: (caps & 0x04) != 0,
+            multiVoltageReport: (caps & 0x08) != 0,
             userName: name
         )
         uiState.deviceInfo = info
@@ -638,6 +639,11 @@ final class BleClient: NSObject, ObservableObject {
         let uptimeSeconds = LittleEndian.u32(payload, &o)
         let revision = LittleEndian.u32(payload, &o)
         let validity = payload.count > 16 ? Int(LittleEndian.u8(payload, &o)) : 0x00
+        let extended = payload.count >= o + 8
+        let port1 = extended ? Int(LittleEndian.u16(payload, &o)) : voltage
+        let port2 = extended ? Int(LittleEndian.u16(payload, &o)) : 0
+        let portT = extended ? Int(LittleEndian.u16(payload, &o)) : 0
+        let reserveMv = extended ? Int(LittleEndian.u16(payload, &o)) : 0
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let bootEpoch = Int64(Date().timeIntervalSince1970) - Int64(uptimeSeconds)
         uiState.phase = .ready
@@ -656,7 +662,15 @@ final class BleClient: NSObject, ObservableObject {
             reserveValid: (validity & 0x02) != 0,
             powerValid: (validity & 0x04) != 0,
             autoIsoValid: (validity & 0x08) != 0,
-            adcCalibrated: (validity & 0x10) != 0
+            adcCalibrated: (validity & 0x10) != 0,
+            port1VoltageMv: port1,
+            port2VoltageMv: port2,
+            portTVoltageMv: portT,
+            reserveVoltageMv: reserveMv,
+            port1VoltageValid: (validity & 0x01) != 0,
+            port2VoltageValid: extended && (validity & 0x20) != 0,
+            portTVoltageValid: extended && (validity & 0x40) != 0,
+            reserveVoltageValid: extended && (validity & 0x02) != 0
         )
         uiState.deviceBootEpochSeconds = bootEpoch
         uiState.authenticated = true
@@ -902,7 +916,8 @@ final class BleClient: NSObject, ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                if self.uiState.authenticated, self.peripheral != nil, self.uiState.logProgress == nil {
+                if self.uiState.authenticated, self.peripheral != nil, self.uiState.logProgress == nil,
+                   !self.uiState.needsPeriodicStateRefresh {
                     self.send(.keepAlive, self.authenticatedPayload())
                 }
                 if self.uiState.authenticated, self.peripheral != nil {
@@ -918,21 +933,13 @@ final class BleClient: NSObject, ObservableObject {
 
     private func updateStateRefreshSchedule() {
         cancelStateRefresh()
-        guard uiState.logProgress == nil else { return }
-        guard uiState.authenticated,
-              !uiState.commandInProgress,
-              let mode = uiState.state?.mode,
-              mode != .normal,
-              peripheral != nil
-        else { return }
+        guard uiState.needsPeriodicStateRefresh, peripheral != nil else { return }
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                guard self.uiState.logProgress == nil else { return }
-                if self.uiState.authenticated, self.uiState.state?.mode != .normal, self.peripheral != nil {
-                    self.send(.stateGet, self.authenticatedPayload())
-                    self.updateStateRefreshSchedule()
-                }
+                guard self.uiState.needsPeriodicStateRefresh, self.peripheral != nil else { return }
+                self.send(.stateGet, self.authenticatedPayload())
+                self.updateStateRefreshSchedule()
             }
         }
         stateRefreshWork = work

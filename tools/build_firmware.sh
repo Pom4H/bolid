@@ -13,9 +13,18 @@ TOOLCHAIN="keil"
 OUT="$ROOT/tmp/test-dpls.hex"
 REGION_ROOT=""
 
+BUILD_LOG=""
+
 usage() {
     echo "usage: tools/build_firmware.sh [keil|ac6|gcc] [output.hex]" >&2
     exit 2
+}
+
+reject_warnings() {
+    if grep -E ': warning:|Warning: [LA][0-9]|[1-9][0-9]* warning(s)? generated' "$1"; then
+        echo "error: firmware build produced warnings" >&2
+        exit 1
+    fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -55,9 +64,11 @@ build_keil() {
     done
 
     rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
-    mkdir -p "$TARGET/out"
+    mkdir -p "$TARGET/out" "$(dirname "$OUT")" "$ROOT/tmp"
     ln -s ../../../sdk "$TARGET/out/sdk"
-    cbuild "$TARGET/test-dpls.csolution.yml" --packs --update-rte
+    BUILD_LOG="$ROOT/tmp/firmware-keil.log"
+    cbuild "$TARGET/test-dpls.csolution.yml" --packs --update-rte 2>&1 | tee "$BUILD_LOG"
+    reject_warnings "$BUILD_LOG"
 
     AXF="$(find "$TARGET/out" -type f -name '*.axf' | head -n 1)"
     if [ -z "$AXF" ] || [ ! -f "$AXF" ]; then
@@ -93,7 +104,9 @@ build_gcc() {
             exit 1
         fi
     done
-    make -C "$TARGET" HEX="$OUT"
+    BUILD_LOG="$ROOT/tmp/firmware-gcc.log"
+    make -C "$TARGET" HEX="$OUT" CROSS=arm-none-eabi- 2>&1 | tee "$BUILD_LOG"
+    reject_warnings "$BUILD_LOG"
     echo "toolchain: GNU Arm Embedded"
     echo "elf: $TARGET/build/test-dpls.elf"
     echo "hex: $OUT"

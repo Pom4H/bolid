@@ -1,4 +1,4 @@
-# Тест-ДПЛС Android 1.2.0
+# Тест-ДПЛС Android 1.2.1
 
 Тестовое Android-приложение (Kotlin + Jetpack Compose, minSdk 33) для безопасного управления устройством на PHY6252.
 
@@ -11,6 +11,8 @@
 ## Сборка и запуск
 
 ```bash
+./gradlew lintDebug
+./gradlew testDebugUnitTest koverVerifyDebug
 ./gradlew installDebug
 ~/Library/Android/sdk/platform-tools/adb shell am start -n ru.bolid.testdpls/.MainActivity
 ```

@@ -1061,27 +1061,8 @@ class BleClient(context: Context) {
 
     private fun parseDeviceInfo(raw: ByteArray) {
         awaitingDeviceInfo = false
-        if (raw.size < 12) return
-        val b = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        val deviceId = b.u32()
-        val proto = b.u8()
-        val major = b.u8(); val minor = b.u8(); val patch = b.u8()
-        val hwRev = b.u8()
-        val caps = b.u8()
-        b.u8() // settings_state — не показываем отдельно
-        val nameLen = b.u8()
-        val name = if (nameLen in 1..(raw.size - 12)) String(raw, 12, nameLen, Charsets.UTF_8) else ""
-        val info = DeviceInfo(
-            deviceId = deviceId,
-            protocolVersion = proto,
-            firmwareVersion = "$major.$minor.$patch",
-            hardwareRevision = hwRev,
-            adcPresent = (caps and 0x01) != 0,
-            hardwareReadback = (caps and 0x02) != 0,
-            adcCalibrated = (caps and 0x04) != 0,
-            multiVoltageReport = (caps and 0x08) != 0,
-            userName = name,
-        )
+        val info = parseDeviceInfoReport(raw) ?: return
+        val name = info.userName
         _uiState.update { st ->
             st.copy(
                 deviceInfo = info,
@@ -1093,61 +1074,12 @@ class BleClient(context: Context) {
         Log.i(TAG, "DEVICE_INFO id=${info.shortId} fw=${info.firmwareVersion} name=$name")
     }
 
-    private fun commandRejectReason(status: Int): String = when (status) {
-        3 -> "Команда отклонена: недопустимый режим"
-        4 -> "Команда отклонена: аппаратное переключение не удалось"
-        5 -> "Команда отклонена: активна автоизоляция реального КЗ"
-        else -> "Команда отклонена устройством: $status"
-    }
-
     private fun parseState(payload: ByteBuffer) {
-        if (payload.remaining() < 16) return fail("Повреждённый STATE_REPORT")
-        val mode = DplsMode.fromWire(payload.u8()) ?: DplsMode.NORMAL
-        val power = if (payload.u8() == 0) PowerSource.DPLS else PowerSource.RESERVE
-        val voltage = payload.u16()
-        val automaticReturn = payload.u16()
-        val reserveLow = payload.u8() != 0
-        val flags = payload.u8() // bit0 = connected, bit1 = real-short auto-isolation
-        val realShort = (flags and 0x02) != 0
-        val uptimeSeconds = payload.u32()
-        val revision = payload.u32()
-        // Byte 16 (validity mask) is present on firmware ≥ this build. A legacy
-        // 16-byte report defaults to "nothing measured": every legacy build ran
-        // with ADC sampling disabled, so its 0 mV / LINE values are fabricated —
-        // treating them as valid would resurrect the fake readings.
-        val validity = if (payload.remaining() >= 1) payload.u8() else 0x00
-        // Firmware 1.1.2+ appends +1, +2, +T and reserve voltages in mV while
-        // retaining the original 17-byte prefix for older clients.
-        val extendedVoltages = payload.remaining() >= 8
-        val port1Voltage = if (extendedVoltages) payload.u16() else voltage
-        val port2Voltage = if (extendedVoltages) payload.u16() else 0
-        val portTVoltage = if (extendedVoltages) payload.u16() else 0
-        val reserveVoltage = if (extendedVoltages) payload.u16() else 0
-        val bootEpoch = System.currentTimeMillis() / 1000 - uptimeSeconds
-        val state = DeviceState(
-            mode = mode,
-            powerSource = power,
-            voltageMv = voltage,
-            automaticReturnSeconds = automaticReturn,
-            reserveLow = reserveLow,
-            realShort = realShort,
-            uptimeSeconds = uptimeSeconds,
-            revision = revision,
-            receivedAtMillis = System.currentTimeMillis(),
-            lineVoltageValid = (validity and 0x01) != 0,
-            reserveValid = (validity and 0x02) != 0,
-            powerValid = (validity and 0x04) != 0,
-            autoIsoValid = (validity and 0x08) != 0,
-            adcCalibrated = (validity and 0x10) != 0,
-            port1VoltageMv = port1Voltage,
-            port2VoltageMv = port2Voltage,
-            portTVoltageMv = portTVoltage,
-            reserveVoltageMv = reserveVoltage,
-            port1VoltageValid = (validity and 0x01) != 0,
-            port2VoltageValid = extendedVoltages && (validity and 0x20) != 0,
-            portTVoltageValid = extendedVoltages && (validity and 0x40) != 0,
-            reserveVoltageValid = extendedVoltages && (validity and 0x02) != 0,
-        )
+        val remaining = ByteArray(payload.remaining())
+        payload.get(remaining)
+        val now = System.currentTimeMillis()
+        val state = parseStateReport(remaining, now) ?: return fail("Повреждённый STATE_REPORT")
+        val bootEpoch = now / 1000 - state.uptimeSeconds
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.READY,
@@ -1259,9 +1191,7 @@ class BleClient(context: Context) {
         // resets every reboot, so sorting by it would interleave separate runs.
         // Sequence is monotonic across reboots and is the true chronological key.
         val records = logBytes.asList().chunked(10).mapNotNull { raw ->
-            if (raw.size != 10) null else ByteBuffer.wrap(raw.toByteArray()).order(ByteOrder.LITTLE_ENDIAN).let {
-                EventRecord(it.u32(), it.u32(), it.u8(), it.u8())
-            }
+            parseEventRecord(raw.toByteArray())
         }.sortedByDescending { it.sequence }
         val rawCount = if (logExpectedBytes == 0) 0 else logBytes.size / 10
         Log.i(TAG, "LOG_DONE raw=$rawCount records=${records.size}")
@@ -1441,27 +1371,25 @@ class BleClient(context: Context) {
 
     private fun updateStateRefreshSchedule() {
         handler.removeCallbacks(stateRefresh)
-        if (_uiState.value.logProgress != null) return
-        val state = _uiState.value
-        if (state.authenticated && !state.commandInProgress && state.state != null && gatt != null) {
+        if (_uiState.value.needsPeriodicStateRefresh && gatt != null) {
             handler.postDelayed(stateRefresh, STATE_REFRESH_MS)
         }
     }
 
     private val stateRefresh = object : Runnable {
         override fun run() {
-            val current = _uiState.value
-            if (current.logProgress != null) return
-            if (current.authenticated && !current.commandInProgress && current.state != null && gatt != null) {
-                send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
-                handler.postDelayed(this, STATE_REFRESH_MS)
-            }
+            if (!_uiState.value.needsPeriodicStateRefresh || gatt == null) return
+            send(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+            handler.postDelayed(this, STATE_REFRESH_MS)
         }
     }
 
     private val keepAlive = object : Runnable {
         override fun run() {
-            if (_uiState.value.authenticated && gatt != null && _uiState.value.logProgress == null) {
+            val current = _uiState.value
+            if (current.authenticated && gatt != null && current.logProgress == null &&
+                !current.needsPeriodicStateRefresh
+            ) {
                 send(DplsProtocol.Type.KEEP_ALIVE, authenticatedPayload())
             }
             if (_uiState.value.authenticated && gatt != null) {
@@ -1656,6 +1584,7 @@ class BleClient(context: Context) {
         private const val E2E_UNPAIR_CHECK_MS = 1_500L
         private const val PRE_AUTH_KEEP_ALIVE_MS = 3_000L
         private const val KEEP_ALIVE_MS = 3_000L
+        /* Live countdown/voltages during a test, and self-heal off READY. Not Norma. */
         private const val STATE_REFRESH_MS = 1_000L
         /* One indication per LOG_ACK ≈ 0.45 s/record on the stock connection
          * interval, so a full 200-record journal takes ~95 s end to end. */

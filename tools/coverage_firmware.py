@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Line-coverage gate for Firmware/src (portable DPLS core).
+
+Reads gcov intermediate notes produced next to the instrumented objects and
+fails if the aggregated line coverage of Firmware/src is below the threshold.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_THRESHOLD = 80.0
+SRC_NAMES = ("dpls_protocol.c", "dpls_server.c", "dpls_led.c", "dpls_calib.c")
+
+
+def find_gcov() -> list[str]:
+    xcrun = subprocess.run(["xcrun", "--find", "llvm-cov"], capture_output=True, text=True)
+    if xcrun.returncode == 0:
+        llvm_cov = xcrun.stdout.strip()
+        if llvm_cov:
+            return [llvm_cov, "gcov"]
+    for candidate in ("llvm-cov", "gcov"):
+        if subprocess.run(["which", candidate], capture_output=True).returncode == 0:
+            return [candidate] if candidate == "gcov" else [candidate, "gcov"]
+    raise SystemExit("gcov / llvm-cov not found")
+
+
+def parse_gcov_i(text: str) -> tuple[int, int]:
+    """Return (hit, total) executable lines from `gcov -i` / llvm-cov gcov -i."""
+    hit = 0
+    total = 0
+    for line in text.splitlines():
+        if not line.startswith("lcount:"):
+            continue
+        # lcount:<line>,<count>
+        _, rest = line.split(":", 1)
+        parts = rest.split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            count = int(parts[1])
+        except ValueError:
+            continue
+        total += 1
+        if count > 0:
+            hit += 1
+    return hit, total
+
+
+def collect(build_dir: Path) -> dict[str, tuple[int, int]]:
+    gcov = find_gcov()
+    results: dict[str, tuple[int, int]] = {}
+    gcda_files = sorted(build_dir.rglob("*.gcda"))
+    if not gcda_files:
+        raise SystemExit(f"no .gcda files under {build_dir}; rebuild with -DENABLE_COVERAGE=ON")
+
+    tmp = build_dir / "gcov-out"
+    tmp.mkdir(exist_ok=True)
+    for gcda in gcda_files:
+        name = gcda.stem
+        # CMake names objects dpls_server.c.gcda or dpls_server.gcda
+        src = name.replace(".c", "") + ".c" if not name.endswith(".c") else name
+        if src not in SRC_NAMES and name not in SRC_NAMES:
+            continue
+        key = src if src in SRC_NAMES else name
+        proc = subprocess.run(
+            gcov + ["-i", "-o", str(gcda.parent), str(gcda)],
+            cwd=tmp,
+            capture_output=True,
+            text=True,
+        )
+        # llvm-cov gcov -i writes <file>.gcov in cwd
+        gcov_notes = list(tmp.glob("*.gcov"))
+        text = ""
+        for note in gcov_notes:
+            text += note.read_text(errors="replace")
+            note.unlink(missing_ok=True)
+        if not text:
+            text = proc.stdout + proc.stderr
+        hit, total = parse_gcov_i(text)
+        if total == 0:
+            # Fallback: parse classic gcov
+            classic = subprocess.run(
+                gcov + ["-o", str(gcda.parent), str(gcda)],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+            )
+            for note in tmp.glob("*.gcov"):
+                h, t = parse_classic_gcov(note.read_text(errors="replace"))
+                hit += h
+                total += t
+                note.unlink(missing_ok=True)
+            if total == 0:
+                sys.stderr.write(classic.stdout + classic.stderr)
+        if key in results:
+            prev_h, prev_t = results[key]
+            results[key] = (prev_h + hit, prev_t + total)
+        else:
+            results[key] = (hit, total)
+    return results
+
+
+def parse_classic_gcov(text: str) -> tuple[int, int]:
+    hit = 0
+    total = 0
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        count, _rest = line.split(":", 1)
+        count = count.strip()
+        if count in ("-", ""):
+            continue
+        if count == "#####":
+            total += 1
+            continue
+        try:
+            n = int(count)
+        except ValueError:
+            continue
+        total += 1
+        if n > 0:
+            hit += 1
+    return hit, total
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--build-dir", default="Firmware/build-cov")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--report", default="tmp/firmware-coverage.txt")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parent.parent
+    build_dir = (root / args.build_dir).resolve() if not os.path.isabs(args.build_dir) else Path(args.build_dir)
+    results = collect(build_dir)
+    if not results:
+        raise SystemExit("no coverage data for Firmware/src")
+
+    lines = []
+    hit_sum = 0
+    total_sum = 0
+    for name in SRC_NAMES:
+        hit, total = results.get(name, (0, 0))
+        pct = (100.0 * hit / total) if total else 0.0
+        lines.append(f"  {name:18} {hit:4}/{total:<4}  {pct:5.1f}%")
+        hit_sum += hit
+        total_sum += total
+    overall = (100.0 * hit_sum / total_sum) if total_sum else 0.0
+    report = (
+        "Firmware/src line coverage\n"
+        + "\n".join(lines)
+        + f"\n  {'TOTAL':18} {hit_sum:4}/{total_sum:<4}  {overall:5.1f}%\n"
+        + f"threshold: {args.threshold:.0f}%\n"
+    )
+    report_path = root / args.report
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report)
+    sys.stdout.write(report)
+    if overall + 1e-9 < args.threshold:
+        sys.stderr.write(f"error: coverage {overall:.1f}% is below {args.threshold:.0f}%\n")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

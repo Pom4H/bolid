@@ -203,6 +203,14 @@ data class DplsUiState(
     val controlsEnabled: Boolean
         get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
 
+    /** 1 Hz STATE_GET only while a test is live or the session is stuck off READY.
+     * Norma + READY is keep-alive only — the device already samples at 1 Hz. */
+    val needsPeriodicStateRefresh: Boolean
+        get() {
+            if (!authenticated || commandInProgress || state == null || logProgress != null) return false
+            return state.mode.dangerous || phase != ConnectionPhase.READY
+        }
+
     val setupFormReady: Boolean
         get() = credentialsReady &&
             setupPassword.length >= 8 &&

@@ -79,4 +79,38 @@ class DplsProtocolTest {
         val decoded = DplsProtocol.decode(encoded)
         assertTrue(decoded is DplsProtocol.DecodeResult.Failure)
     }
+
+    @Test
+    fun decode_rejectsUnknownType() {
+        val encoded = DplsProtocol.encode(
+            DplsProtocol.Frame(DplsProtocol.Type.KEEP_ALIVE, sequence = 0, payload = byteArrayOf()),
+        )
+        encoded[1] = 0x55
+        val decoded = DplsProtocol.decode(encoded)
+        assertTrue(decoded is DplsProtocol.DecodeResult.Failure)
+    }
+
+    @Test
+    fun decode_rejectsShortBuffer() {
+        val decoded = DplsProtocol.decode(byteArrayOf(1, 2, 3))
+        assertTrue(decoded is DplsProtocol.DecodeResult.Failure)
+    }
+
+    @Test
+    fun typeFromWire_coversKnownAndUnknown() {
+        assertEquals(DplsProtocol.Type.ERROR, DplsProtocol.Type.fromWire(0x7f))
+        assertEquals(null, DplsProtocol.Type.fromWire(0x55))
+    }
+
+    @Test
+    fun byteBufferHelpers_littleEndian() {
+        val buf = java.nio.ByteBuffer.allocate(7).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buf.putU32(0x0a0b0c0d)
+        buf.put(0x11)
+        buf.putShort(0x2233)
+        buf.flip()
+        assertEquals(0x0a0b0c0dL, buf.u32())
+        assertEquals(0x11, buf.u8())
+        assertEquals(0x2233, buf.u16())
+    }
 }

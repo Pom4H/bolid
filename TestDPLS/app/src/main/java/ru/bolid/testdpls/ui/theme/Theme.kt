@@ -21,9 +21,10 @@ private val Colors = darkColorScheme(
     val view = LocalView.current
     if (!view.isInEditMode) SideEffect {
         val window = (view.context as Activity).window
-        window.statusBarColor = Color(0xFF071923).value.toInt()
-        window.navigationBarColor = Color(0xFF071923).value.toInt()
-        WindowCompat.getInsetsController(window, view).apply { isAppearanceLightStatusBars = false; isAppearanceLightNavigationBars = false }
+        WindowCompat.getInsetsController(window, view).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
     }
     MaterialTheme(colorScheme = Colors, content = content)
 }

@@ -9,8 +9,9 @@ import ru.bolid.testdpls.DplsApplication
 import ru.bolid.testdpls.ble.BleClient
 import ru.bolid.testdpls.ble.DplsMode
 import ru.bolid.testdpls.ble.DplsUiState
-import ru.bolid.testdpls.ble.dplsEventTitle
-import ru.bolid.testdpls.ble.dplsEventTime
+import ru.bolid.testdpls.ble.currentRunFirstSeq
+import ru.bolid.testdpls.ble.formatEventLogCsv
+import ru.bolid.testdpls.ble.formatEventLogTxt
 import kotlinx.coroutines.flow.StateFlow
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -58,30 +59,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         app.stopService(Intent(app, BleConnectionService::class.java))
     }
 
-    private fun currentRunFirstSeq(): Long =
-        uiState.value.eventLog.filter { it.type == 1 }.maxOfOrNull { it.sequence } ?: 0L
-
-    fun eventLogCsv(): String = buildString {
-        val boot = uiState.value.deviceBootEpochSeconds
-        val firstSeq = currentRunFirstSeq()
-        appendLine("sequence;datetime;uptime_seconds;event_type;parameter;event")
-        uiState.value.eventLog.forEach {
-            val ts = dplsEventTime(it, firstSeq, boot)
-            appendLine("${it.sequence};${ts.full};${it.timestampSeconds};${it.type};${it.parameter};\"${dplsEventTitle(it.type, it.parameter)}\"")
-        }
+    fun eventLogCsv(): String {
+        val events = uiState.value.eventLog
+        return formatEventLogCsv(events, currentRunFirstSeq(events), uiState.value.deviceBootEpochSeconds)
     }
 
-    fun eventLogTxt(): String = buildString {
-        val boot = uiState.value.deviceBootEpochSeconds
-        val firstSeq = currentRunFirstSeq()
-        appendLine("Журнал событий Тест-ДПЛС")
-        appendLine("Устройство: ${uiState.value.deviceInfo?.userName ?: uiState.value.selectedDevice?.userName ?: "—"}")
-        appendLine("Записей: ${uiState.value.eventLog.size}")
-        appendLine("—".repeat(32))
-        uiState.value.eventLog.forEach {
-            val ts = dplsEventTime(it, firstSeq, boot)
-            appendLine("#${it.sequence}  ${ts.full}  ${dplsEventTitle(it.type, it.parameter)}")
-        }
+    fun eventLogTxt(): String {
+        val events = uiState.value.eventLog
+        val name = uiState.value.deviceInfo?.userName
+            ?: uiState.value.selectedDevice?.userName
+            ?: "—"
+        return formatEventLogTxt(events, currentRunFirstSeq(events), uiState.value.deviceBootEpochSeconds, name)
     }
 
     private fun startConnectionService() {

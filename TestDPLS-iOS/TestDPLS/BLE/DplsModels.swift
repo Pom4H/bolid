@@ -135,6 +135,14 @@ struct DeviceState: Equatable {
     var powerValid: Bool = true
     var autoIsoValid: Bool = true
     var adcCalibrated: Bool = false
+    var port1VoltageMv: Int = 0
+    var port2VoltageMv: Int = 0
+    var portTVoltageMv: Int = 0
+    var reserveVoltageMv: Int = 0
+    var port1VoltageValid: Bool = false
+    var port2VoltageValid: Bool = false
+    var portTVoltageValid: Bool = false
+    var reserveVoltageValid: Bool = false
 }
 
 struct EventRecord: Identifiable, Equatable {
@@ -153,6 +161,7 @@ struct DeviceInfo: Equatable {
     let adcPresent: Bool
     let hardwareReadback: Bool
     let adcCalibrated: Bool
+    var multiVoltageReport: Bool = false
     let userName: String
 
     var shortId: String { String(format: "DPLS-%08X", deviceId) }
@@ -201,6 +210,12 @@ struct DplsUiState: Equatable {
 
     var controlsEnabled: Bool {
         phase == .ready && authenticated && !commandInProgress
+    }
+
+    /// 1 Hz STATE_GET only while a test is live or the session is stuck off READY.
+    var needsPeriodicStateRefresh: Bool {
+        guard authenticated, !commandInProgress, state != nil, logProgress == nil else { return false }
+        return state?.mode.dangerous == true || phase != .ready
     }
 
     var setupFormReady: Bool {

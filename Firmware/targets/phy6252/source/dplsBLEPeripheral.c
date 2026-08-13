@@ -18,12 +18,15 @@
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
 #define DEFAULT_CONN_TIMEOUT 3000
-/* Housekeeping and ADC sampling share this tick; the app polls state at 1 Hz. */
+/* Housekeeping and ADC sampling share this tick. Connected sessions stay at
+ * 1 Hz so STATE_REPORT and mode deadlines are live; idle advertising is 5 s. */
 #define DPLS_TICK_MS 1000u
+#define DPLS_TICK_IDLE_MS 5000u
 /* 0.625 ms units — 500 ms, slow enough to be cheap, fast enough to find. */
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
+static uint8 link_up;
 
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
@@ -82,19 +85,22 @@ static void state_changed(gaprole_States_t state)
         uint8 enabled = TRUE;
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
     }
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
+        link_up = TRUE;
         dpls_phy6252_connected(handle);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         break;
     }
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
         uint8 enabled = TRUE;
+        link_up = FALSE;
         dpls_phy6252_disconnected();
         schedule_led_if_needed(); /* turn an interrupted identify off immediately */
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
@@ -214,7 +220,8 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();
         schedule_led_if_needed();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
+        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
+                           link_up ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
         return events ^ SBP_DPLS_TICK_EVT;
     }
     if (events & SBP_DPLS_LED_EVT) {

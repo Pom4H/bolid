@@ -1,0 +1,5 @@
+# The PHY62XX SDK is third-party. Keep clangd on project firmware.
+Diagnostics:
+  Suppress: '*'
+Index:
+  Background: Skip

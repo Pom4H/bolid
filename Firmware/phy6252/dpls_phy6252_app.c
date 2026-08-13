@@ -7,8 +7,14 @@
 #include "dpls_led.h"
 #include "dpls_server.h"
 #include "OSAL.h"
-#include "OSAL_Timers.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "adc.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #include "error.h"
 #include "gpio.h"
 #include "linkdb.h"
@@ -1149,7 +1155,9 @@ void dpls_phy6252_tick(void)
     }
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
-        adc_pending = (uint8_t)DPLS_ADC_NEED_ALL;
+        adc_pending = connection_handle != INVALID_CONNHANDLE
+            ? (uint8_t)DPLS_ADC_NEED_ALL
+            : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
         adc_kick();
     }
     update_power_state();

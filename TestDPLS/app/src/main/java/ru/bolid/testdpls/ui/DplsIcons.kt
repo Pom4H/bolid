@@ -60,7 +60,7 @@ private fun DrawScope.breakTicks(color: Color, cx: Float, cy: Float, along: Bool
  * accent — цвет неисправности.
  */
 @Composable
-fun ModeSchematic(mode: DplsMode, size: Dp = 26.dp, base: Color, modifier: Modifier = Modifier) {
+fun ModeSchematic(mode: DplsMode, base: Color, modifier: Modifier = Modifier, size: Dp = 26.dp) {
     val accent = when {
         mode == DplsMode.NORMAL -> base
         mode.title.startsWith("КЗ") -> ShortRed
@@ -135,7 +135,7 @@ fun ModeSchematic(mode: DplsMode, size: Dp = 26.dp, base: Color, modifier: Modif
 
 /** Модуль «умный БРИЗ-Т»: корпус с тремя выводами (+1, +2, +Т). */
 @Composable
-fun DeviceModuleIcon(color: Color, size: Dp = 26.dp, modifier: Modifier = Modifier) {
+fun DeviceModuleIcon(color: Color, modifier: Modifier = Modifier, size: Dp = 26.dp) {
     Canvas(modifier.size(size)) {
         val w = size.toPx()
         val sw = w * .08f

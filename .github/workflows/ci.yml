@@ -7,19 +7,31 @@ on:
 
 jobs:
   firmware-host-tests:
-    # Portable DPLS core (protocol, server, LED, calibration) built with the
-    # system compiler and exercised by ctest. The PHY6252 image is built by
-    # firmware-target.yml (Keil/AC6 and GCC).
-    name: Firmware host tests
+    # Portable DPLS core: -Wall -Wextra -Werror, ctest, 80% coverage, cppcheck.
+    name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S Firmware -B Firmware/build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build Firmware/build
-      - name: Test
-        run: ctest --test-dir Firmware/build --output-on-failure
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Tests + coverage
+        run: bash tools/coverage_firmware.sh
+      - name: Upload firmware coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-coverage
+          path: tmp/firmware-coverage.txt
+          if-no-files-found: warn
+      - name: cppcheck
+        run: bash tools/lint_firmware.sh
+      - name: Upload cppcheck report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-cppcheck
+          path: tmp/cppcheck.txt
+          if-no-files-found: warn
 
   firmware-pinout-contract:
     name: Revision 2 pinout contract
@@ -59,7 +71,7 @@ jobs:
           test -f docs/live-voltage-requirements.md
 
   android:
-    name: Android build + unit tests
+    name: Android lint, tests, debug APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,9 +81,16 @@ jobs:
           java-version: "17"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Unit tests
+      - name: Unit tests + coverage
         working-directory: TestDPLS
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew testDebugUnitTest koverVerifyDebug koverXmlReportDebug
+      - name: Upload Android coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-kover
+          path: TestDPLS/app/build/reports/kover/
+          if-no-files-found: warn
       - name: Lint
         working-directory: TestDPLS
         run: ./gradlew lintDebug

@@ -1,4 +1,4 @@
-# Test-DPLS 1.2.0
+# Test-DPLS 1.2.1
 
 Безопасное BLE-управление испытательным устройством ДПЛС: прошивка PHY6252
 (плата PB-03F-Kit), Android- и iOS-клиенты.
@@ -6,6 +6,14 @@
 Протокол и железо — [Firmware/README.md](Firmware/README.md). Клиенты —
 [TestDPLS/README.md](TestDPLS/README.md) и
 [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+
+## Что в 1.2.1
+
+- Сборка без предупреждений (Keil/GCC `-Werror`, cppcheck, Android lint).
+- Покрытие host-тестов прошивки и Android `protocol`/`ble` не ниже 80%.
+- Меньше радио в «Норме»: опрос `STATE_GET` 1 Гц только в тесте или пока не READY.
+- Отключён: тик OSAL 5 с, ADC только PORT1 и VCAP.
+- iOS показывает напряжения четырёх клемм.
 
 ## Что в 1.2.0
 
@@ -27,7 +35,32 @@ tools/build_firmware.sh gcc  tmp/test-dpls.hex   # GNU Arm Embedded
 tools/flash_firmware.sh tmp/test-dpls.hex        # без --erase SNV сохраняется
 ```
 
-CI (`firmware-target.yml`) собирает оба toolchain.
+CI (`firmware-target.yml`) собирает оба toolchain. Предупреждения компилятора
+и линкера в логе сборки считаются ошибкой.
+
+## Тесты и покрытие
+
+Порог **80%** по строкам. CI падает ниже.
+
+```sh
+bash tools/coverage_firmware.sh          # ctest + gcov, Firmware/src
+cd TestDPLS && ./gradlew koverVerifyDebug koverHtmlReportDebug
+# HTML: TestDPLS/app/build/reports/kover/htmlDebug
+```
+
+Android: пакеты `protocol` и `ble` без `BleClient` (GATT/Android API).
+iOS: `xcodebuild test -scheme TestDPLS` (протокол и модели).
+
+## Линтеры
+
+```sh
+bash tools/lint_firmware.sh          # cppcheck: src, include, tests
+cd TestDPLS && ./gradlew lintDebug   # Android lint, warnings as errors
+```
+
+Хост-сборка прошивки (`Firmware/CMakeLists.txt`) и наш код в GCC/Keil
+идут с `-Wall -Wextra -Werror`. Vendor SDK собирается с `-w`. `tools/build_firmware.sh`
+считает любой warning в логе ошибкой.
 
 ## Структура
 

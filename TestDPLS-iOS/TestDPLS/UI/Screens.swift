@@ -400,13 +400,20 @@ struct OperationView: View {
                 }
                 Divider().overlay(DplsTheme.line)
                 if state.deviceInfo?.adcPresent != false {
-                    infoRow(
-                        "Напряжение",
-                        state.state?.lineVoltageValid == true
-                            ? String(format: "%.1f В", Double(state.state!.voltageMv) / 1000)
-                            : "—",
-                        state.state?.lineVoltageValid == true ? DplsTheme.green : DplsTheme.muted
-                    )
+                    if state.deviceInfo?.multiVoltageReport == true, let s = state.state {
+                        infoRow("Клемма +1", voltageText(s.port1VoltageMv, s.port1VoltageValid), s.port1VoltageValid ? DplsTheme.green : DplsTheme.muted)
+                        infoRow("Клемма +2", voltageText(s.port2VoltageMv, s.port2VoltageValid), s.port2VoltageValid ? DplsTheme.green : DplsTheme.muted)
+                        infoRow("Клемма +Т", voltageText(s.portTVoltageMv, s.portTVoltageValid), s.portTVoltageValid ? DplsTheme.green : DplsTheme.muted)
+                        infoRow("Резерв", voltageText(s.reserveVoltageMv, s.reserveVoltageValid), s.reserveVoltageValid ? DplsTheme.green : DplsTheme.muted)
+                    } else {
+                        infoRow(
+                            "Напряжение",
+                            state.state?.lineVoltageValid == true
+                                ? String(format: "%.1f В", Double(state.state!.voltageMv) / 1000)
+                                : "—",
+                            state.state?.lineVoltageValid == true ? DplsTheme.green : DplsTheme.muted
+                        )
+                    }
                 }
                 infoRow(
                     "Питание",
@@ -484,6 +491,10 @@ struct OperationView: View {
                 .foregroundStyle(.white)
         }
         .frame(width: 88, height: 88)
+    }
+
+    private func voltageText(_ millivolts: Int, _ valid: Bool) -> String {
+        valid ? String(format: "%.1f В", Double(millivolts) / 1000) : "—"
     }
 
     private func infoRow(_ title: String, _ value: String, _ color: Color) -> some View {
