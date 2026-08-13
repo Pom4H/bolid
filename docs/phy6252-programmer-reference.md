@@ -45,11 +45,9 @@ directory:  Firmware/sdk/PHY62XX_SDK_3.1.2
 
 - https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/release_note.md
 
-Документ миграции проекта: [`docs/phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md).
+Заметки по интеграции: [`docs/phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md).
 
-В репозитории также оставлена старая полная копия SDK 3.1.1 в `Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/`. Она полезна как индексируемый reference исходников и регистров, но **не является SDK, с которым сейчас линкуется target**.
-
-При расхождении API/ROM ABI приоритет у закреплённого 3.1.2.
+При расхождении API/ROM ABI приоритет у закреплённого SDK 3.1.2.
 
 ---
 
@@ -113,7 +111,7 @@ directory:  Firmware/sdk/PHY62XX_SDK_3.1.2
 
 ## 4. Exceptions, NVIC, SysTick
 
-Vendor [`bus_dev.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/inc/bus_dev.h) объявляет стандартные Cortex-M0 exceptions:
+Vendor [`bus_dev.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/inc/bus_dev.h) объявляет стандартные Cortex-M0 exceptions:
 
 | Exception | CMSIS IRQn |
 |---|---:|
@@ -248,7 +246,7 @@ FS-backed SNV проекта размещён с `0x1103C000` и занимае�
 
 Основной AP peripheral space начинается с `0x40000000`.
 
-По [`mcu_phy_bumbee.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/inc/mcu_phy_bumbee.h):
+По [`mcu_phy_bumbee.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/inc/mcu_phy_bumbee.h):
 
 | Block | Base |
 |---|---:|
@@ -330,8 +328,8 @@ ADC driver включает analog block через `ANA_CTL bit 3` и ADC clock
 
 1. Vanilla `main.c` удерживает во сне недостаточно SRAM для нашей раскладки. Нужен `hal_pwrmgr_RAM_retention(RET_SRAM0|RET_SRAM1|RET_SRAM2)`, иначе wakeup превращается в warm reboot/reset loop.
 2. При `USE_FS=1` необходимо вызвать `hal_fs_init`; иначе SNV фактически не работает.
-3. В 3.1.2 watchdog подкармливается из interrupt path; зависание application task не гарантирует WDT reset так, как ожидалось по 3.1.1.
-4. В Test-DPLS на время BLE connection используется `hal_pwrmgr_lock(MOD_USR1)` для устранения гонки ADC ↔ sleep/radio transition.
+3. Watchdog подкармливается из interrupt path: зависание application task само по себе WDT reset не вызывает.
+4. `hal_pwrmgr_lock(MOD_USR1)` берётся только пока энергизован тестовый режим: sleep/wake не должен перепрограммировать GPIO под активным силовым выходом.
 5. `CFG_HCLK_DYNAMIC_CHANGE=0` закреплён в target и не должен меняться без повторной hardware validation.
 
 Подробности и hardware validation: [`phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md).
@@ -340,7 +338,7 @@ ADC driver включает analog block через `ANA_CTL bit 3` и ADC clock
 
 ## 8. ADC
 
-SDK 3.1.1 header документирует десять analog-capable GPIO/AIO connections:
+Заголовок ADC в SDK 3.1.2 документирует десять analog-capable GPIO/AIO connections:
 
 | GPIO | AIO | Примечание |
 |---|---:|---|
@@ -386,7 +384,7 @@ P16/P17 конфликтуют с 32.768 kHz crystal use. Не считать в
 
 Соседний по паре P11 сознательно не оцифровывается: это зелёный канал RGB.
 
-SDK 3.1.2 изменил ADC API относительно закоммиченного 3.1.1; target запускает ADC через `hal_adc_start(INTERRUPT_MODE)`. Правки, которые раньше накатывались отдельным patch script, теперь лежат прямо в `Firmware/phy6252/dpls_phy6252_app.c`. Не переносить сигнатуры из 3.1.1 header в 3.1.2 код вслепую.
+Target запускает ADC через `hal_adc_start(INTERRUPT_MODE)`. Сигнатуры — из заголовков закреплённого SDK 3.1.2, не из чужих веток.
 
 `hal_adc_value_cal()` тянет software floating point. В текущем scatter ADC/fp objects вынесены в XIP специально, чтобы не переполнять retained SRAM.
 
@@ -465,7 +463,7 @@ Target линкует:
 ../../sdk/PHY62XX_SDK_3.1.2/misc/bb_rom_sym_m0.txt
 ```
 
-Старая 3.1.1 карта в репозитории показывает абсолютные ROM symbols, среди которых:
+Карта `bb_rom_sym_m0.txt` закреплённого SDK показывает абсолютные ROM symbols, среди которых:
 
 - P-256 crypto primitives;
 - `__aeabi_uidiv`, `__aeabi_uidivmod`, `__aeabi_idiv`, `__aeabi_idivmod`;
@@ -510,7 +508,7 @@ bb_rom_sym_m0.txt
 
 1. **Фактически закреплённый SDK 3.1.2 + его libs / `bb_rom_sym_m0.txt`** — ABI конкретной прошивки.
 2. **Project target/scatter/MAP и результаты hardware validation** — реальная интеграция PB-03F/Test-DPLS.
-3. **Vendor register headers/drivers** — peripheral register model; текущая закоммиченная копия 3.1.1 полезна для чтения, но изменения 3.1.2 имеют приоритет.
+3. **Vendor register headers/drivers** закреплённого SDK 3.1.2 — peripheral register model.
 4. **Armv6-M ARM + Cortex-M0 Generic User Guide** — ISA, core programmer model, exceptions/NVIC.
 5. **PHY6252 Product Specification** — параметры SoC/package/peripherals.
 6. Маркетинговые/дистрибьюторские статьи — только как hints, не как источник ABI или CPU provenance.
@@ -552,12 +550,12 @@ bb_rom_sym_m0.txt
 - [`Firmware/targets/phy6252/test-dpls.cproject.yml`](../Firmware/targets/phy6252/test-dpls.cproject.yml)
 - [`Firmware/targets/phy6252/scatter_load.sct`](../Firmware/targets/phy6252/scatter_load.sct)
 - [`Firmware/README.md`](../Firmware/README.md)
-- [`core_bumbee_m0.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/arch/cm0/core_bumbee_m0.h)
-- [`mcu.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/inc/mcu.h)
-- [`mcu_phy_bumbee.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/inc/mcu_phy_bumbee.h)
-- [`bus_dev.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/inc/bus_dev.h)
-- [`adc.h`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/components/driver/adc/adc.h)
-- [`bb_rom_sym_m0.txt`](../Firmware/sdk/release_bbb_sdk-PHY62XX_SDK_3.1.1/misc/bb_rom_sym_m0.txt)
+- [`core_bumbee_m0.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/arch/cm0/core_bumbee_m0.h)
+- [`mcu.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/inc/mcu.h)
+- [`mcu_phy_bumbee.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/inc/mcu_phy_bumbee.h)
+- [`bus_dev.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/inc/bus_dev.h)
+- [`adc.h`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/components/driver/adc/adc.h)
+- [`bb_rom_sym_m0.txt`](https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/misc/bb_rom_sym_m0.txt)
 - SDK 3.1.2 pinned upstream: https://github.com/xuhongv/PHY6252_6222_SDK/tree/b7202ee56e8d316ea3451dd61266f609e6a676e8
 
 ### Arm

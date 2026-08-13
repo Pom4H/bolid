@@ -41,45 +41,37 @@
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
-/* Bound the LED re-arming interval: fine enough for a 150 ms flash edge, but
- * still cheap during the long inter-series pauses. */
+/* LED re-arm bounds: fine enough for a 150 ms flash edge, cheap in long pauses. */
 #define DPLS_LED_TICK_MIN_MS 10u
 #define DPLS_LED_TICK_MAX_MS 250u
-/* Line-voltage ADC: sample about once a second — the tick itself now runs at
- * 1 Hz, so no decimation is needed — and average over a short window against
- * noise, keeping the pulsed draw within the ≤0.5 mA budget. The ISR is
- * deliberately minimal — raw copy plus a task wake — with all scaling and
- * calibration done in the OSAL task, so a conversion never competes with the
- * radio inside interrupt context. */
+/* Sampling rides the 1 Hz tick and averages over a window against noise. The ISR
+ * only copies raw samples and wakes the task — scaling and calibration must not
+ * compete with the radio in interrupt context. */
 #define DPLS_ADC_DECIMATE 1u
 #define DPLS_ADC_WINDOW 8u
-/* Channels are kicked one at a time: the SDK 3.1.2 ADCC handler only drains the
- * IRQ when status == all_channels, so a dual-channel kick whose conversions
- * finish out of lockstep can leave a pending interrupt uncleared and starve the
- * OSAL loop. Reproduced by tests/test_adc_irq_model.c. */
+/* One channel per kick. The SDK's ADCC handler drains the IRQ only once every
+ * requested channel has finished, so a multi-channel kick can leave an interrupt
+ * pending and starve the OSAL loop. See tests/test_adc_irq_model.c. */
 #define DPLS_ADC_NEED_PORT1 0x01u
 #define DPLS_ADC_NEED_PORT2 0x02u
 #define DPLS_ADC_NEED_PORT_T 0x04u
 #define DPLS_ADC_NEED_VCAP 0x08u
 #define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
                            DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
-/* Power-source detection from the line voltage, with hysteresis so a value near
- * the threshold does not flap. Below the 5 V line minimum the device is running
- * from its reserve (also true while it is shorting the line in a KZ mode). */
+/* Line present/absent, with hysteresis so a value near the threshold does not
+ * flap. Below the 5 V line minimum the device runs from reserve — which is also
+ * true while a KZ mode shorts the line. */
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
-/* Reserve super-capacitor low/clear thresholds (usable window ~5.0→3.6 V).
- * These depend on the VCAP divider, which is not in the supplied schematic —
- * confirm and calibrate on hardware. */
+/* Usable reserve window ~5.0→3.6 V. Both thresholds depend on the VCAP divider,
+ * which the supplied schematic does not give: confirm on hardware. */
 #define DPLS_RESERVE_LOW_MV 3700u
 #define DPLS_RESERVE_OK_MV 4000u
-/* Placeholder VCAP divider until the schematic value is known; calibratable via
- * the same NVM block as the line channel. */
+/* Placeholder until the schematic gives the divider; calibratable like the line. */
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
-/* Real short-circuit (BRIZ-T auto-isolation): the RE gives a 2.9–3.4 V trip
- * band. Firmware only observes, indicates and logs — the actual ≤200 ms current
- * interruption is done in hardware. Detection is armed only after the line has
- * been seen healthy, so powering up with no line does not look like a short. */
+/* BRIZ-T auto-isolation trips somewhere in 2.9–3.4 V per the RE. Firmware only
+ * observes, indicates and logs; the ≤200 ms interruption is hardware. Detection
+ * arms only after a healthy line, so a cold start without one is not a short. */
 #define DPLS_AUTOISO_TRIP_MV 3000u
 #define DPLS_AUTOISO_CLEAR_MV 4500u
 /* Drop stale NV bonds after repeated encrypted links that never reach DPLS auth. */
@@ -96,8 +88,8 @@ typedef struct {
     uint16_t crc;
 } dpls_settings_t;
 
-/* Persistent brute-force lock marker (SNV 0x84). Written when the 5th wrong
- * password lands, cleared when the block expires or on factory reset. */
+/* Brute-force lock marker: written on the 5th wrong password, cleared when the
+ * block expires or on factory reset. */
 typedef struct {
     uint32_t magic;
     uint8_t locked;
@@ -105,8 +97,8 @@ typedef struct {
     uint16_t crc;
 } dpls_auth_lock_t;
 
-/* Persisted two-point calibration. The reserve (VCAP) fields are reserved for
- * the reserve-monitoring stage and stored now so the layout stays fixed. */
+/* Two-point calibration. The VCAP fields are stored now so the record layout
+ * stays fixed once reserve monitoring lands. */
 typedef struct {
     uint32_t magic;
     uint32_t line_gain_milli;
@@ -130,30 +122,27 @@ static uint32_t connected_at_ms;
 static bool connection_had_encryption;
 static uint8_t pre_auth_disconnect_count;
 static uint32_t pre_auth_disconnect_window_ms;
-/* Largest client→device frame is SETUP (9 overhead + 5 + 31 name + 16 salt + 32
- * verifier = 93), so 96-byte RX slots cover every request. */
+/* The largest request is SETUP: 9 overhead + 5 + 31 name + 16 salt + 32
+ * verifier = 93 bytes. */
 #define DPLS_RX_QUEUE_DEPTH 6u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
 
-/* Outgoing indications are paced one-in-flight against the ATT confirmation, so
- * a busy stack or a back-to-back pair no longer drops the response. The largest
- * device→client frame is a batched LOG_CHUNK (9 overhead + 3 + 15×10 = 162), so
- * 168-byte slots cover every response without paying for the full 244-byte
- * frame maximum. */
+/* Indications are paced one-in-flight against the ATT confirmation, otherwise a
+ * busy stack drops back-to-back responses. The largest response is a batched
+ * LOG_CHUNK (9 + 3 + 15×10 = 162), so slots are sized for that rather than for
+ * the 244-byte frame maximum. */
 #define DPLS_TX_QUEUE_DEPTH 4u
 #define DPLS_TX_SLOT_SIZE 168u
 typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
 static uint8 tx_head, tx_tail, tx_count;
 static bool tx_in_flight;
-/* Watchdog for a lost ATT confirmation. The SDK 3.1.2 host occasionally drops
- * an indication queued back-to-back after a confirmation; without a deadline
- * the one-in-flight pipeline would wedge and every later response would queue
- * up dead. If no confirmation lands in this window the frame is written off
- * and the pump moves on (the client's poll cycle re-requests fresh state). */
+/* The host occasionally loses a confirmation, and without a deadline the
+ * one-in-flight pipeline would wedge behind it forever. On timeout the frame is
+ * written off and the pump moves on; the client's next poll refreshes state. */
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
 static uint32_t tx_in_flight_since_ms;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
@@ -249,10 +238,9 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
 
     /* First pass finds the newest individually checksummed record. */
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
-        /* Boot-time scan of 20 populated SNV blocks (plus the SDK's verbose
-         * SNV UART tracing) takes longer than the 2 s watchdog window, and
-         * init runs before the OSAL feed task exists. Feed per block or a
-         * full journal makes the device unbootable. */
+        /* Scanning 20 populated blocks outlasts the 2 s watchdog window, and
+         * init runs before the OSAL feed task exists. Feed per block or a full
+         * journal makes the device unbootable. */
         hal_watchdog_feed();
         block = journal_load_block((uint8_t)block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
@@ -268,9 +256,9 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
         return true;
     }
 
-    /* Second pass builds only a 25-byte validity bitmap. No event array is
-     * retained in RAM. A torn/corrupt record truncates the recovered history
-     * at that point instead of exporting stale bytes. */
+    /* Second pass builds a 25-byte validity bitmap and keeps no event array in
+     * RAM. A torn record truncates the recovered history there rather than
+     * exporting stale bytes. */
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         hal_watchdog_feed();
         block = journal_load_block((uint8_t)block_index);
@@ -329,10 +317,8 @@ static bool link_encrypted(void *context)
     return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
 }
 
-/* Drop every mode output and its indicator lamp to the safe (de-energized)
- * level. Isolation switches conduct and short shunts open, which is the "Norma"
- * state. Every auto-return path (timeout, disconnect, low reserve, real short,
- * internal error) funnels through here, so a lamp can never outlive its mode. */
+/* De-energize every mode output: isolation switches conduct, short shunts open,
+ * which is "Norma". Every auto-return path funnels through here. */
 static void mode_outputs_off(void)
 {
     hal_gpio_write(DPLS_PIN_ISO_1, 0);
@@ -343,13 +329,10 @@ static void mode_outputs_off(void)
     hal_gpio_write(DPLS_PIN_KZ_T, 0);
 }
 
-/* Sleep is forbidden only while an active-high power stage is asserted: a
- * sleep/wake cycle reprograms clocks and the GPIO block underneath an energized
- * output, and that is where the ADC/radio race bites. An idle or connected
- * session in Norma is free to sleep — holding the core awake for a whole
- * operator session would put the connected current well over the 0.5 mA budget.
- * MOD_USR1 must be registered for the lock to mean anything; see the target
- * layer, which does it once at startup. */
+/* Sleep is forbidden only while a power stage is asserted: waking reprograms the
+ * clocks and the GPIO block underneath an energized output. Norma sleeps freely,
+ * connected or not — staying awake for a whole session would blow the 0.5 mA
+ * budget. The target layer registers MOD_USR1; without that the lock is a no-op. */
 static void control_sleep_guard(bool energized)
 {
     if (energized == control_sleep_locked) return;
@@ -368,18 +351,14 @@ static void safe_normal(void *context)
     control_sleep_guard(false);
 }
 
-/* Drives the control output for the requested mode. Returns true = "output
- * set", NOT "electrically confirmed": this board has no power-stage feedback
- * (DEVICE_INFO capability HW_READBACK = false), so COMMAND_RESULT/STATE_REPORT
- * report the commanded mode, not a measured state. The false-return path (and
- * COMMAND_RESULT status 4) is the hook for a future Variant-B build that reads
- * back the electrical state before reporting success. */
+/* True means "output driven", not "electrically confirmed": the board has no
+ * power-stage feedback (capability HW_READBACK is clear), so reports carry the
+ * commanded mode. The false path is where a future read-back build would fail. */
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;
     if (mode > DPLS_MODE_SHORT_T) return false;
-    /* Break-before-make: return to the all-safe state first so no two outputs
-     * are ever driven together, then assert the single line for this mode. */
+    /* Break-before-make: all outputs safe first, then assert the single line. */
     mode_outputs_off();
     switch (mode) {
     case DPLS_MODE_NORMAL: break;
@@ -420,8 +399,8 @@ static dpls_led_scene_t led_scene_for_mode(dpls_mode_t mode)
 static void status_led_output(void *context, bool on)
 {
     (void)context;
-    /* TЗ: identify is shown by green flashes. Always drive the unused colour
-     * channels low so a retained/stale RGB state cannot mix into the scene. */
+    /* Scenes are green. Hold the other channels low so a retained RGB state
+     * cannot bleed into the colour. */
     hal_gpio_write(DPLS_PIN_LED_RED, 0);
     hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
@@ -456,18 +435,16 @@ static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint
     return (uint16_t)(sum / *count);
 }
 
-/* A single raw buffer is enough because channels are converted strictly
- * one at a time. This saves SRAM compared with one MAX_ADC_SAMPLE_SIZE buffer
- * per voltage input. */
+/* One shared buffer: channels convert strictly one at a time, so per-input
+ * buffers would only waste SRAM. */
 static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
 static volatile uint8_t adc_raw_size;
 static volatile adc_CH_t adc_raw_channel;
 static volatile bool adc_raw_ready;
 
-/* ADC completion ISR: copy the raw samples, flag the channel and wake the task.
- * No float, no averaging loop, no flash, no BLE here — the previous version did
- * hal_adc_value_cal + window folding in interrupt context, which is the leading
- * suspect for the ADC↔radio watchdog reset loop. */
+/* Completion ISR: copy the samples, flag the channel, wake the task. Keep float,
+ * averaging, flash and BLE out of here — doing that work in interrupt context is
+ * the leading suspect for the ADC/radio watchdog reset loop. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i, n;
@@ -480,14 +457,13 @@ static void adc_evt(adc_Evt_t *event)
     adc_raw_size = n;
     adc_raw_channel = event->ch;
     adc_raw_ready = true;
-    /* One-shot mode: the ADC IRQ handler stops the converter after the last
-     * channel callback returns, so we only clear our re-entrancy guard. */
+    /* One-shot: the IRQ handler stops the converter itself, so only the
+     * re-entrancy guard is ours to clear. */
     adc_busy = false;
     osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
 }
 
-/* Task context: raw samples → pin volts (soft-float scaling lives here now) →
- * two-point calibration → moving-average window. */
+/* Task context: raw samples, pin volts, calibration, moving average. */
 static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t size,
                                 const dpls_calib_t *calib, uint16_t *window,
                                 uint8_t *wcount, uint8_t *wpos, volatile uint16_t *cached)
@@ -504,9 +480,7 @@ static void adc_kick(void)
     uint8_t claim;
     if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
-    /* One channel per conversion. P20/P15/P24 are the independent +1/+2/+T
-     * voltage paths, P23 is the reserve accumulator. Standard resolution is
-     * used because every divider keeps its ADC pin close to or below 1 V. */
+    /* Standard resolution: every divider keeps its pin at or below ~1 V. */
     if (adc_pending & DPLS_ADC_NEED_PORT1) {
         channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC));
         claim = DPLS_ADC_NEED_PORT1;

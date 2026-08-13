@@ -18,12 +18,9 @@
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
 #define DEFAULT_CONN_TIMEOUT 3000
-/* The operator protocol polls state at 1 Hz and the ADC now samples on this
- * tick, so a 1 Hz housekeeping period keeps telemetry fresh at a fifth of the
- * previous wake rate. */
+/* Housekeeping and ADC sampling share this tick; the app polls state at 1 Hz. */
 #define DPLS_TICK_MS 1000u
-/* 0.625 ms units: 500 ms advertising cuts idle radio events by 2.5x versus the
- * vendor demo's 200 ms while keeping interactive discovery responsive. */
+/* 0.625 ms units — 500 ms, slow enough to be cheap, fast enough to find. */
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
@@ -69,10 +66,8 @@ static void apply_identity_to_adv(void)
     advertising_data[28] = (uint8)(id >> 24);
 }
 
-/* Runs one LED step and keeps the timer only while there is something to show,
- * so Norma costs no wake-ups at all. Every path that can change the scene calls
- * this: a received command, the periodic tick that spots auto-isolation or a
- * switch to reserve power, and the loss of a link during identify. */
+/* Steps the LED and re-arms the timer only while there is something to show, so
+ * Norma costs no wake-ups. Call from anywhere the scene can change. */
 static void schedule_led_if_needed(void)
 {
     uint32 next_ms = dpls_phy6252_led_tick();
@@ -147,28 +142,18 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-    /* The pristine SDK 3.1.2 main.c retains only SRAM0 (0x1fff0000-0x1fff7fff)
-     * across sleep, but our scatter places the ER_IROM1 tail past 0x1fff8000
-     * (SRAM1) and ER_IROM2 at 0x1fffc000 (SRAM2). With those banks unpowered
-     * every wakeup lands on dead code and turns into a warm reboot loop.
-     * Re-assert the full-retention mask the proven 3.1.1 build used. */
+    /* The scatter puts the ER_IROM1 tail in SRAM1 and ER_IROM2 in SRAM2, so all
+     * three banks must survive sleep or a wakeup lands on dead code. */
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
-    /* Retention current flows for as long as the device is powered, so this is
-     * the one saving that never depends on how often we wake. The SDK only takes
-     * it on parts whose factory word at 0x1100181c is still blank, and it leaves
-     * both application timing and the set of retained banks untouched. */
+    /* Cheaper retention regulator. Costs nothing in timing and is the only
+     * saving that does not depend on how often we wake. */
     (void)hal_pwrmgr_LowCurrentLdo_enable();
-    /* Reserve the slot the power stage locks while a test mode is energized.
-     * hal_pwrmgr_lock() silently does nothing for an unregistered module, so
-     * without this the guard in dpls_phy6252_app.c would be a no-op. No sleep or
-     * wake callback is needed: the slot exists only to hold the lock. */
+    /* hal_pwrmgr_lock() is a no-op for an unregistered module, so reserve the
+     * slot the sleep guard in dpls_phy6252_app.c takes while a mode is live. */
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
-    /* osal_snv is fs-backed (USE_FS=1) and needs the fs region mounted before
-     * the first read/write. The proven 3.1.1 main.c mounted it in hal_init();
-     * the pristine 3.1.2 main.c does not, which leaves every SNV operation
-     * failing (no BLE MAC, no settings, no journal persistence). Same region
-     * as before: 3 sectors at 0x1103C000. */
+    /* osal_snv is fs-backed and the SDK's main.c does not mount the region, so
+     * without this every SNV read and write fails. */
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
     dpls_ble_identity_prepare();
