@@ -96,12 +96,17 @@ static void state_changed(gaprole_States_t state)
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
         dpls_phy6252_adc_set_full_scan(true);
+        dpls_phy6252_adc_set_radio_gated(true);
         dpls_phy6252_connected(handle);
+        if (LL_EXT_ConnEventNotice(app_task_id, SBP_DPLS_CONN_EVT) != LL_STATUS_SUCCESS)
+            (void)GAPRole_TerminateConnection();
         break;
     }
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
         uint8 enabled = identity_ready ? TRUE : FALSE;
+        (void)LL_EXT_ConnEventNotice(app_task_id, 0u);
+        dpls_phy6252_adc_set_radio_gated(false);
         dpls_phy6252_adc_set_full_scan(false);
         dpls_phy6252_disconnected();
         schedule_led_if_needed();
@@ -238,6 +243,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & DPLS_PHY6252_ADC_EVT) {
         dpls_phy6252_process_adc();
         return events ^ DPLS_PHY6252_ADC_EVT;
+    }
+    if (events & SBP_DPLS_CONN_EVT) {
+        dpls_phy6252_adc_after_radio_event();
+        return events ^ SBP_DPLS_CONN_EVT;
     }
     return 0;
 }

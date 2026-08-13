@@ -75,6 +75,7 @@ static uint8_t calibrated_mask;
 static uint8_t task_id;
 static uint16_t process_event;
 static bool initialized;
+static bool radio_gated;
 static volatile bool adc_busy;
 static uint8_t adc_pending;
 static uint8_t scan_mask = DPLS_ADC_NEED_SAFETY;
@@ -266,6 +267,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     task_id = new_task_id;
     process_event = new_process_event;
     initialized = false;
+    radio_gated = false;
     scan_mask = DPLS_ADC_NEED_SAFETY;
     memset(channels, 0, sizeof(channels));
 
@@ -313,6 +315,19 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     return true;
 }
 
+void dpls_phy6252_adc_set_radio_gated(bool enabled)
+{
+    radio_gated = enabled;
+    if (!enabled)
+        adc_kick();
+}
+
+void dpls_phy6252_adc_after_radio_event(void)
+{
+    if (initialized && radio_gated)
+        adc_kick();
+}
+
 void dpls_phy6252_adc_set_full_scan(bool enabled)
 {
     scan_mask = enabled ? DPLS_ADC_NEED_ALL : DPLS_ADC_NEED_SAFETY;
@@ -341,7 +356,8 @@ void dpls_phy6252_adc_tick(uint32_t now_ms)
         inflight_index == DPLS_ADC_INDEX_NONE && elapsed(now_ms, next_cycle_ms)) {
         adc_pending = scan_mask;
         next_cycle_ms = now_ms + DPLS_ADC_PERIOD_MS;
-        adc_kick();
+        if (!radio_gated)
+            adc_kick();
     }
 }
 
@@ -375,7 +391,11 @@ void dpls_phy6252_adc_process(uint32_t now_ms)
         inflight_index = DPLS_ADC_INDEX_NONE;
     }
 
-    adc_kick();
+    /* During a BLE connection, perform at most one conversion in each quiet
+     * post-radio window. Starting the next channel here would let an unlucky
+     * task delay overlap the following connection event. */
+    if (!radio_gated)
+        adc_kick();
 }
 
 static bool channel_fresh(const dpls_adc_channel_t *channel, uint32_t now_ms)

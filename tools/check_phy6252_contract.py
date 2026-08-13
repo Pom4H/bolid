@@ -176,6 +176,8 @@ def main() -> None:
         "dpls_adc_assert_port_t", "dpls_adc_assert_vcap",
         "hal_adc_stop();", "finish_inflight_as_failed();",
         "hal_pwrmgr_lock(MOD_ADCC)", "hal_pwrmgr_unlock(MOD_ADCC)",
+        "dpls_phy6252_adc_set_radio_gated", "dpls_phy6252_adc_after_radio_event",
+        "if (!radio_gated)",
     ):
         require(adc, needle, ADC)
     forbid(adc, "ADC_CH1N_P11", ADC)
@@ -230,6 +232,10 @@ def main() -> None:
     require(target, "#define DEFAULT_MAX_CONN_INTERVAL 80", TARGET)
     require(target, "#define DEFAULT_SLAVE_LATENCY 0", TARGET)
     require(target, "#define DPLS_TICK_MS 200u", TARGET)
+    require(target, "LL_EXT_ConnEventNotice(app_task_id, SBP_DPLS_CONN_EVT)", TARGET)
+    require(target, "dpls_phy6252_adc_set_full_scan(true)", TARGET)
+    require(target, "dpls_phy6252_adc_set_radio_gated(true)", TARGET)
+    require(target, "dpls_phy6252_adc_after_radio_event()", TARGET)
     require(sdk_patch, "peer-address slave ID key override", SDK_PATCH)
     require(sdk_patch, "Respect GAPBOND_KEY_DIST_LIST", SDK_PATCH)
     for forbidden in (
