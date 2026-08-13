@@ -1021,10 +1021,6 @@ void dpls_phy6252_init(uint8 new_task_id)
     (void)hal_gpioretention_register(DPLS_PIN_LED_RED);
     (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
     (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
-    mode_outputs_off();
-    hal_gpio_write(DPLS_PIN_LED_RED, 0);
-    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
-    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hardware_mode = DPLS_MODE_NORMAL;
     dpls_led_init(&status_led, status_led_output, NULL, now_ms());
     line_window_count = line_window_pos = 0;
