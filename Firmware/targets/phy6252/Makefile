@@ -184,7 +184,7 @@ $(BLE_LIB): $(BLE_LIB_SRC) $(FIX_AR) | $(BUILD)
 $(ELF): $(OBJECTS) $(ROM_LD) $(LDSCRIPT) $(RF_LIB) $(BLE_LIB)
 	$(CC) $(ARCH) -nostartfiles -nostdlib \
 		-Wl,-Map,$(MAP),--cref,--gc-sections,--undefined=jump_table_base,--undefined=global_config \
-		-Wl,--no-warn-mismatch \
+		-Wl,--no-warn-mismatch,--allow-multiple-definition \
 		-T $(LDSCRIPT) -T $(ROM_LD) -o $@ $(OBJECTS) \
 		-Wl,--start-group $(RF_LIB) $(BLE_LIB) -lgcc -Wl,--end-group
 	$(SIZE) $@
