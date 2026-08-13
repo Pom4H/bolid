@@ -1,4 +1,4 @@
-name: PHY6252 AC6 target build
+name: PHY6252 Keil / AC6 build
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
     paths:
       - "Firmware/**"
       - "tools/build_firmware.sh"
+      - "tools/build_firmware_keil.sh"
       - "tools/fetch_phy6252_sdk.sh"
       - ".github/workflows/firmware-target.yml"
   push:
@@ -13,6 +14,7 @@ on:
     paths:
       - "Firmware/**"
       - "tools/build_firmware.sh"
+      - "tools/build_firmware_keil.sh"
       - "tools/fetch_phy6252_sdk.sh"
       - ".github/workflows/firmware-target.yml"
 
@@ -24,8 +26,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  target-ac6:
-    name: Build PHY6252 firmware with AC6
+  target-keil:
+    name: Build PHY6252 firmware with Keil / Arm Compiler 6
     runs-on: ubuntu-22.04
 
     steps:
@@ -57,7 +59,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp
-          bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex 2>&1 | tee tmp/ac6-build-adc.log
+          bash tools/build_firmware_keil.sh tmp/test-dpls-sdk-3.1.2.hex 2>&1 | tee tmp/keil-build-adc.log
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls-sdk-3.1.2.axf
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls-sdk-3.1.2.map
 
@@ -67,7 +69,7 @@ jobs:
           DPLS_ADC: "0"
         run: |
           set -o pipefail
-          bash tools/build_firmware.sh tmp/test-dpls-adcoff.hex 2>&1 | tee tmp/ac6-build-noadc.log
+          bash tools/build_firmware_keil.sh tmp/test-dpls-adcoff.hex 2>&1 | tee tmp/keil-build-noadc.log
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls-adcoff.axf
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls-adcoff.map
 
@@ -75,10 +77,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-dpls-phy6252-sdk-3.1.2
+          name: test-dpls-phy6252-keil-sdk-3.1.2
           path: |
-            tmp/ac6-build-adc.log
-            tmp/ac6-build-noadc.log
+            tmp/keil-build-adc.log
+            tmp/keil-build-noadc.log
             tmp/test-dpls-sdk-3.1.2.hex
             tmp/test-dpls-sdk-3.1.2.axf
             tmp/test-dpls-sdk-3.1.2.map
