@@ -159,6 +159,11 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
      * it on parts whose factory word at 0x1100181c is still blank, and it leaves
      * both application timing and the set of retained banks untouched. */
     (void)hal_pwrmgr_LowCurrentLdo_enable();
+    /* Reserve the slot the power stage locks while a test mode is energized.
+     * hal_pwrmgr_lock() silently does nothing for an unregistered module, so
+     * without this the guard in dpls_phy6252_app.c would be a no-op. No sleep or
+     * wake callback is needed: the slot exists only to hold the lock. */
+    (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
     /* osal_snv is fs-backed (USE_FS=1) and needs the fs region mounted before
      * the first read/write. The proven 3.1.1 main.c mounted it in hal_init();
      * the pristine 3.1.2 main.c does not, which leaves every SNV operation

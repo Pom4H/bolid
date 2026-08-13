@@ -181,6 +181,7 @@ static bool reserve_low_state;
 static bool auto_isolation_active;
 static bool line_established;
 static bool line_calib_from_nv;
+static bool control_sleep_locked;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
@@ -342,11 +343,29 @@ static void mode_outputs_off(void)
     hal_gpio_write(DPLS_PIN_KZ_T, 0);
 }
 
+/* Sleep is forbidden only while an active-high power stage is asserted: a
+ * sleep/wake cycle reprograms clocks and the GPIO block underneath an energized
+ * output, and that is where the ADC/radio race bites. An idle or connected
+ * session in Norma is free to sleep — holding the core awake for a whole
+ * operator session would put the connected current well over the 0.5 mA budget.
+ * MOD_USR1 must be registered for the lock to mean anything; see the target
+ * layer, which does it once at startup. */
+static void control_sleep_guard(bool energized)
+{
+    if (energized == control_sleep_locked) return;
+    if (energized) {
+        if (hal_pwrmgr_lock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = true;
+    } else {
+        if (hal_pwrmgr_unlock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = false;
+    }
+}
+
 static void safe_normal(void *context)
 {
     (void)context;
     mode_outputs_off();
     hardware_mode = DPLS_MODE_NORMAL;
+    control_sleep_guard(false);
 }
 
 /* Drives the control output for the requested mode. Returns true = "output
@@ -382,6 +401,7 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     default: return false;
     }
     hardware_mode = mode;
+    control_sleep_guard(mode != DPLS_MODE_NORMAL);
     return true;
 }
 
@@ -971,17 +991,21 @@ void dpls_phy6252_init(uint8 new_task_id)
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
     identify_led_active = false;
-    /* Drive every mode output to the safe "Norma" level before the radio or
-     * the state machine can touch them. */
-    hal_gpio_pin_init(DPLS_PIN_ISO_1, OEN);
-    hal_gpio_pin_init(DPLS_PIN_ISO_2, OEN);
-    hal_gpio_pin_init(DPLS_PIN_ISO_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_1, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_2, OEN);
-    hal_gpio_pin_init(DPLS_PIN_KZ_T, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_RED, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_GREEN, OEN);
-    hal_gpio_pin_init(DPLS_PIN_LED_BLUE, OEN);
+    /* Drive every mode output to the safe "Norma" level before the radio or the
+     * state machine can touch them. hal_gpio_write() is the only glitch-safe
+     * primitive here: it loads the data latch and only then enables the output
+     * direction. Enabling the direction first — hal_gpio_pin_init(pin, OEN) —
+     * would assert a pulse on an active-high control pin whenever a retained or
+     * warm-boot latch still holds 1. */
+    hal_gpio_write(DPLS_PIN_ISO_1, 0);
+    hal_gpio_write(DPLS_PIN_ISO_2, 0);
+    hal_gpio_write(DPLS_PIN_ISO_T, 0);
+    hal_gpio_write(DPLS_PIN_KZ_1, 0);
+    hal_gpio_write(DPLS_PIN_KZ_2, 0);
+    hal_gpio_write(DPLS_PIN_KZ_T, 0);
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
      * through sleep only while it is registered for AON retention, and the
      * wake handler restores just those pins. Without this a mode output goes
@@ -1099,27 +1123,15 @@ void dpls_phy6252_connected(uint16 conn_handle)
     connection_handle = conn_handle;
     connected_at_ms = now_ms();
     connection_had_encryption = false;
-    /* Intended: keep the core awake for the whole connection, because a
-     * periodic ADC kick racing the sleep/wake clock transitions between
-     * connection events eventually freezes the OSAL loop (SDK 3.1.2, ~90 s in;
-     * on 3.1.1 the same race surfaced as watchdog resets).
-     *
-     * NOTE: this lock is currently a no-op — hal_pwrmgr_lock() only takes
-     * effect for a module previously passed to hal_pwrmgr_register(), and
-     * MOD_USR1 is never registered, so the call returns PPlus_ERR_NOT_REGISTED
-     * and sleep stays enabled. Every hardware soak so far therefore ran WITH
-     * sleep active during connections. Making it real (register MOD_USR1)
-     * raises the connected current well above the ≤0.5 mA budget and shortens
-     * the reserve autonomy, so it is left as-is until that trade-off is
-     * measured on the power board. GPIO retention above covers the output
-     * levels either way. */
-    (void)hal_pwrmgr_lock(MOD_USR1);
+    /* An idle connection is allowed to sleep: the guard belongs to the power
+     * stage, not to the link. See control_sleep_guard(). */
     dpls_server_connected(&server, now_ms());
 }
 
 void dpls_phy6252_disconnected(void)
 {
-    (void)hal_pwrmgr_unlock(MOD_USR1);
+    /* No unlock here: dpls_server_disconnected() forces Norma, and that path
+     * owns the guard. */
     note_pre_auth_disconnect();
     dpls_server_disconnected(&server, now_ms());
     connection_handle = INVALID_CONNHANDLE;
