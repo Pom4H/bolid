@@ -154,6 +154,11 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
      * Re-assert the full-retention mask the proven 3.1.1 build used. */
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
+    /* Retention current flows for as long as the device is powered, so this is
+     * the one saving that never depends on how often we wake. The SDK only takes
+     * it on parts whose factory word at 0x1100181c is still blank, and it leaves
+     * both application timing and the set of retained banks untouched. */
+    (void)hal_pwrmgr_LowCurrentLdo_enable();
     /* osal_snv is fs-backed (USE_FS=1) and needs the fs region mounted before
      * the first read/write. The proven 3.1.1 main.c mounted it in hal_init();
      * the pristine 3.1.2 main.c does not, which leaves every SNV operation
