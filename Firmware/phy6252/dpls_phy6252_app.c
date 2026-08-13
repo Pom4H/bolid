@@ -8,13 +8,11 @@
 #include "dpls_server.h"
 #include "OSAL.h"
 #if defined(__GNUC__)
-#pragma GCC diagnostic push
+/* adc.h prototypes static helpers that live in adc.c. GCC diagnoses them at
+ * end of TU, so a push/pop around the include does not hide -Wunused-function. */
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
 #include "adc.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
 #include "error.h"
 #include "gpio.h"
 #include "linkdb.h"

@@ -163,6 +163,10 @@ $(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
 endef
 $(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 
+# Vendor adc.h declares static helpers that are defined in adc.c; GCC still
+# emits -Wunused-function at end of this TU even with -isystem.
+$(BUILD)/dpls_phy6252_app.o: APP_CFLAGS += -Wno-unused-function
+
 $(BUILD)/startup_phy6252.o: startup_phy6252.S | $(BUILD)
 	$(CC) $(ARCH) -x assembler-with-cpp -MMD -MP -c $< -o $@
 
