@@ -75,6 +75,7 @@ static uint8_t calibrated_mask;
 static uint8_t task_id;
 static uint16_t process_event;
 static bool initialized;
+static bool sampling_paused;
 static volatile bool adc_busy;
 static uint8_t adc_pending;
 static uint8_t scan_mask = DPLS_ADC_NEED_SAFETY;
@@ -204,7 +205,7 @@ static void adc_evt(adc_Evt_t *event)
     uint8_t i;
     uint8_t n;
 
-    if (inflight_index == DPLS_ADC_INDEX_NONE) {
+    if (sampling_paused || inflight_index == DPLS_ADC_INDEX_NONE) {
         adc_busy = false;
         return;
     }
@@ -266,6 +267,7 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     task_id = new_task_id;
     process_event = new_process_event;
     initialized = false;
+    sampling_paused = false;
     scan_mask = DPLS_ADC_NEED_SAFETY;
     memset(channels, 0, sizeof(channels));
 
@@ -313,6 +315,25 @@ bool dpls_phy6252_adc_init(uint8_t new_task_id, uint16_t new_process_event)
     return true;
 }
 
+void dpls_phy6252_adc_set_paused(bool paused)
+{
+    uint8_t i;
+    sampling_paused = paused;
+    if (paused) {
+        if (adc_busy)
+            (void)hal_adc_stop();
+        adc_busy = false;
+        adc_pending = 0u;
+        adc_raw_ready = false;
+        adc_event_failed = false;
+        inflight_index = DPLS_ADC_INDEX_NONE;
+        for (i = 0u; i < DPLS_ADC_CHANNEL_COUNT; ++i)
+            channels[i].last_sample_ms = 0u;
+    } else {
+        next_cycle_ms = 0u;
+    }
+}
+
 void dpls_phy6252_adc_set_full_scan(bool enabled)
 {
     scan_mask = enabled ? DPLS_ADC_NEED_ALL : DPLS_ADC_NEED_SAFETY;
@@ -327,7 +348,7 @@ void dpls_phy6252_adc_set_full_scan(bool enabled)
 
 void dpls_phy6252_adc_tick(uint32_t now_ms)
 {
-    if (!initialized)
+    if (!initialized || sampling_paused)
         return;
 
     if (inflight_index != DPLS_ADC_INDEX_NONE && adc_busy &&
@@ -347,7 +368,7 @@ void dpls_phy6252_adc_tick(uint32_t now_ms)
 
 void dpls_phy6252_adc_process(uint32_t now_ms)
 {
-    if (!initialized)
+    if (!initialized || sampling_paused)
         return;
 
     if (inflight_index != DPLS_ADC_INDEX_NONE) {
