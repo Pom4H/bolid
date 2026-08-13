@@ -1,6 +1,7 @@
 # Test-DPLS target for PHY6252/PB-03F using GCC support from SDK 3.1.2.
 
 SDK := ../../sdk/PHY62XX_SDK_3.1.2
+ROOT := $(SDK)
 FIRMWARE := ../..
 BUILD := build
 
