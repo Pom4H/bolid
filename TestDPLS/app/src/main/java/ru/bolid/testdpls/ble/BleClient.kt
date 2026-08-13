@@ -1308,6 +1308,14 @@ class BleClient(context: Context) {
             portTVoltageValid = extendedVoltages && (validity and 0x40) != 0,
             reserveVoltageValid = extendedVoltages && (validity and 0x02) != 0,
         )
+        Log.i(
+            TAG,
+            "E2E live voltage t=${state.receivedAtMillis} " +
+                "p1=${state.port1VoltageMv}:${state.port1VoltageValid} " +
+                "p2=${state.port2VoltageMv}:${state.port2VoltageValid} " +
+                "pt=${state.portTVoltageMv}:${state.portTVoltageValid} " +
+                "reserve=${state.reserveVoltageMv}:${state.reserveVoltageValid}",
+        )
         _uiState.update {
             it.copy(
                 phase = ConnectionPhase.READY,

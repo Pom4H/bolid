@@ -646,7 +646,13 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
     slot->length = length;
     rx_tail = (uint8)((rx_tail + 1u) % DPLS_RX_QUEUE_DEPTH);
     ++rx_count;
-    osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    /* GATT invokes this callback while the connection event is still being
+     * serviced. Running AUTH_PROOF verification immediately can delay the ATT
+     * write response long enough for Android to wedge the write queue. The LL
+     * connection-event notice releases this slot once the radio exchange has
+     * completed. */
+    if (connection_handle == INVALID_CONNHANDLE)
+        osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
     return SUCCESS;
 }
 
@@ -931,6 +937,12 @@ void dpls_phy6252_disconnected(void)
         factory_reset_failed();
 }
 
+void dpls_phy6252_rx_after_radio_event(void)
+{
+    if (rx_count != 0u)
+        osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+}
+
 void dpls_phy6252_process_rx(void)
 {
     dpls_rx_slot_t *slot;
@@ -940,7 +952,10 @@ void dpls_phy6252_process_rx(void)
     slot->length = 0;
     rx_head = (uint8)((rx_head + 1u) % DPLS_RX_QUEUE_DEPTH);
     --rx_count;
-    if (rx_count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    /* While connected, process at most one complete command per radio event.
+     * The next LL event notice releases the next slot. */
+    if (rx_count != 0u && connection_handle == INVALID_CONNHANDLE)
+        osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
 void dpls_phy6252_process_adc(void)

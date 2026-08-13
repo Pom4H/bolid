@@ -10,6 +10,10 @@
 void dpls_phy6252_init(uint8 task_id);
 void dpls_phy6252_connected(uint16 conn_handle);
 void dpls_phy6252_disconnected(void);
+/* Release one queued client command only after the controller reports that the
+ * current connection event is over. This keeps protocol crypto/storage work
+ * out of the ATT write-response radio window. */
+void dpls_phy6252_rx_after_radio_event(void);
 void dpls_phy6252_process_rx(void);
 /* Convert the raw ADC samples captured by the (minimal) ISR into calibrated
  * millivolts. Runs in the OSAL task — this is where the soft-float scaling and

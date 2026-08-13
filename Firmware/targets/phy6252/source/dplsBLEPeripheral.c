@@ -246,6 +246,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & SBP_DPLS_CONN_EVT) {
         dpls_phy6252_adc_after_radio_event();
+        dpls_phy6252_rx_after_radio_event();
         return events ^ SBP_DPLS_CONN_EVT;
     }
     return 0;
