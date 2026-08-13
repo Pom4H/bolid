@@ -18,15 +18,28 @@
 /* Four independent single-ended inputs of the PHY6252 ADC multiplexer.
  * Every external DPLS input must be connected through its own >=1 Mohm,
  * 0..30 V divider/protection path. The firmware scans one channel at a time.
- *
- * SDK channel aliases:
- *   P20 -> ADC_CH9, P15 -> ADC_CH4, P24 -> ADC_CH2, P23 -> ADC_CH1.
  */
 #define DPLS_PIN_PORT1_ADC GPIO_P20
 #define DPLS_PIN_PORT2_ADC GPIO_P15
 #define DPLS_PIN_PORT_T_ADC GPIO_P24
 #define DPLS_PIN_VCAP_ADC GPIO_P23
 #define DPLS_PIN_LINE_ADC DPLS_PIN_PORT1_ADC
+
+/* Multiplexer channel behind each ADC-capable pin. Only the four pins the
+ * hardware actually routes are listed, so DPLS_ADC_CHANNEL() of anything else
+ * fails to compile instead of silently sampling whatever channel the code had
+ * hardcoded. The SDK spells the same channel two ways — ADC_CH3P_P20 when
+ * selecting it and ADC_CH9 when reporting it — and both spellings used to be
+ * written out by hand at opposite ends of the driver.
+ *
+ * Bodies name <adc.h> enumerators but are only expanded at the point of use,
+ * so this header keeps depending on <gpio.h> alone. */
+#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20
+#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15
+#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24
+#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23
+#define DPLS_ADC_CHANNEL_OF(pin) DPLS_ADC_CHANNEL_##pin
+#define DPLS_ADC_CHANNEL(pin) DPLS_ADC_CHANNEL_OF(pin)
 
 /* Keep the PB-03F RGB LED available. It is common-cathode / active-high:
  * red=P07, green=P11, blue=P18. The current TЗ scene uses green identify

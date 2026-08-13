@@ -40,12 +40,16 @@ jobs:
           grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' Firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' Firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' Firmware/phy6252/dpls_board.h
-          grep -q 'ADC_CH3P_P20' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH3N_P15' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH2N_P24' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_CH1P_P23' Firmware/phy6252/dpls_phy6252_app.c
+          # The sampler derives its channel from the pin macros above, so the
+          # mapping is checked where it now lives instead of in the driver.
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' Firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' Firmware/phy6252/dpls_board.h
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' Firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' Firmware/phy6252/dpls_phy6252_app.c
           # P11 drives the RGB green channel, so it must never be sampled.
-          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_phy6252_app.c
+          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_board.h Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_ADC_NEED_ALL' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
           grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c

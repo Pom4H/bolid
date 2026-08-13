@@ -508,16 +508,16 @@ static void adc_kick(void)
      * voltage paths, P23 is the reserve accumulator. Standard resolution is
      * used because every divider keeps its ADC pin close to or below 1 V. */
     if (adc_pending & DPLS_ADC_NEED_PORT1) {
-        channel = ADC_BIT(ADC_CH3P_P20);
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC));
         claim = DPLS_ADC_NEED_PORT1;
     } else if (adc_pending & DPLS_ADC_NEED_PORT2) {
-        channel = ADC_BIT(ADC_CH3N_P15);
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC));
         claim = DPLS_ADC_NEED_PORT2;
     } else if (adc_pending & DPLS_ADC_NEED_PORT_T) {
-        channel = ADC_BIT(ADC_CH2N_P24);
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC));
         claim = DPLS_ADC_NEED_PORT_T;
     } else {
-        channel = ADC_BIT(ADC_CH1P_P23);
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC));
         claim = DPLS_ADC_NEED_VCAP;
     }
     cfg.channel = channel;
@@ -544,22 +544,22 @@ void dpls_phy6252_process_adc(void)
         uint8_t size = adc_raw_size;
         adc_raw_ready = false;
         switch (ch) {
-        case ADC_CH9:
+        case DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib,
                                 line_window, &line_window_count, &line_window_pos,
                                 &cached_line_mv);
             break;
-        case ADC_CH4:
+        case DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib,
                                 port2_window, &port2_window_count, &port2_window_pos,
                                 &cached_port2_mv);
             break;
-        case ADC_CH2:
+        case DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib,
                                 port_t_window, &port_t_window_count, &port_t_window_pos,
                                 &cached_port_t_mv);
             break;
-        case ADC_CH1:
+        case DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC):
             process_adc_channel(ch, adc_raw, size, &vcap_calib,
                                 vcap_window, &vcap_window_count, &vcap_window_pos,
                                 &cached_vcap_mv);
