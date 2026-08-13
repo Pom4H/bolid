@@ -1,0 +1,35 @@
+name: PHY6252 GCC build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Firmware/**"
+      - "tools/build_firmware.sh"
+      - ".github/workflows/firmware-gcc.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+      - name: Build
+        run: |
+          mkdir -p tmp
+          DPLS_ADC=1 bash tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
+          cp Firmware/targets/phy6252/out/test-dpls.elf tmp/test-dpls-sdk-3.1.2.elf
+          cp Firmware/targets/phy6252/out/test-dpls.map tmp/test-dpls-sdk-3.1.2.map
+          DPLS_ADC=0 bash tools/build_firmware.sh tmp/test-dpls-adcoff.hex
+          cp Firmware/targets/phy6252/out/test-dpls.elf tmp/test-dpls-adcoff.elf
+          cp Firmware/targets/phy6252/out/test-dpls.map tmp/test-dpls-adcoff.map
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-dpls-phy6252-gcc
+          path: tmp/
