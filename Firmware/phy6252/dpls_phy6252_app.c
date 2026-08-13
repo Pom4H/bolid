@@ -92,6 +92,7 @@ static uint32_t pre_auth_disconnect_window_ms;
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
 static uint8 rx_head, rx_tail, rx_count;
+static uint8 rx_radio_events_to_skip;
 static uint8 fragment_buffer[DPLS_RX_SLOT_SIZE];
 static uint8 fragment_transfer_id, fragment_total, fragment_received;
 
@@ -651,8 +652,14 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
      * write response long enough for Android to wedge the write queue. The LL
      * connection-event notice releases this slot once the radio exchange has
      * completed. */
-    if (connection_handle == INVALID_CONNHANDLE)
+    if (connection_handle == INVALID_CONNHANDLE) {
         osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    } else {
+        /* The notice for the event that delivered this write can still be
+         * pending. Skip it, then release the command after the next complete
+         * radio event, in which the ATT write response is transmitted. */
+        rx_radio_events_to_skip = 1u;
+    }
     return SUCCESS;
 }
 
@@ -813,7 +820,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     bool adc_ok;
     task_id = new_task_id;
     connection_handle = INVALID_CONNHANDLE;
-    rx_head = rx_tail = rx_count = 0;
+    rx_head = rx_tail = rx_count = rx_radio_events_to_skip = 0;
     fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
@@ -927,7 +934,7 @@ void dpls_phy6252_disconnected(void)
     connection_handle = INVALID_CONNHANDLE;
     connected_at_ms = 0;
     connection_had_encryption = false;
-    rx_head = rx_tail = rx_count = 0;
+    rx_head = rx_tail = rx_count = rx_radio_events_to_skip = 0;
     fragment_transfer_id = fragment_total = fragment_received = 0u;
     tx_head = tx_tail = tx_count = 0;
     tx_in_flight = false;
@@ -939,8 +946,12 @@ void dpls_phy6252_disconnected(void)
 
 void dpls_phy6252_rx_after_radio_event(void)
 {
-    if (rx_count != 0u)
-        osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    if (rx_count == 0u) return;
+    if (rx_radio_events_to_skip != 0u) {
+        --rx_radio_events_to_skip;
+        return;
+    }
+    osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
 void dpls_phy6252_process_rx(void)

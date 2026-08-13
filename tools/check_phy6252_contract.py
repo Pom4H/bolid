@@ -241,6 +241,7 @@ def main() -> None:
     require(app, "DPLS_MSG_CLIENT_FRAGMENT", APP)
     require(app, "fragment_buffer", APP)
     require(app, "connection_handle == INVALID_CONNHANDLE", APP)
+    require(app, "rx_radio_events_to_skip = 1u", APP)
     require(sdk_patch, "peer-address slave ID key override", SDK_PATCH)
     require(sdk_patch, "Respect GAPBOND_KEY_DIST_LIST", SDK_PATCH)
     for forbidden in (
