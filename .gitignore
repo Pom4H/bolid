@@ -10,6 +10,7 @@ pvvx-PHY62x2/.venv/
 
 Firmware/build/
 Firmware/sdk/PHY62XX_SDK_3.1.2/
+Firmware/sdk/release_bbb_sdk-*/
 Firmware/sdk/**/ac6/out/
 Firmware/sdk/**/ac6/tmp/
 Firmware/sdk/**/ac6/*.cbuild-idx.yml
