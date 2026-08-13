@@ -12,9 +12,9 @@
  *   - a safety sleep guard while any active-high power-stage mode is asserted;
  *   - break-before-make mode switching and the RGB identify LED.
  *
- * Normal BLE operation is intentionally allowed to sleep. The ADC driver owns
- * its own MOD_ADCC lock for the short conversion window; keeping MOD_USR1 locked
- * for an entire connection would defeat the PHY6252 low-power design.
+ * Interactive BLE operation keeps MOD_USR1 locked because sleep/wake on the
+ * pinned PHY62xx stack can lose an ATT write response and wedge Android's GATT
+ * queue. The ADC driver separately owns MOD_ADCC for each conversion.
  *
  * The module is idempotent: the target layer calls init as early as possible
  * and dpls_phy6252_app calls it again defensively.
@@ -29,8 +29,7 @@ dpls_mode_t dpls_phy6252_hw_mode(void);
 void dpls_phy6252_hw_identify_led(bool on);
 
 /* Historical API names retained to avoid coupling the app to the power-policy
- * implementation. Connection start/end now validate/reset hardware state but
- * do not keep the MCU awake for an otherwise idle BLE session. */
+ * implementation. Connection start/end own the interactive-session guard. */
 bool dpls_phy6252_hw_connection_lock(void);
 bool dpls_phy6252_hw_connection_unlock(void);
 

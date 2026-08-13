@@ -138,8 +138,8 @@ def main() -> None:
     if resolve_pin("DPLS_PIN_LINE_ADC", defs) != EXPECTED["DPLS_PIN_PORT1_ADC"]:
         fail("DPLS_PIN_LINE_ADC must remain an alias of DPLS_PIN_PORT1_ADC")
 
-    # Digital hardware has one owner. MOD_USR1 remains a real safety guard, but
-    # it is deliberately NOT held for an idle/normal BLE connection.
+    # Digital hardware has one owner. MOD_USR1 remains held for the interactive
+    # connection because PHY62xx sleep/wake can wedge a full Android GATT write.
     require(hw, "hal_pwrmgr_register(MOD_USR1, NULL, disable_32k_xtal)", HW)
     require(hw, "control_sleep_guard_acquire", HW)
     require(hw, "hal_pwrmgr_lock(MOD_USR1)", HW)
@@ -149,8 +149,7 @@ def main() -> None:
     require(hw, "subWriteReg(&(AP_AON->PMCTL0), 28, 28, 0x00)", HW)
     forbid(hw, "hal_pwrmgr_register(MOD_USR2", HW)
     connection_start = function_block(hw, "dpls_phy6252_hw_connection_lock")
-    if "hal_pwrmgr_lock(" in connection_start:
-        fail("normal BLE connection must not hold MOD_USR1 for its whole lifetime")
+    require(connection_start, "reconcile_sleep_guard()", HW)
     for symbol in (
         "DPLS_PIN_ISO_1", "DPLS_PIN_ISO_2", "DPLS_PIN_ISO_T",
         "DPLS_PIN_KZ_1", "DPLS_PIN_KZ_2", "DPLS_PIN_KZ_T",

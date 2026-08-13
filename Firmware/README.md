@@ -53,14 +53,13 @@ P16/P17 одновременно являются XTAL_32K pads PHY6252. На Te
 У SDK 3.1.2 `INTERRUPT_MODE` ошибочно выбирал compare/debug ISR вместо обычного
 one-shot ADC handler. Product build детерминированно патчит этот выбор на
 `hal_ADC_IRQHandler`; тот завершает conversion через штатный cleanup и снимает
-собственный `MOD_ADCC` power lock. Поэтому обычное BLE-соединение и ADC idle
-могут спать.
+собственный `MOD_ADCC` power lock.
 
-`MOD_USR1` зарегистрирован hardware owner-ом, но блокирует sleep **только пока
-активен ненормальный силовой режим** (`OPEN_*` / `SHORT_*`). Это консервативная
-safety-граница: физический управляющий выход остаётся активным без sleep/wake
-переходов, а после возврата в `NORMAL` guard сразу снимается. Connect/disconnect
-сами по себе sleep не блокируют.
+`MOD_USR1` зарегистрирован hardware owner-ом и блокирует sleep на всё время
+интерактивного BLE-сеанса. На закреплённом PHY62xx SDK sleep/wake может потерять
+ATT-ответ на длинную запись и заблокировать очередь Android GATT. Ненормальный
+силовой режим (`OPEN_*` / `SHORT_*`) также удерживает guard; после disconnect и
+возврата в `NORMAL` он снимается.
 
 ## ADC revision 2
 
