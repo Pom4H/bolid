@@ -254,6 +254,9 @@ def main() -> None:
     # runtime consequence after every AC6 link.
     require(startup, "hal_pwrmgr_RAM_retention(RET_SRAM0)", MAIN)
     require(startup, "hal_pwrmgr_LowCurrentLdo_enable()", MAIN)
+    require(startup, "BLE_MAX_ALLOW_PKT_PER_EVENT_TX * BLE_PKT_BUF_SIZE * 2u", MAIN)
+    require(startup, "BLE_MAX_ALLOW_PKT_PER_EVENT_RX * BLE_PKT_BUF_SIZE", MAIN)
+    require(startup, "BLE_PKT_BUF_SIZE)", MAIN)
     forbid(startup, "RET_SRAM1", MAIN)
     forbid(startup, "RET_SRAM2", MAIN)
     require(target, "hal_pwrmgr_RAM_retention(RET_SRAM0)", TARGET)

@@ -24,7 +24,14 @@
 #define BLE_MAX_ALLOW_PKT_PER_EVENT_RX 3
 #define BLE_PKT_VERSION                BLE_PKT_VERSION_5_1
 #define BLE_PKT_BUF_SIZE               (BLE_PKT51_LEN + (sizeof(struct ll_pkt_desc) - 2))
-#define BLE_MAX_ALLOW_PER_CONNECTION   BLE_PKT_BUF_SIZE
+/* LL_InitConnectContext partitions this storage into two TX descriptor banks,
+ * one RX descriptor bank and one not-acknowledged TX packet.  Allocating only
+ * a single packet lets the controller overwrite its own bookkeeping after a
+ * few consecutive GATT writes. */
+#define BLE_MAX_ALLOW_PER_CONNECTION   \
+    ((BLE_MAX_ALLOW_PKT_PER_EVENT_TX * BLE_PKT_BUF_SIZE * 2u) + \
+     (BLE_MAX_ALLOW_PKT_PER_EVENT_RX * BLE_PKT_BUF_SIZE) + \
+     BLE_PKT_BUF_SIZE)
 #define BLE_CONN_BUF_SIZE              (BLE_MAX_ALLOW_CONNECTION * BLE_MAX_ALLOW_PER_CONNECTION)
 #define LARGE_HEAP_SIZE                (3u * 1024u)
 
