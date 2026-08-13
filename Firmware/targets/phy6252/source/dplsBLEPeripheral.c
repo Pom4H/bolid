@@ -138,8 +138,13 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 io_capability = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
     uint8 bonding = TRUE;
     uint8 bond_fail = GAPBOND_FAIL_TERMINATE_ERASE_BONDS;
+    /* The device advertises a stable public address, so distributing its IRK
+     * is unnecessary.  The pinned PHY62xx SMP stack emits identity data that
+     * current Samsung Android validates as an invalid SIRK and then rejects
+     * an otherwise encrypted bond.  Keep the LTKs and the central IRK needed
+     * for encrypted reconnects, but do not advertise a peripheral identity
+     * key that this public-address device never uses. */
     uint8 key_distribution = GAPBOND_KEYDIST_SENCKEY |
-                             GAPBOND_KEYDIST_SIDKEY |
                              GAPBOND_KEYDIST_MENCKEY |
                              GAPBOND_KEYDIST_MIDKEY;
 

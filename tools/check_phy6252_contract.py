@@ -215,6 +215,13 @@ def main() -> None:
 
     # BLE target is integration glue and owns the early one-shot hardware init.
     require(target, "dpls_phy6252_hw_init()", TARGET)
+    # The board has a stable public address. Its pinned SMP stack must not send
+    # a peripheral IRK: Samsung Android treats that legacy identity payload as
+    # an invalid SIRK and rejects the otherwise encrypted bond.
+    require(target, "GAPBOND_KEYDIST_SENCKEY", TARGET)
+    require(target, "GAPBOND_KEYDIST_MENCKEY", TARGET)
+    require(target, "GAPBOND_KEYDIST_MIDKEY", TARGET)
+    forbid(target, "GAPBOND_KEYDIST_SIDKEY", TARGET)
     for forbidden in (
         "hal_pwrmgr_register(MOD_USR1", "hal_pwrmgr_register(MOD_USR2",
         "disable_32k_xtal", "prime_safe_gpio_outputs",
