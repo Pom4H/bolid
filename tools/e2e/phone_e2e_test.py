@@ -361,10 +361,10 @@ def restart_app_for_fresh_login() -> None:
     log("  lockout: перезапуск приложения для чистого экрана входа")
     clear_logcat()
     prepare_app(clear_data=False)
-    wait_text("Устройства рядом", timeout=20)
+    start_scan(timeout=20)
     wait_for_device("Test-DPLS")
     tap_device("Test-DPLS")
-    wait_identify_led(max_connect=25.0)
+    wait_identify_led(max_connect=50.0)
     confirm_identified_device()
 
 
@@ -436,14 +436,14 @@ def quick_submit_login_after_confirm(timeout: float = 8.0) -> None:
 
 def connect_and_pair(auto_login: bool = True) -> None:
     step("Подключение: scan")
-    wait_text("Устройства рядом", timeout=15)
+    start_scan(timeout=15)
     texts = wait_for_device("Test-DPLS")
     log("UI: " + " | ".join(t for t in texts if t))
     assert_no_ff_address(texts)
 
     step("Подключение: identify")
     tap_device("Test-DPLS")
-    wait_identify_led(max_connect=25.0)
+    wait_identify_led(max_connect=50.0)
 
     step("Подключение: confirm device")
     confirm_identified_device()
@@ -1320,7 +1320,11 @@ def dismiss_runtime_permissions() -> None:
             tap_text("Разрешить", clickable=None)
             time.sleep(POLL)
             continue
-        if "bluetooth" in joined.lower() and "сопряж" not in joined.lower():
+        if (
+            "bluetooth" in joined.lower()
+            and "разрешить" in joined.lower()
+            and "сопряж" not in joined.lower()
+        ):
             tap_text("Разрешить", clickable=None) or tap_text("При использовании", clickable=None) or tap_text("Только в этот раз", clickable=None)
             time.sleep(POLL)
             continue
@@ -1335,21 +1339,47 @@ def dismiss_runtime_permissions() -> None:
         break
 
 
+def start_scan(timeout: float = 15.0) -> None:
+    """Start scanning in both the current and legacy device-list UI."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dismiss_runtime_permissions()
+        texts = visible_texts(dump_nodes())
+        if "Остановить поиск" in texts or "Поиск может продолжаться до 60 секунд" in texts:
+            return
+        if "Начать поиск" in texts:
+            if not tap_text("Начать поиск", clickable=None):
+                raise RuntimeError("Scan button is visible but cannot be tapped")
+            time.sleep(0.2 if FAST else 0.5)
+            continue
+        if "Устройства рядом" in texts:
+            return
+        time.sleep(0.2 if FAST else 0.5)
+    raise TimeoutError(f"Scan screen not ready; saw: {visible_texts(dump_nodes())}")
+
+
 def wait_for_device(name: str = "Test-DPLS", timeout: float = 20.0) -> list[str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         dismiss_runtime_permissions()
         texts = visible_texts(dump_nodes())
-        if any(name in t for t in texts):
+        if any(t.startswith(name) for t in texts):
             return texts
-        tap_text("Обновить", clickable=None) or tap_text("Обновление", clickable=None)
+        (
+            tap_text("Начать поиск", clickable=None)
+            or tap_text("Обновить", clickable=None)
+            or tap_text("Обновление", clickable=None)
+        )
         time.sleep(0.2 if FAST else 0.5)
     raise TimeoutError(f"Device {name!r} not found in scan")
 
 
 def tap_device(name: str = "Test-DPLS") -> None:
+    if tap_text("Показать на объекте", clickable=None):
+        return
+
     nodes = dump_nodes()
-    device_node = next((n for n in nodes if name in n.text), None)
+    device_node = next((n for n in nodes if n.text.startswith(name)), None)
     if device_node is None:
         raise RuntimeError(f"Device {name!r} not found")
 

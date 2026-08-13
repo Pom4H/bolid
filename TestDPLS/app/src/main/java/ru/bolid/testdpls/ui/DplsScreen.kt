@@ -165,7 +165,7 @@ private fun DevicesScreen(
     onOpenAppSettings: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
 ) {
-    Screen(title = "Устройства Test-DPLS") {
+    Screen(title = "Устройства Test-DPLS", scroll = false) {
         Text(state.statusText, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -198,7 +198,7 @@ private fun DevicesScreen(
             EmptyState("Устройства пока не найдены")
         } else {
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(state.devices, key = { it.address }) { device ->

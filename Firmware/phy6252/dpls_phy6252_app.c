@@ -50,7 +50,11 @@
 
 #define DPLS_BOND_DESYNC_LIMIT 3u
 #define DPLS_BOND_DESYNC_WINDOW_MS 120000u
-#define DPLS_LINK_ENCRYPT_TIMEOUT_MS 15000u
+/* Pairing is user-mediated on Android and some vendor stacks need well over
+ * 15 seconds to persist the bond after the system dialog is accepted. The
+ * encrypted GATT permissions and protocol checks still reject every command
+ * while this bounded pre-encryption window is open. */
+#define DPLS_LINK_ENCRYPT_TIMEOUT_MS 60000u
 
 typedef struct {
     uint32_t magic;
