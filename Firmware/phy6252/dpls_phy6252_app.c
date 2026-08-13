@@ -885,6 +885,9 @@ void dpls_phy6252_init(uint8 new_task_id)
         safe_normal(NULL);
     }
     (void)dpls_gatt_add_service(receive_frame);
+    /* Temporary bench recovery image: remove only the stale Android bond.
+     * Settings, journal, device identity and ADC calibration remain intact. */
+    (void)GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
 }
 
 static void erase_stored_bonds(void)
