@@ -786,8 +786,20 @@ static bool auth_lock_read(void *context)
 
 static bool auth_lock_write(void *context, bool locked)
 {
+    dpls_auth_lock_t current;
     dpls_auth_lock_t record;
+    bool current_valid;
     (void)context;
+
+    current_valid = osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(current), &current) == SUCCESS &&
+                    current.magic == DPLS_AUTH_LOCK_MAGIC &&
+                    current.crc == dpls_crc16((const uint8_t *)&current, offsetof(dpls_auth_lock_t, crc));
+    if (current_valid && ((current.locked != 0u) == locked)) return true;
+    /* A missing or corrupt marker already means "not persistently locked", so
+     * writing the default state would burn a flash erase/write cycle after every
+     * successful authentication for nothing. */
+    if (!current_valid && !locked) return true;
+
     record.magic = DPLS_AUTH_LOCK_MAGIC;
     record.locked = locked ? 1u : 0u;
     record.reserved = 0u;
