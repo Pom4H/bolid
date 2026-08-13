@@ -377,12 +377,16 @@ Differential pairs:
 
 P16/P17 конфликтуют с 32.768 kHz crystal use. Не считать все десять AIO полноценными независимыми single-ended ADC inputs.
 
-В Test-DPLS используются:
+В Test-DPLS сканируются четыре канала, по одному за такт:
 
-- P20 (`ADC9`) — `DPLS_V_ADC`;
-- P23 (`ADC1`) — `VCAP_ADC`.
+- P20 (`ADC_CH3P_P20`) — `PORT1_ADC`, клемма «+1»;
+- P15 (`ADC_CH3N_P15`) — `PORT2_ADC`, клемма «+2»;
+- P24 (`ADC_CH2N_P24`) — `PORT_T_ADC`, клемма «+Т»;
+- P23 (`ADC_CH1P_P23`) — `VCAP_ADC`, резервный ионистор.
 
-SDK 3.1.2 изменил ADC API относительно закоммиченного 3.1.1; target запускает ADC через `hal_adc_start(INTERRUPT_MODE)` после подготовительного patch script. Не переносить сигнатуры из 3.1.1 header в 3.1.2 код вслепую.
+Соседний по паре P11 сознательно не оцифровывается: это зелёный канал RGB.
+
+SDK 3.1.2 изменил ADC API относительно закоммиченного 3.1.1; target запускает ADC через `hal_adc_start(INTERRUPT_MODE)`. Правки, которые раньше накатывались отдельным patch script, теперь лежат прямо в `Firmware/phy6252/dpls_phy6252_app.c`. Не переносить сигнатуры из 3.1.1 header в 3.1.2 код вслепую.
 
 `hal_adc_value_cal()` тянет software floating point. В текущем scatter ADC/fp objects вынесены в XIP специально, чтобы не переполнять retained SRAM.
 
