@@ -425,11 +425,18 @@ private fun RowScope.NavTab(
             // Прибор без АЦП физически не измеряет напряжение (капабилити честно
             // показана в «Об устройстве») — не захламляем карту прочерком.
             if (!adcUnsupported) {
-                CompactInfoRow(
-                    "Напряжение",
-                    if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
-                    if (voltageShown) Green else Muted,
-                )
+                if (state.deviceInfo?.multiVoltageReport == true && s != null) {
+                    TerminalVoltageRow("Клемма +1", s.port1VoltageMv, s.port1VoltageValid)
+                    TerminalVoltageRow("Клемма +2", s.port2VoltageMv, s.port2VoltageValid)
+                    TerminalVoltageRow("Клемма +Т", s.portTVoltageMv, s.portTVoltageValid)
+                    TerminalVoltageRow("Резерв", s.reserveVoltageMv, s.reserveVoltageValid)
+                } else {
+                    CompactInfoRow(
+                        "Напряжение",
+                        if (voltageShown) "%.1f В".format(s!!.voltageMv / 1000f) else "—",
+                        if (voltageShown) Green else Muted,
+                    )
+                }
             }
             val powerShown = s != null && s.powerValid
             CompactInfoRow(
@@ -800,6 +807,13 @@ private fun RowScope.NavTab(
         Spacer(Modifier.weight(1f))
         Text(value, color = valueColor, fontSize = 14.sp, maxLines = 1)
     }
+}
+@Composable private fun TerminalVoltageRow(label: String, millivolts: Int, valid: Boolean) {
+    CompactInfoRow(
+        label,
+        if (valid) "%.1f В".format(millivolts / 1000f) else "—",
+        if (valid) Green else Muted,
+    )
 }
 @Composable private fun InfoRow(label: String, value: String, valueColor: Color = Color.White) { Row(Modifier.fillMaxWidth().heightIn(min=43.dp), verticalAlignment = Alignment.CenterVertically) { Text(label, Modifier.weight(1f), color = Muted, fontSize = 13.sp); Text(value, color = valueColor, fontSize = 14.sp) } }
 @Composable private fun PrimaryButton(text: String, click: () -> Unit, enabled: Boolean = true, color: Color = Blue, outerPadding: androidx.compose.ui.unit.Dp = 18.dp) { Button(click, Modifier.fillMaxWidth().padding(horizontal = outerPadding, vertical = 8.dp).heightIn(min = 52.dp), enabled, shape = RoundedCornerShape(4.dp), colors = ButtonDefaults.buttonColors(containerColor = color, disabledContainerColor = color.copy(alpha=.35f)), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)) { Text(text, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center) } }
