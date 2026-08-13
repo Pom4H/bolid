@@ -45,7 +45,7 @@ directory:  Firmware/sdk/PHY62XX_SDK_3.1.2
 
 - https://github.com/xuhongv/PHY6252_6222_SDK/blob/b7202ee56e8d316ea3451dd61266f609e6a676e8/release_note.md
 
-Заметки по интеграции: [`docs/phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md).
+Сборка и ловушки target: [`Firmware/README.md`](../Firmware/README.md).
 
 При расхождении API/ROM ABI приоритет у закреплённого SDK 3.1.2.
 
@@ -332,7 +332,7 @@ ADC driver включает analog block через `ANA_CTL bit 3` и ADC clock
 4. `hal_pwrmgr_lock(MOD_USR1)` берётся только пока энергизован тестовый режим: sleep/wake не должен перепрограммировать GPIO под активным силовым выходом.
 5. `CFG_HCLK_DYNAMIC_CHANGE=0` закреплён в target и не должен меняться без повторной hardware validation.
 
-Подробности и hardware validation: [`phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md).
+Подробности: [`Firmware/README.md`](../Firmware/README.md).
 
 ---
 
@@ -546,7 +546,7 @@ bb_rom_sym_m0.txt
 ### Project / SDK
 
 - [`Firmware/sdk/phy6252-sdk.env`](../Firmware/sdk/phy6252-sdk.env)
-- [`docs/phy6252-sdk-3.1.2-migration.md`](phy6252-sdk-3.1.2-migration.md)
+- [`Firmware/README.md`](../Firmware/README.md)
 - [`Firmware/targets/phy6252/test-dpls.cproject.yml`](../Firmware/targets/phy6252/test-dpls.cproject.yml)
 - [`Firmware/targets/phy6252/scatter_load.sct`](../Firmware/targets/phy6252/scatter_load.sct)
 - [`Firmware/README.md`](../Firmware/README.md)

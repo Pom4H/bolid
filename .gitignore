@@ -17,6 +17,7 @@ Firmware/sdk/**/ac6/*.cbuild-idx.yml
 Firmware/sdk/**/ac6/*.cbuild-pack.yml
 Firmware/targets/phy6252/out/
 Firmware/targets/phy6252/tmp/
+Firmware/targets/phy6252/build/
 Firmware/targets/phy6252/RTE/
 Firmware/targets/phy6252/*.cbuild-idx.yml
 Firmware/targets/phy6252/*.cbuild-pack.yml

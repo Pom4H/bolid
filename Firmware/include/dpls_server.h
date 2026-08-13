@@ -12,8 +12,8 @@
 /* Firmware version reported in DEVICE_INFO_REPORT (semantic-ish). Bump on
  * behaviour changes visible to the operator app. */
 #define DPLS_FW_VERSION_MAJOR 1u
-#define DPLS_FW_VERSION_MINOR 1u
-#define DPLS_FW_VERSION_PATCH 3u
+#define DPLS_FW_VERSION_MINOR 2u
+#define DPLS_FW_VERSION_PATCH 0u
 /* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
  * features the hardware/firmware does not actually provide. */
 enum {

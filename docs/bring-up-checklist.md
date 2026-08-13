@@ -18,12 +18,12 @@ dpls_calib.c`; светодиод — `Firmware/src/dpls_led.c`; пороги/к
 cmake -S Firmware -B Firmware/build && cmake --build Firmware/build
 ctest --test-dir Firmware/build --output-on-failure
 
-# целевая прошивка (SDK 3.1.2, AC6): один образ, ADC всегда включён
-tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
+tools/build_firmware.sh keil tmp/test-dpls.hex
+tools/build_firmware.sh gcc tmp/test-dpls.hex
 
 # прошивка платы (KEY1: зажать, запустить, отпустить на «Turn on the power»)
-tools/flash_firmware.sh tmp/test-dpls-sdk-3.1.2.hex          # без --erase: SNV сохраняется
-tools/flash_firmware.sh tmp/test-dpls-sdk-3.1.2.hex --erase  # чистая плата (стирает журнал/пароль/калибровку/MAC)
+tools/flash_firmware.sh tmp/test-dpls.hex          # без --erase: SNV сохраняется
+tools/flash_firmware.sh tmp/test-dpls.hex --erase  # чистая плата (стирает журнал/пароль/калибровку/MAC)
 
 # UART-лог загрузки (короткое нажатие KEY1 для рестарта)
 python3 tools/serial_capture.py 20 --no-reset

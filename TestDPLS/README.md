@@ -1,4 +1,4 @@
-# Тест-ДПЛС Android
+# Тест-ДПЛС Android 1.2.0
 
 Тестовое Android-приложение (Kotlin + Jetpack Compose, minSdk 33) для безопасного управления устройством на PHY6252.
 

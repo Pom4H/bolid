@@ -1,102 +1,81 @@
-# Test-DPLS
+# Test-DPLS 1.2.0
 
-Стек безопасного BLE-управления испытательным устройством ДПЛС: прошивка для
-PHY6252 (плата PB-03F-Kit), Android- и iOS-клиенты. Протокол, аутентификация и
-хранение журнала описаны в [Firmware/README.md](Firmware/README.md); клиенты —
-в [TestDPLS/README.md](TestDPLS/README.md) и [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+Безопасное BLE-управление испытательным устройством ДПЛС: прошивка PHY6252
+(плата PB-03F-Kit), Android- и iOS-клиенты.
+
+Протокол и железо — [Firmware/README.md](Firmware/README.md). Клиенты —
+[TestDPLS/README.md](TestDPLS/README.md) и
+[TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+
+## Что в 1.2.0
+
+- Распиновка revision 2: +1/+2/+Т/резерв (P20/P15/P24/P23), RGB на P7/P11/P18,
+  заводской сброс на P34.
+- Живые напряжения четырёх каналов в приложении (1 Гц).
+- Сон в «Норме», lock сна только на энергизованном режиме, LED без таймера,
+  когда гаснет.
+- Сборка одним скриптом: Keil/AC6 (релизный образ) и GCC.
+
+## Сборка прошивки
+
+```sh
+cmake -S Firmware -B Firmware/build && cmake --build Firmware/build
+ctest --test-dir Firmware/build --output-on-failure
+
+tools/build_firmware.sh keil tmp/test-dpls.hex   # Keil MDK Community / AC6
+tools/build_firmware.sh gcc  tmp/test-dpls.hex   # GNU Arm Embedded
+tools/flash_firmware.sh tmp/test-dpls.hex        # без --erase SNV сохраняется
+```
+
+CI (`firmware-target.yml`) собирает оба toolchain.
 
 ## Структура
 
 | Каталог | Содержимое |
 |---|---|
-| `Firmware/` | Переносимое ядро сервера (C99, хостовые тесты) + адаптер PHY62XX SDK 3.1.2 и target-проект |
-| `TestDPLS/` | Android-клиент (Kotlin, Jetpack Compose, minSdk 33) |
-| `TestDPLS-iOS/` | iPhone-клиент (Swift, SwiftUI, iOS 16+) |
-| `tools/` | Сборка/прошивка/UART-отладка |
-| `tools/e2e/` | E2E-обвязка: телефон + плата через adb |
-| `docs/hardware/` | Схема PB-03F-Kit |
-| `pvvx-PHY62x2/` | Вендорные утилиты прошивки PHY62xx по UART |
-| `tmp/` | Рабочие логи и артефакты (не под git) |
+| `Firmware/` | Ядро сервера (C99) + адаптер PHY62XX SDK 3.1.2 |
+| `Firmware/targets/phy6252/` | Keil CMSIS-solution и GCC Makefile |
+| `TestDPLS/` | Android (Kotlin, Compose, minSdk 33) |
+| `TestDPLS-iOS/` | iPhone (SwiftUI, iOS 16+) |
+| `tools/` | Сборка, прошивка, UART, E2E |
+| `docs/hardware/` | Схема PB-03F-Kit и распиновка |
+| `pvvx-PHY62x2/` | UART-флешер PHY62xx |
 
-## Прошивка
-
-Образ один — с измерением напряжения ДПЛС (P20) и резерва (P23):
-
-```sh
-tools/build_firmware.sh tmp/test-dpls-sdk-3.1.2.hex
-```
-
-CI (workflow `firmware-target.yml`) собирает его же и выкладывает artifact'ом
-`test-dpls-phy6252-sdk-3.1.2` (hex + axf + map).
-
-```sh
-# ядро на хосте: сборка + тесты
-cmake -S Firmware -B Firmware/build && cmake --build Firmware/build
-ctest --test-dir Firmware/build --output-on-failure
-
-# полная прошивка (cbuild + AC6 из vcpkg), ADC по умолчанию включён
-tools/build_firmware.sh
-
-# прошивка платы (см. подсказки про кнопку KEY1 в самом скрипте);
-# без --erase журнал и настройки в SNV сохраняются,
-# с --erase — полный сброс, включая пароль (устройство снова некоммишено)
-tools/flash_firmware.sh tmp/test-dpls-sdk-3.1.2.hex [--erase]
-
-# UART-лог платы (115200); лог загрузки — по короткому нажатию KEY1
-python3 tools/serial_capture.py 20 --no-reset
-```
-
-## Подключение к силовой части
-
-Распиновка управляющих и измерительных сигналов PB-03F-Kit ↔ прототип силовой
-части (таблица режимов — в правом нижнем углу):
+## Распиновка
 
 ![Распиновка PB-03F-Kit ↔ силовая часть](docs/hardware/pb03f-kit-power-pinout.png)
 
-Логика управления 3,3 В; безопасное состояние по умолчанию — все управляющие
-сигналы `0` (режим «Норма»).
+Логика 3,3 В, активный «1». Ноль на всех управляющих выходах — «Норма».
 
-## Android
+| Функция | GPIO |
+|---|---|
+| ISO_1 / ISO_2 / ISO_T | P31 / P32 / P33 |
+| KZ_1 / KZ_2 / KZ_T | P14 / P16 / P17 |
+| ADC +1 / +2 / +Т / резерв | P20 / P15 / P24 / P23 |
+| RGB R / G / B | P7 / P11 / P18 |
+| Заводской сброс | P34 |
 
-```sh
-cd TestDPLS && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-    ./gradlew installDebug
-```
+P16/P17 свободны: сборка использует внутренний RC 32 кГц, не кварц.
 
-## iOS
-
-```sh
-open TestDPLS-iOS/TestDPLS.xcodeproj   # Xcode 15+, физический iPhone
-```
-
-Подробности — [TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
-
-## E2E на живых устройствах
-
-Телефон по adb (Wi-Fi или USB) + прошитая плата в радиусе BLE:
+## Клиенты
 
 ```sh
-python3 tools/e2e/phone_e2e_test.py                # полный прогон
-python3 tools/e2e/phone_e2e_test.py --journal-only # ротация журнала на 200
-python3 tools/e2e/journal_reboot_check.py          # журнал после ребута (нажать KEY1 до запуска)
+cd TestDPLS && ./gradlew installDebug
+open TestDPLS-iOS/TestDPLS.xcodeproj
 ```
 
-Проверка софта на реальном железе (пины, светодиод, ADC, автоизоляция,
-калибровка, приёмка ТЗ) — по [чеклисту bring-up](docs/bring-up-checklist.md).
+## E2E
 
-## Аппаратные особенности PB-03F-Kit
+```sh
+python3 tools/e2e/phone_e2e_test.py
+```
 
-- **KEY1** (шелк RST/PROG) через PMOS отключает питание чипа: удержание — выкл,
-  отпускание — перезапуск питания. Вход в UART-загрузчик: зажать KEY1, запустить
-  прошивающий скрипт, отпустить на строке «Turn on the power».
-- **RTS/DTR CH340 не разведены** — программный сброс и автовход в загрузчик
-  невозможны.
-- **Кнопка заводского сброса пароля — на P34** (по финальной распиновке, см.
-  `Firmware/phy6252/dpls_board.h`). На PB-03F-Kit кнопки на P34 нет — физический
-  сброс требует перемычки P34↔GND (удержание 5 с). Перемычку нельзя ставить на
-  P24: по распиновке revision 2 это измерительный вход «+Т». KEY2 «Restore»
-  кита (P15) не используется — этот вывод занят измерением «+2».
-- Сборка идёт с `-fshort-enums`: раскладка структур на таргете не совпадает с
-  хостовой (проверять смещения — по карте линкера, не по хостовому компилятору).
-- Watchdog 2 с (`main.c`) взводится до старта OSAL: длинные init-пути обязаны
-  вызывать `hal_watchdog_feed()`.
+Приёмка на железе — [docs/bring-up-checklist.md](docs/bring-up-checklist.md).
+
+## PB-03F-Kit
+
+- **KEY1** отключает питание чипа. Вход в загрузчик: зажать KEY1, запустить
+  `flash_firmware.sh`, отпустить на «Turn on the power». RTS/DTR не разведены.
+- Заводской сброс пароля — перемычка **P34↔GND** на 5 с. Не ставить на P24
+  (это «+Т»). KEY2 кита (P15) занят измерением «+2».
+- Watchdog 2 с взводится до OSAL: длинный init кормит `hal_watchdog_feed()`.

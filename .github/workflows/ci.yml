@@ -8,9 +8,8 @@ on:
 jobs:
   firmware-host-tests:
     # Portable DPLS core (protocol, server, LED, calibration) built with the
-    # system compiler and exercised by ctest. The target PHY6252 image is built
-    # separately with the proprietary ARM Compiler (tools/build_firmware.sh) and
-    # is out of scope for hosted CI.
+    # system compiler and exercised by ctest. The PHY6252 image is built by
+    # firmware-target.yml (Keil/AC6 and GCC).
     name: Firmware host tests
     runs-on: ubuntu-latest
     steps:
