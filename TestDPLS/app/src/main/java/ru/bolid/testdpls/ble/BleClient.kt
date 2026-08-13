@@ -511,12 +511,12 @@ class BleClient(context: Context) {
 
     fun changePassword(current: CharArray, new: CharArray) {
         if (new.size < 8) {
-            current.fill(' '); new.fill(' ')
+            current.fill('\u0000'); new.fill('\u0000')
             _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Пароль должен содержать не менее 8 символов") }
             return
         }
         if (!_uiState.value.authenticated || gatt == null) {
-            current.fill(' '); new.fill(' ')
+            current.fill('\u0000'); new.fill('\u0000')
             _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Нет соединения с устройством") }
             return
         }
@@ -525,15 +525,15 @@ class BleClient(context: Context) {
         // so this guard prevents an accidental change from a mistyped old password.
         val cached = cachedVerifier
         val currentVerifier = deriveVerifier(current, authSalt)
-        current.fill(' ')
+        current.fill('\u0000')
         if (cached == null || !currentVerifier.contentEquals(cached)) {
-            new.fill(' ')
+            new.fill('\u0000')
             _uiState.update { it.copy(settingsOp = SettingsOp.FAILED, settingsError = "Неверный текущий пароль") }
             return
         }
         val newSalt = ByteArray(16).also(random::nextBytes)
         val newVerifier = deriveVerifier(new, newSalt)
-        new.fill(' ')
+        new.fill('\u0000')
         val id = commandId++
         armPendingSettings(PendingSettings.Password(id, newVerifier))
         val payload = ByteBuffer.allocate(12 + 4 + 16 + 32).order(ByteOrder.LITTLE_ENDIAN)

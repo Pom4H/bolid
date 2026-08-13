@@ -17,11 +17,16 @@
 #include "pwrmgr.h"
 #include "fs.h"
 
-#define DEFAULT_MIN_CONN_INTERVAL 64
-#define DEFAULT_MAX_CONN_INTERVAL 96
-#define DEFAULT_SLAVE_LATENCY 4
+/* Keep the proven v1.1.0 interactive link parameters. The PHY62xx controller
+ * can wedge an Android GATT write behind a concurrent indication when slave
+ * latency is enabled; Samsung then reports status 201 for every later write.
+ * The operator protocol requires a responsive, serialized control channel, so
+ * radio power saving must not trade away transport correctness here. */
+#define DEFAULT_MIN_CONN_INTERVAL 24
+#define DEFAULT_MAX_CONN_INTERVAL 80
+#define DEFAULT_SLAVE_LATENCY 0
 #define DEFAULT_CONN_TIMEOUT 3000
-#define DPLS_TICK_MS 1000u
+#define DPLS_TICK_MS 200u
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;

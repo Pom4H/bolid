@@ -224,6 +224,13 @@ def main() -> None:
     require(target, "GAPBOND_KEYDIST_MENCKEY", TARGET)
     require(target, "GAPBOND_KEYDIST_MIDKEY", TARGET)
     forbid(target, "GAPBOND_KEYDIST_SIDKEY", TARGET)
+    # These are the v1.1.0 parameters validated on Samsung Android. Enabling
+    # slave latency caused indications to race characteristic-write completion
+    # and left the Android GATT queue permanently busy (status 201).
+    require(target, "#define DEFAULT_MIN_CONN_INTERVAL 24", TARGET)
+    require(target, "#define DEFAULT_MAX_CONN_INTERVAL 80", TARGET)
+    require(target, "#define DEFAULT_SLAVE_LATENCY 0", TARGET)
+    require(target, "#define DPLS_TICK_MS 200u", TARGET)
     require(sdk_patch, "peer-address slave ID key override", SDK_PATCH)
     require(sdk_patch, "Respect GAPBOND_KEY_DIST_LIST", SDK_PATCH)
     for forbidden in (

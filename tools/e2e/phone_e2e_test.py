@@ -324,8 +324,11 @@ def submit_password(password: str) -> None:
 
 
 def confirm_identified_device() -> None:
+    if tap_text("Это нужное устройство", clickable=None):
+        return
+    if tap_text("Это устройство", clickable=None):
+        return
     e2e_broadcast("ru.bolid.testdpls.E2E_CONFIRM")
-    tap_text("Это устройство", clickable=None)
 
 
 def reset_bluetooth_adapter() -> None:
