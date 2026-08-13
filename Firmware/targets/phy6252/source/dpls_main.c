@@ -20,8 +20,8 @@
 #include "watchdog.h"
 
 #define BLE_MAX_ALLOW_CONNECTION       1
-#define BLE_MAX_ALLOW_PKT_PER_EVENT_TX 3
-#define BLE_MAX_ALLOW_PKT_PER_EVENT_RX 3
+#define BLE_MAX_ALLOW_PKT_PER_EVENT_TX 1
+#define BLE_MAX_ALLOW_PKT_PER_EVENT_RX 1
 #define BLE_PKT_VERSION                BLE_PKT_VERSION_5_1
 #define BLE_PKT_BUF_SIZE               (BLE_PKT51_LEN + (sizeof(struct ll_pkt_desc) - 2))
 /* LL_InitConnectContext partitions this storage into two TX descriptor banks,
@@ -33,7 +33,7 @@
      (BLE_MAX_ALLOW_PKT_PER_EVENT_RX * BLE_PKT_BUF_SIZE) + \
      BLE_PKT_BUF_SIZE)
 #define BLE_CONN_BUF_SIZE              (BLE_MAX_ALLOW_CONNECTION * BLE_MAX_ALLOW_PER_CONNECTION)
-#define LARGE_HEAP_SIZE                (3u * 1024u)
+#define LARGE_HEAP_SIZE                (23u * 128u)
 
 ALIGN4_U8 g_pConnectionBuffer[BLE_CONN_BUF_SIZE];
 llConnState_t pConnContext[BLE_MAX_ALLOW_CONNECTION];
