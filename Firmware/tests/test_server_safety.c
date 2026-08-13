@@ -196,6 +196,29 @@ static void test_apply_failure_cannot_leave_stale_active_mode(void)
     assert(fake.critical_count == 1u);
 }
 
+static void test_active_mode_returns_normal_when_p20_becomes_stale(void)
+{
+    fake_t fake = {.encrypted = true,
+                   .validity = DPLS_STATE_RESERVE_VALID | DPLS_STATE_POWER_VALID |
+                               DPLS_STATE_AUTOISO_VALID};
+    dpls_server_t server;
+    uint8_t buf[DPLS_MAX_FRAME];
+    unsigned safe_before;
+
+    authenticate(&server, &fake, buf);
+    assert(set_mode(&server, &fake, buf, 20u, DPLS_MODE_SHORT_1, 2000u) == 0u);
+    assert(server.mode == DPLS_MODE_SHORT_1);
+
+    /* Individual ADC failures are isolated. Reserve can remain fresh while
+     * P20, the source of auto-isolation state, becomes stale. */
+    fake.validity = DPLS_STATE_RESERVE_VALID | DPLS_STATE_POWER_VALID;
+    safe_before = fake.safe_normal_count;
+    dpls_server_tick(&server, 3000u);
+    assert(server.mode == DPLS_MODE_NORMAL);
+    assert(fake.hw_mode == DPLS_MODE_NORMAL);
+    assert(fake.safe_normal_count == safe_before + 1u);
+}
+
 static void test_invalid_measurement_does_not_create_flash_log_transition(void)
 {
     fake_t fake = {.encrypted = true, .low_reserve = true};
@@ -228,6 +251,7 @@ int main(void)
 {
     test_active_mode_requires_fresh_reserve();
     test_apply_failure_cannot_leave_stale_active_mode();
+    test_active_mode_returns_normal_when_p20_becomes_stale();
     test_invalid_measurement_does_not_create_flash_log_transition();
     puts("test_server_safety: OK");
     return 0;

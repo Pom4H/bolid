@@ -6,7 +6,7 @@
 enum { TST_EVT_BLE_CONNECTED = 2 };
 
 typedef struct {
-    bool encrypted, initialized, normal, identify;
+    bool encrypted, initialized, normal, identify, storage_init_fail;
     dpls_mode_t mode;
     uint8_t tx[DPLS_MAX_FRAME];
     size_t tx_len;
@@ -16,6 +16,7 @@ typedef struct {
     dpls_event_t stored[DPLS_EVENT_CAPACITY];
     uint16_t stored_count;
     uint32_t stored_next;
+    unsigned storage_append_count;
     unsigned storage_read_count;
 } fake_t;
 
@@ -44,10 +45,13 @@ static bool notify(void *c, const uint8_t *p, size_t n) {
 }
 static bool indicate(void *c, const uint8_t *p, size_t n) { return notify(c, p, n); }
 static bool storage_init(void *c, uint16_t *count, uint32_t *next) {
-    fake_t *f = c; *count = f->stored_count; *next = f->stored_next ? f->stored_next : 1u; return true;
+    fake_t *f = c;
+    if (f->storage_init_fail) return false;
+    *count = f->stored_count; *next = f->stored_next ? f->stored_next : 1u; return true;
 }
 static bool storage_append(void *c, const dpls_event_t *event) {
     fake_t *f = c;
+    ++f->storage_append_count;
     f->stored[(event->sequence - 1u) % DPLS_EVENT_CAPACITY] = *event;
     if (f->stored_count < DPLS_EVENT_CAPACITY) ++f->stored_count;
     f->stored_next = event->sequence + 1u;
@@ -155,6 +159,31 @@ static void test_invalid_type_not_stored(void) {
     dpls_server_log(&server, 0, 0);
     dpls_server_log(&server, 99, 0);
     assert(server.event_count == before);
+}
+
+static void test_failed_storage_init_disables_journal_for_runtime(void) {
+    fake_t fake = {.encrypted = true, .initialized = true, .storage_init_fail = true};
+    dpls_hal_t hal = {
+        .link_encrypted = encrypted, .hardware_apply_mode = apply, .hardware_safe_normal = normal,
+        .voltage_mv = voltage, .power_source = power, .reserve_low = low, .identify_led = identify,
+        .random_bytes = random_bytes, .settings_state = settings_state, .settings_salt = salt,
+        .settings_write = settings, .verify_auth_proof = verify,
+        .event_storage_init = storage_init, .event_storage_append = storage_append,
+        .event_storage_read = storage_read,
+        .tx_indicate = indicate, .tx_notify = notify, .context = &fake,
+    };
+    dpls_server_t server;
+
+    dpls_server_init(&server, &hal, 0u);
+    assert(fake.storage_append_count == 0u); /* BOOT must not modify storage. */
+    assert(server.event_count == 0u);
+    assert(server.next_event_sequence == 1u);
+    assert(server.hal.event_storage_append == NULL);
+    assert(server.hal.event_storage_read == NULL);
+
+    dpls_server_log(&server, TST_EVT_BLE_CONNECTED, 0u);
+    assert(fake.storage_append_count == 0u);
+    assert(server.event_count == 0u);
 }
 
 static void test_ring_overflow(void) {
@@ -271,6 +300,7 @@ static void test_flash_style_storage_survives_reboot_and_streams(void) {
 }
 
 int main(void) {
+    test_failed_storage_init_disables_journal_for_runtime();
     test_invalid_type_not_stored();
     test_all_spec_event_types_round_trip();
     test_ring_overflow();

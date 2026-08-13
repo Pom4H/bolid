@@ -16,6 +16,7 @@ static bool elapsed(uint32_t now, uint32_t deadline) { return (int32_t)(now - de
 
 static bool send_frame(dpls_server_t *s, uint8_t type, const uint8_t *payload, uint16_t length);
 static uint16_t log_event_count(const dpls_server_t *s);
+static bool active_mode_safety_fresh(dpls_server_t *s);
 static bool event_type_valid(uint8_t type) { return type >= EVT_BOOT && type <= EVT_LAST; }
 
 static uint8_t measurement_validity(const dpls_server_t *s)
@@ -116,8 +117,16 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms)
             s->event_count = stored_count > DPLS_EVENT_CAPACITY ? DPLS_EVENT_CAPACITY : stored_count;
             s->next_event_sequence = next_sequence == 0 ? 1 : next_sequence;
             if (s->event_count >= s->next_event_sequence) s->event_count = (uint16_t)(s->next_event_sequence - 1u);
-        } else if (s->hal.diagnostic_error) {
-            s->hal.diagnostic_error(s->hal.context, false);
+        } else {
+            /* The persistent journal is not safe to modify after an incomplete
+             * scan: sequence/count metadata may describe only a prefix of the
+             * real storage. Disable logging/export for this runtime so even the
+             * BOOT event below cannot overwrite an existing block. Safety GPIO
+             * and ADC operation remain available and the next boot may retry. */
+            s->hal.event_storage_append = 0;
+            s->hal.event_storage_read = 0;
+            if (s->hal.diagnostic_error)
+                s->hal.diagnostic_error(s->hal.context, false);
         }
     }
     if (s->hal.auth_lock_read && s->hal.auth_lock_read(s->hal.context)) {
@@ -203,7 +212,9 @@ void dpls_server_tick(dpls_server_t *s, uint32_t now_ms)
     s->now_ms = now_ms;
     poll_power_state(s);
     poll_real_short(s);
-    if (s->mode != DPLS_MODE_NORMAL && s->mode_deadline_ms && elapsed(now_ms, s->mode_deadline_ms))
+    if (s->mode != DPLS_MODE_NORMAL && !active_mode_safety_fresh(s))
+        force_normal(s, DPLS_RETURN_INTERNAL_ERROR);
+    else if (s->mode != DPLS_MODE_NORMAL && s->mode_deadline_ms && elapsed(now_ms, s->mode_deadline_ms))
         force_normal(s, DPLS_RETURN_MODE_TIMEOUT);
     else if (s->mode != DPLS_MODE_NORMAL &&
              (!s->authenticated || elapsed(now_ms, s->last_authenticated_activity_ms + DPLS_SESSION_TIMEOUT_MS)))
@@ -338,13 +349,19 @@ static void send_command_result(dpls_server_t *s, const dpls_cached_command_t *c
 
 static bool active_mode_interlock_ok(dpls_server_t *s)
 {
+    if (!active_mode_safety_fresh(s)) return false;
+    return !s->hal.reserve_low(s->hal.context);
+}
+
+static bool active_mode_safety_fresh(dpls_server_t *s)
+{
     uint8_t valid = measurement_validity(s);
     /* Active physical modes are allowed only when both autonomous safety inputs
      * are fresh. A good reserve measurement is not sufficient if +1/P20 (the
      * source for real-short/auto-isolation state) is stale or unavailable. */
     if (!(valid & DPLS_STATE_RESERVE_VALID)) return false;
     if (!(valid & (DPLS_STATE_AUTOISO_VALID | DPLS_STATE_PORT_1_VALID))) return false;
-    return !s->hal.reserve_low(s->hal.context);
+    return true;
 }
 
 static void handle_mode(dpls_server_t *s, const dpls_frame_t *f)

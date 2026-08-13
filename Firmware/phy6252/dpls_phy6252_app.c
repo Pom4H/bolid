@@ -38,6 +38,8 @@
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
+#define DPLS_BOND_RECORDS_PER_SLOT 6u
+#define DPLS_BOND_VERIFY_MAX_SIZE 64u
 
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
@@ -621,22 +623,38 @@ static bool clear_settings_for_factory_reset(void)
     return true;
 }
 
-static bool fs_item_absent(uint16_t id)
+static bool bond_storage_item_erased(uint16_t id)
 {
-    uint8_t byte = 0u;
-    return hal_fs_item_read(id, &byte, 1u, NULL) == PPlus_ERR_FS_NOT_FIND_ID;
+    uint8_t bytes[DPLS_BOND_VERIFY_MAX_SIZE];
+    uint16_t length = 0u;
+    uint16_t i;
+    int rc;
+
+    memset(bytes, 0, sizeof(bytes));
+    rc = hal_fs_item_read(id, bytes, sizeof(bytes), &length);
+    if (rc == PPlus_ERR_FS_NOT_FIND_ID) return true;
+    if (rc != PPlus_SUCCESS || length == 0u || length > sizeof(bytes)) return false;
+    for (i = 0u; i < length; ++i)
+        if (bytes[i] != 0xffu) return false;
+    return true;
 }
 
-static bool bond_records_absent(void)
+static bool bond_records_erased(void)
 {
     uint8_t index;
+    uint8_t offset;
     for (index = 0u; index < GAP_BONDINGS_MAX; ++index) {
-        uint16_t main_id = (uint16_t)(BLE_NVID_GAP_BOND_START + index);
-        uint16_t local_id = (uint16_t)(BLE_NVID_GAP_BOND_START + GAP_BONDINGS_MAX + index);
-        uint16_t peer_id = (uint16_t)(BLE_NVID_GAP_BOND_START + 2u * GAP_BONDINGS_MAX + index);
-        uint16_t ccc_id = (uint16_t)(BLE_NVID_GATT_CFG_START + index);
-        if (!fs_item_absent(main_id) || !fs_item_absent(local_id) ||
-            !fs_item_absent(peer_id) || !fs_item_absent(ccc_id))
+        /* Pinned GAPBondMgr stores six interleaved items per bond slot:
+         * main, local LTK, peer LTK, peer IRK, peer CSRK and sign counter.
+         * ERASE_ALLBONDS overwrites existing records with 0xff rather than
+         * deleting their FS IDs, so both a missing item and an all-0xff item
+         * are valid erased states. */
+        for (offset = 0u; offset < DPLS_BOND_RECORDS_PER_SLOT; ++offset) {
+            uint16_t id = (uint16_t)(BLE_NVID_GAP_BOND_START +
+                                     index * DPLS_BOND_RECORDS_PER_SLOT + offset);
+            if (!bond_storage_item_erased(id)) return false;
+        }
+        if (!bond_storage_item_erased((uint16_t)(BLE_NVID_GATT_CFG_START + index)))
             return false;
     }
     return true;
@@ -650,7 +668,7 @@ static bool erase_all_bonds_now(void)
     /* BondMgr's RAM count alone is insufficient: its reload path treats any NV
      * read error as an empty record. Verify the vendor bond/security/CCC IDs at
      * the underlying filesystem layer before considering reset successful. */
-    return bond_records_absent();
+    return bond_records_erased();
 }
 
 static bool finish_factory_reset(void)

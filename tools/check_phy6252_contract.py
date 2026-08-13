@@ -204,6 +204,10 @@ def main() -> None:
         "finish_factory_reset",
         "GAPBOND_ERASE_ALLBONDS",
         "GAPBOND_BOND_COUNT",
+        "DPLS_BOND_RECORDS_PER_SLOT 6u",
+        "index * DPLS_BOND_RECORDS_PER_SLOT + offset",
+        "bytes[i] != 0xffu",
+        "bond_records_erased()",
         "dpls_ble_identity_reset_bonding_keys()",
         "clear_settings_for_factory_reset",
     ):
