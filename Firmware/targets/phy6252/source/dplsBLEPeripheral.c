@@ -87,7 +87,6 @@ static void state_changed(gaprole_States_t state)
         uint8 enabled = identity_ready ? TRUE : FALSE;
         if (identity_ready)
             dpls_ble_identity_on_stack_started();
-        dpls_phy6252_adc_set_paused(false);
         dpls_phy6252_adc_set_full_scan(false);
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
@@ -96,11 +95,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
-        /* ADC clock/conversion activity races the PHY62xx radio and can make the
-         * peripheral lose ATT write responses. v1.1.0 was stable because ADC was
-         * disabled; preserve measurements while idle but stop them for the whole
-         * interactive BLE session. */
-        dpls_phy6252_adc_set_paused(true);
+        dpls_phy6252_adc_set_full_scan(true);
         dpls_phy6252_connected(handle);
         break;
     }
@@ -108,7 +103,6 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
         uint8 enabled = identity_ready ? TRUE : FALSE;
         dpls_phy6252_adc_set_full_scan(false);
-        dpls_phy6252_adc_set_paused(false);
         dpls_phy6252_disconnected();
         schedule_led_if_needed();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
