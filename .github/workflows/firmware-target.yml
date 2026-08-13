@@ -51,7 +51,7 @@ jobs:
           bash tools/build_firmware.sh keil tmp/test-dpls.hex 2>&1 | tee tmp/keil-build.log
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
           cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-dpls-phy6252-keil
@@ -79,7 +79,7 @@ jobs:
           set -o pipefail
           mkdir -p tmp
           bash tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex 2>&1 | tee tmp/gcc-build.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: test-dpls-phy6252-gcc
