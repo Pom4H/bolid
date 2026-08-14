@@ -7,14 +7,14 @@ import platform.UIKit.UIViewController
 
 /** The only iOS UI entry point exported by the KMP framework. */
 fun MainViewController(): UIViewController {
-    val controller = IosDplsController()
+    val client = DplsClient(IosBleTransport(), IosPlatformServices)
     var host: UIViewController? = null
     val viewController = ComposeUIViewController {
         DisposableEffect(Unit) {
-            onDispose(controller::close)
+            onDispose(client::close)
         }
         DplsApp(
-            controller = controller,
+            controller = client,
             shareText = { _, text ->
                 host?.presentViewController(
                     UIActivityViewController(
