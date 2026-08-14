@@ -77,10 +77,8 @@ kotlin {
     }
 }
 
-/* Android coverage measures the platform compatibility facade only. The BLE
- * transport is Android framework glue; protocol/domain/session behavior is
- * exercised in the KMP core on both JVM and Kotlin/Native instead of publishing
- * a misleading percentage that explicitly excludes the largest BLE class. */
+/* Android coverage measures the tiny JVM compatibility facade. Shared protocol,
+ * crypto, domain, session and UI behavior are tested once in :core. */
 kover {
     reports {
         filters {
@@ -95,10 +93,6 @@ kover {
 dependencies {
     implementation(project(":core"))
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.material3)
     testImplementation(libs.junit)
 }
