@@ -1,26 +1,28 @@
 # Test-DPLS iOS host
 
-This directory is intentionally small. The iOS application UI, Test-DPLS protocol/session logic and CoreBluetooth implementation are Kotlin code in `../core/`.
+This directory is intentionally small. The product controller, UI, Test-DPLS protocol/session logic and CoreBluetooth adapter are Kotlin code in `../core/`.
 
 ## What remains here
 
 | Path | Responsibility |
 |---|---|
-| `TestDPLS/TestDPLSApp.swift` | Minimal SwiftUI/Xcode bootstrap that displays the Compose `UIViewController` |
+| `TestDPLS/TestDPLSApp.swift` | Minimal Swift/Xcode bootstrap that displays the Compose `UIViewController` |
 | `TestDPLS/Info.plist` | Bluetooth permissions, background mode and app metadata |
 | `TestDPLS/Resources/` | App icon and assets |
-| `TestDPLSTests/` | Native smoke test that verifies the exported KMP entry point |
+| `TestDPLSTests/` | Native smoke test for the exported KMP entry point |
 | `TestDPLS.xcodeproj/` | Signing, build settings and Gradle framework integration |
 
-There is deliberately no Swift BLE client, protocol codec, domain model, crypto implementation or duplicate SwiftUI screen tree.
+There is deliberately no Swift BLE client, protocol codec, domain model, crypto implementation, application controller or duplicate SwiftUI screen tree.
 
-The actual iOS implementation lives in:
+The iOS path is:
 
 ```text
-../core/src/iosMain/.../IosBleTransport.kt   CoreBluetooth callbacks + writes
-../core/src/iosMain/.../IosDplsController.kt iOS lifecycle/controller adapter
-../core/src/iosMain/.../IosApp.kt            Compose UIViewController entry point
+../core/src/commonMain/.../DplsClient.kt      shared product controller
 ../core/src/commonMain/.../DplsApp.kt         shared Android+iOS UI
+../core/src/iosMain/.../IosBleTransport.kt    CoreBluetooth callbacks + writes
+../core/src/iosMain/.../IosPlatform.kt        Apple clock + secure random
+../core/src/iosMain/.../IosApp.kt             Compose UIViewController entry point
+TestDPLS/TestDPLSApp.swift                    tiny Xcode bootstrap
 ```
 
 ## Xcode integration
@@ -43,28 +45,18 @@ cd mobile
 open ios/TestDPLS.xcodeproj
 ```
 
-Or from the repository root:
+Or run the complete mobile loop from the repository root:
 
 ```sh
 bash tools/check_mobile.sh
 ```
 
-To run XCTest from the command line:
-
-```sh
-xcodebuild test \
-  -project mobile/ios/TestDPLS.xcodeproj \
-  -scheme TestDPLS \
-  -destination 'platform=iOS Simulator,name=iPhone 16' \
-  CODE_SIGNING_ALLOWED=NO
-```
-
-For a real iPhone, choose a development team in Signing & Capabilities and run the `TestDPLS` scheme. The simulator validates compilation, shared-core tests and host integration; BLE behavior must be accepted on real hardware.
+For a real iPhone, choose a development team in Signing & Capabilities and run the `TestDPLS` scheme. Simulator checks validate compilation, common tests and host integration; physical BLE behavior still requires real hardware.
 
 ## iOS-specific rules
 
 - iOS device identity exposed to the app is `CBPeripheral.identifier`; applications do not receive a BLE MAC address.
-- CoreBluetooth owns ATT MTU negotiation; the adapter uses the maximum write length reported for `.withResponse`.
+- CoreBluetooth owns ATT MTU negotiation; `IosBleTransport` uses the maximum write length reported for `.withResponse`.
 - Pairing is initiated by iOS when protected GATT access requires it.
-- CoreBluetooth callbacks must stay in `iosMain`; protocol parsing and application screens must stay in `commonMain`.
+- CoreBluetooth callbacks stay in `iosMain`; product behavior and screens stay in `commonMain`.
 - Do not add Swift wrappers around common Kotlin APIs unless an Apple framework genuinely requires a Swift-only boundary.
