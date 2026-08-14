@@ -88,14 +88,14 @@ SDK_INCLUDES := \
 	-isystem $(SDK)/misc \
 	-isystem $(SDK)/components/driver/log \
 	-isystem $(SDK)/components/libraries/cliface \
-	-isystem $(SDK)/components/driver/key \
-	-isystem $(SDK)/components/driver/pwm \
 	-isystem $(SDK)/components/driver/flash \
 	-isystem $(SDK)/components/libraries/fs \
-	-isystem $(SDK)/components/driver/led_light \
 	-isystem $(SDK)/components/libraries/tinycrypt-0.2.8/lib/include
 INCLUDES := $(APP_INCLUDES) $(SDK_INCLUDES)
 
+# Keep the target surface to drivers actually owned by this application or
+# required by the vendor BLE runtime. key/pwm/led_light are example baggage;
+# DPLS owns its button polling and LED scene state and talks to GPIO directly.
 SDK_SOURCES := \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/main.c \
 	$(SDK)/components/driver/uart/uart.c \
@@ -106,12 +106,9 @@ SDK_SOURCES := \
 	$(SDK)/components/driver/watchdog/watchdog.c \
 	$(SDK)/components/driver/pwrmgr/pwrmgr.c \
 	$(SDK)/components/driver/log/my_printf.c \
-	$(SDK)/components/driver/key/key.c \
-	$(SDK)/components/driver/pwm/pwm.c \
 	$(SDK)/components/osal/snv/osal_snv.c \
 	$(SDK)/components/libraries/fs/fs.c \
 	$(SDK)/components/driver/flash/flash.c \
-	$(SDK)/components/driver/led_light/led_light.c \
 	$(SDK)/components/profiles/Roles/gap.c \
 	$(SDK)/components/profiles/Roles/gapbondmgr.c \
 	$(SDK)/components/profiles/Roles/gapgattserver.c \
