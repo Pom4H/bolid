@@ -5,7 +5,6 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kover)
 }
 
 val keystoreProperties = Properties().apply {
@@ -77,22 +76,8 @@ kotlin {
     }
 }
 
-/* Android coverage measures the tiny JVM compatibility facade. Shared protocol,
- * crypto, domain, session and UI behavior are tested once in :core. */
-kover {
-    reports {
-        filters {
-            includes { packages("ru.bolid.testdpls.protocol") }
-        }
-        verify {
-            rule { minBound(95) }
-        }
-    }
-}
-
 dependencies {
     implementation(project(":core"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
-    testImplementation(libs.junit)
 }
