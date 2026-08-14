@@ -15,6 +15,7 @@ import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.protocol.putU16
 import ru.bolid.testdpls.core.protocol.putU32
+import ru.bolid.testdpls.core.protocol.readU32
 
 class DplsClientTest {
     @Test
@@ -53,6 +54,11 @@ class DplsClientTest {
 
         val token = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
         transport.receive(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(0, 0, 0) + token)
+        val timeSync = transport.frames().last { it.type == DplsProtocol.Type.TIME_SYNC }
+        assertEquals(16, timeSync.payload.size)
+        assertEquals(0x78563412, readU32(timeSync.payload, 0))
+        assertContentEquals(token, timeSync.payload.copyOfRange(4, 12))
+        assertEquals(platform.nowMillis() / 1000L, readU32(timeSync.payload, 12))
         assertEquals(DplsProtocol.Type.STATE_GET, transport.lastFrame().type)
 
         transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL, revision = 1))
@@ -84,6 +90,38 @@ class DplsClientTest {
         assertEquals(ConnectionPhase.IDLE, client.uiState.value.phase)
         assertFalse(client.uiState.value.authenticated)
         assertTrue(transport.clearSelectionOnLastDisconnect)
+        client.close()
+    }
+
+    @Test
+    fun unsupportedTimeSyncDoesNotBreakLegacyConnection() {
+        val transport = FakeTransport()
+        val client = DplsClient(
+            transport,
+            FakePlatform(),
+            CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+        )
+        client.startScan()
+        transport.discover(DplsTransportDevice("device-1", "Test-DPLS", null, -50))
+        client.connect("device-1")
+        transport.connected()
+        transport.subscribed()
+        val challenge = ByteArray(37).also {
+            putU32(it, 0, 7)
+            it[36] = 1
+        }
+        transport.receive(DplsProtocol.Type.AUTH_CHALLENGE, challenge)
+        client.authenticate("12345678")
+        transport.receive(
+            DplsProtocol.Type.AUTH_RESULT,
+            byteArrayOf(0, 0, 0) + byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8),
+        )
+        assertTrue(transport.frames().any { it.type == DplsProtocol.Type.TIME_SYNC })
+        transport.receive(DplsProtocol.Type.ERROR, byteArrayOf(5))
+        assertEquals(ConnectionPhase.SYNCHRONIZING, client.uiState.value.phase)
+        assertEquals(null, client.uiState.value.error)
+        transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL, revision = 1))
+        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
         client.close()
     }
 
@@ -145,7 +183,7 @@ class DplsClientTest {
     }
 
     private class FakePlatform : DplsPlatformServices {
-        override fun nowMillis(): Long = 100_000
+        override fun nowMillis(): Long = 1_786_732_800_000L
         override fun secureRandomBytes(count: Int): ByteArray = ByteArray(count) { it.toByte() }
     }
 
@@ -203,7 +241,10 @@ class DplsClientTest {
             )
         }
 
-        fun lastFrame(): DplsProtocol.Frame =
-            (decodeFrame(writes.last()) as DplsProtocol.DecodeResult.Success).frame
+        fun lastFrame(): DplsProtocol.Frame = frames().last()
+
+        fun frames(): List<DplsProtocol.Frame> = writes.map {
+            (decodeFrame(it) as DplsProtocol.DecodeResult.Success).frame
+        }
     }
 }
