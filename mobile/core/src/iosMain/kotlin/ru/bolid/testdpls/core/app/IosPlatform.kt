@@ -5,19 +5,24 @@ package ru.bolid.testdpls.core.app
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import platform.Foundation.NSData
+import platform.Foundation.NSDate
 import platform.Security.SecRandomCopyBytes
 import platform.Security.errSecSuccess
 import platform.Security.kSecRandomDefault
 import platform.posix.memcpy
 
-internal fun secureRandomBytes(count: Int): ByteArray {
-    require(count >= 0)
-    if (count == 0) return ByteArray(0)
-    return ByteArray(count).also { bytes ->
-        val status = bytes.usePinned { pinned ->
-            SecRandomCopyBytes(kSecRandomDefault, count.toULong(), pinned.addressOf(0))
+internal object IosPlatformServices : DplsPlatformServices {
+    override fun nowMillis(): Long = (NSDate().timeIntervalSince1970 * 1_000.0).toLong()
+
+    override fun secureRandomBytes(count: Int): ByteArray {
+        require(count >= 0)
+        if (count == 0) return ByteArray(0)
+        return ByteArray(count).also { bytes ->
+            val status = bytes.usePinned { pinned ->
+                SecRandomCopyBytes(kSecRandomDefault, count.toULong(), pinned.addressOf(0))
+            }
+            check(status == errSecSuccess) { "SecRandomCopyBytes failed: $status" }
         }
-        check(status == errSecSuccess) { "SecRandomCopyBytes failed: $status" }
     }
 }
 
