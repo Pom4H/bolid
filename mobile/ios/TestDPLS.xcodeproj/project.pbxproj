@@ -7,7 +7,7 @@
 
 /* Begin PBXBuildFile section */
 		0C0AA1BF11EE44D38827206F /* TestDPLSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C33CB6E98A40D1BBF1B8DE /* TestDPLSApp.swift */; };
-		1AFE49F8BFAE409DB2513124 /* DplsProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933F2E5FB1F240F5810FFEAC /* DplsProtocolTests.swift */; };
+		1AFE49F8BFAE409DB2513124 /* DplsCoreIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933F2E5FB1F240F5810FFEAC /* DplsCoreIntegrationTests.swift */; };
 		4C7865B318584F15866C8343 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 58864AB1A39E4E7C95FA0C1C /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -15,7 +15,7 @@
 		FCD1CF6347BD4858B7FE2E68 /* TestDPLS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TestDPLS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		152F94D88DD1486386C3E5A7 /* TestDPLSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TestDPLSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D5C33CB6E98A40D1BBF1B8DE /* TestDPLSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestDPLSApp.swift; sourceTree = "<group>"; };
-		933F2E5FB1F240F5810FFEAC /* DplsProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DplsProtocolTests.swift; sourceTree = "<group>"; };
+		933F2E5FB1F240F5810FFEAC /* DplsCoreIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DplsCoreIntegrationTests.swift; sourceTree = "<group>"; };
 		58864AB1A39E4E7C95FA0C1C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		207D6FEC045C438BAD0D305D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -60,7 +60,7 @@
 		93621D7FF46547608E269FA6 /* TestDPLSTests */ = {
 			isa = PBXGroup;
 			children = (
-				933F2E5FB1F240F5810FFEAC /* DplsProtocolTests.swift */,
+				933F2E5FB1F240F5810FFEAC /* DplsCoreIntegrationTests.swift */,
 			);
 			path = TestDPLSTests;
 			sourceTree = "<group>";
@@ -179,7 +179,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1AFE49F8BFAE409DB2513124 /* DplsProtocolTests.swift in Sources */,
+				1AFE49F8BFAE409DB2513124 /* DplsCoreIntegrationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -211,14 +211,14 @@
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				ENABLE_TESTABILITY = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
 		};
@@ -236,8 +236,8 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				ONLY_ACTIVE_ARCH = NO;
 				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
