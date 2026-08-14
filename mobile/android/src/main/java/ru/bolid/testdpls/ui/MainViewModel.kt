@@ -2,6 +2,7 @@ package ru.bolid.testdpls.ui
 
 import android.app.Application
 import android.content.Intent
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import ru.bolid.testdpls.BleConnectionService
@@ -19,8 +20,8 @@ class MainViewModel(application: Application) :
         if (uiState.value.selectedDevice == null) client.startScan()
     }
 
-    fun permissionsDenied() = showExternalError("Нет разрешений Bluetooth")
-    fun bluetoothDisabled() = showExternalError("Включите Bluetooth")
+    fun permissionsDenied() = platformMessage("Нет разрешений Bluetooth")
+    fun bluetoothDisabled() = platformMessage("Включите Bluetooth")
 
     override fun connect(address: String) {
         startConnectionService()
@@ -37,10 +38,8 @@ class MainViewModel(application: Application) :
         app.stopService(Intent(app, BleConnectionService::class.java))
     }
 
-    private fun showExternalError(message: String) {
-        if (message.contains("Bluetooth", ignoreCase = true)) {
-            client.disconnect()
-        }
+    private fun platformMessage(message: String) {
+        Toast.makeText(app, message, Toast.LENGTH_LONG).show()
     }
 
     private fun startConnectionService() {
