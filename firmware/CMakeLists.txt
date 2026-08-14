@@ -28,6 +28,7 @@ endfunction()
 
 dpls_add_test(test_dpls_server_tests tests/test_server.c)
 dpls_add_test(test_log_journal tests/test_log_journal.c)
+dpls_add_test(test_time_sync tests/test_time_sync.c)
 dpls_add_test(test_led tests/test_led.c)
 dpls_add_test(test_calib tests/test_calib.c)
 dpls_add_test(test_protocol tests/test_protocol.c)
