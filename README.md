@@ -2,75 +2,104 @@
 
 Firmware and mobile software for a BLE-controlled DPLS test device based on PHY6252 / PB-03F.
 
-The repository is organized around one rule: **hardware safety stays in firmware; protocol and session semantics stay in the shared mobile core; platform code only adapts operating-system APIs.**
+The repository has three ownership rules:
+
+1. **firmware owns hardware safety**;
+2. **Kotlin `commonMain` owns behavior shared by Android and iOS**;
+3. **platform code only adapts OS APIs and application entry points**.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
-| `mobile/core/` | Kotlin Multiplatform protocol, domain model, wire parsing and session state |
-| `mobile/android/` | Android BluetoothGatt adapter and Compose UI |
-| `mobile/ios/` | iOS CoreBluetooth adapter and SwiftUI host |
-| `docs/` | Bring-up, hardware and PHY6252 engineering notes |
-| `tools/` | Build, coverage, lint, flashing, UART and E2E utilities |
-| `third_party/phy62x2/` | Vendored PHY62x2 flashing utilities |
+| `mobile/core/` | Kotlin Multiplatform protocol, crypto contract, domain/session state and shared Compose UI |
+| `mobile/android/` | Android BluetoothGatt/service/permission adapter and Activity shell |
+| `mobile/ios/` | Minimal Xcode host: app metadata, assets and a tiny Swift bootstrap |
+| `docs/` | Architecture, bring-up and PHY6252 engineering references |
+| `tools/` | Build, flash, lint, coverage and one-command checks |
+| `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
 
-The complete PHY62XX SDK is **not vendored**. Builds fetch the pinned SDK 3.1.2 commit declared in `firmware/sdk/phy6252-sdk.env`.
-
-## Safety model
-
-The phone is never the safety boundary. Firmware always owns the final state of the outputs.
-
-- boot and disconnect force `NORMAL`;
-- test modes have a hard timeout;
-- session timeout returns the device to `NORMAL`;
-- low reserve and real-short isolation override a requested test mode;
-- only one mode output can be active at a time (break-before-make);
-- authentication lock survives reconnects and can persist through reboot;
-- secrets and session tokens are cleared on link reset;
-- ATT indications are serialized by the PHY6252 TX queue and advance only after confirmation.
+The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
 
 ## Mobile architecture
 
-`mobile/core` is the source of truth for code that must behave identically on Android and iOS:
+There is one application UI and one cross-platform protocol/session implementation:
 
 ```text
-firmware (C)
-      │
-      │ Test-DPLS binary protocol
-      ▼
-mobile/core (Kotlin Multiplatform)
-  protocol · domain · session
-      │                 │
-      ▼                 ▼
-Android adapter      iOS adapter
-BluetoothGatt        CoreBluetooth
-Compose              SwiftUI
+                         Test-DPLS BLE wire contract
+                                  │
+                         ┌────────▼────────┐
+                         │ mobile/core/    │
+                         │ commonMain      │
+                         │                │
+                         │ protocol/CRC   │
+                         │ auth contracts │
+                         │ domain/session │
+                         │ message parser │
+                         │ DplsApp Compose│
+                         └───────┬────────┘
+                                 │
+                  ┌──────────────┴──────────────┐
+                  │                             │
+         Android platform edge           iOS platform edge
+         mobile/android/                 mobile/core/iosMain
+         BluetoothGatt                   CoreBluetooth
+         service/permissions             IosDplsController
+         MainActivity                    IosBleTransport
+                  │                             │
+                  │                      mobile/ios/
+                  │                      Xcode + ~bootstrap Swift
+                  └──────── same DplsApp UI ────┘
 ```
 
-Android keeps a thin compatibility facade for existing package names; CRC, framing, message parsing and domain types delegate to `mobile/core`. The core is built for Android/JVM, iOS arm64 and iOS Simulator arm64.
+`mobile/core/src/commonMain` contains no Android or Apple framework APIs. `iosMain` is intentionally inside the KMP module: it is the thin CoreBluetooth implementation behind the same `DplsController` contract that Android implements with `BluetoothGatt`.
 
-## Build and test
+Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application. It only asks `DplsCore` for the Compose `UIViewController` required by the Xcode app target.
 
-### Portable firmware
+See [docs/architecture.md](docs/architecture.md) for the ownership rules.
+
+## Safety model
+
+The phone is never the safety boundary. Firmware owns the final electrical state.
+
+- boot and disconnect force `NORMAL`;
+- dangerous test modes have a hard timeout;
+- session timeout returns the device to `NORMAL`;
+- low reserve and real-short isolation override requested modes;
+- output switching is break-before-make;
+- authentication lock can persist across reconnect/reboot;
+- ATT indications are serialized and advance only after confirmation.
+
+A mobile crash, reconnect bug or stale UI state must not be able to keep a dangerous output active indefinitely.
+
+## Developer quick start
+
+Run the mobile checks from any directory:
+
+```sh
+bash tools/check_mobile.sh
+```
+
+Run all host-side repository checks:
+
+```sh
+bash tools/check_all.sh
+```
+
+On macOS, `check_mobile.sh` also runs the Kotlin/Native simulator tests and links the iOS framework. Hardware BLE behavior still requires a real iPhone/device pair.
+
+### Firmware
 
 ```sh
 cmake -S firmware -B firmware/build
 cmake --build firmware/build
 ctest --test-dir firmware/build --output-on-failure
-bash tools/lint_firmware.sh
-bash tools/coverage_firmware.sh
-```
 
-### PHY6252 target
-
-```sh
+# PHY6252 target
 tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 ```
-
-The target is checked with both Keil MDK / Arm Compiler 6 and GNU Arm Embedded. Project-owned code treats warnings as errors; vendor SDK warnings are isolated from that policy.
 
 ### Mobile
 
@@ -95,7 +124,22 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-The KMP protocol suite includes known-answer CRC checks, round-trip tests, binary message contracts, deterministic session-safety tests and randomized decoder/round-trip tests. Android Kover covers the Android compatibility facade; platform Bluetooth framework glue is validated by builds and integration tests rather than hidden behind an artificial coverage percentage.
+## Test strategy
+
+Behavior-heavy checks live at the lowest reusable layer:
+
+- firmware host tests + coverage + cppcheck;
+- CRC known-answer and all-message frame round trips;
+- 10,000 randomized malformed decoder inputs;
+- 2,000 randomized valid frame round trips;
+- binary state/device-info/journal/control-message contracts;
+- PBKDF2/HMAC/SHA-256 known-answer vectors;
+- deterministic session safety/reset tests;
+- the same KMP common tests on JVM and Kotlin/Native;
+- Android lint/build and a small compatibility-facade coverage gate;
+- native Xcode integration smoke test.
+
+Platform Bluetooth callbacks are validated through platform builds/integration instead of hiding them behind a misleading coverage percentage.
 
 ## GATT
 
