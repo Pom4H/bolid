@@ -15,27 +15,28 @@ This document defines ownership boundaries in Test-DPLS. Moving a responsibility
 ┌──────────────────────────────────────────────────────────────┐
 │ mobile/core/src/commonMain                                   │
 │                                                              │
-│ frame/CRC · auth contracts · message parsers                 │
-│ domain/session state · deterministic rules · shared DplsApp  │
-└───────────────────────┬───────────────────────┬──────────────┘
-                        │                       │
-               DplsController            DplsController
-                        │                       │
-              ┌─────────▼──────────┐   ┌────────▼────────────┐
-              │ mobile/android/    │   │ core/src/iosMain/   │
-              │ BluetoothGatt      │   │ CoreBluetooth       │
-              │ service/permissions│   │ iOS controller      │
-              │ MainActivity       │   │ ComposeUIViewCtrl   │
-              └────────────────────┘   └────────┬────────────┘
-                                                │
-                                      ┌─────────▼──────────┐
-                                      │ mobile/ios/        │
-                                      │ Xcode shell/assets │
-                                      │ tiny Swift bootstrap│
-                                      └────────────────────┘
+│ DplsClient — single application controller                   │
+│ frame/CRC · auth/crypto · parsers · domain/session           │
+│ reconnect · commands · settings · journal · shared DplsApp   │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ DplsTransport + platform services
+                 ┌─────────────┴─────────────┐
+                 │                           │
+        ┌────────▼──────────┐       ┌────────▼──────────┐
+        │ mobile/android/   │       │ core/src/iosMain/ │
+        │ AndroidBleTransport│      │ IosBleTransport  │
+        │ service/permissions│      │ Apple clock/RNG  │
+        │ MainActivity      │       │ Compose UI host  │
+        └───────────────────┘       └────────┬──────────┘
+                                             │
+                                    ┌────────▼──────────┐
+                                    │ mobile/ios/       │
+                                    │ Xcode shell/assets│
+                                    │ one Swift bootstrap│
+                                    └───────────────────┘
 ```
 
-Both platforms render the same `DplsApp` from `commonMain`. Platform code supplies a `DplsController` and handles operating-system APIs; it does not own a second screen tree or protocol implementation.
+Both platforms use the same `DplsClient` and render the same `DplsApp`. Platform code only supplies BLE transport, clock/random services and OS lifecycle integration.
 
 ## Ownership rules
 
@@ -55,43 +56,44 @@ Firmware owns:
 
 A mobile crash or stale connection must not be able to keep a dangerous output active indefinitely.
 
-### `commonMain` owns shared application semantics
+### `commonMain` owns product behavior
 
-Put code in `mobile/core/src/commonMain` when Android and iOS must produce the same answer or show the same application behavior.
+Put code in `mobile/core/src/commonMain` when Android and iOS must produce the same answer or show the same product behavior.
 
 It owns:
 
+- `DplsClient`, the single application/session controller;
 - frame types and CRC-16/CCITT-FALSE;
 - binary encode/decode;
-- authentication byte contracts and known-answer crypto implementation;
+- authentication byte contracts plus SHA-256/HMAC/PBKDF2 implementation;
 - `AUTH_*`, `COMMAND_RESULT`, `SETTINGS_RESULT`, `STATE_REPORT`, device-info and journal parsing;
-- shared domain types;
-- session ids/tokens/nonces and reset semantics;
-- deterministic session transitions;
+- shared domain types and secret-bearing session runtime;
+- reconnect/keepalive/state-refresh/command/settings/journal orchestration;
+- command-id correlation so stale acknowledgements cannot complete a newer command;
 - the Compose `DplsApp` screen tree.
 
 `commonMain` must not import Android framework APIs, CoreBluetooth, UIKit or other platform-only APIs.
 
-### Platform source owns operating-system adaptation
+### Platform code owns operating-system adaptation
 
 Android platform code owns:
 
 - runtime Bluetooth permissions;
-- bond/GATT recovery;
+- `BluetoothGatt` callbacks, bonding, MTU and CCCD subscription;
+- transient write retries and stale-bond/GATT-133 recovery;
 - foreground service/lifecycle integration;
-- `BluetoothGatt` callbacks;
-- Android application entry point.
+- Android application entry point and debug E2E broadcast driver.
 
 iOS platform code in `core/src/iosMain` owns:
 
 - `CBCentralManager` / `CBPeripheral` callbacks;
-- secure random bytes from Apple Security;
-- reconnect behavior tied to CoreBluetooth;
+- write queue and CoreBluetooth lifecycle;
+- secure random bytes and clock from Apple frameworks;
 - the Compose `UIViewController` host.
 
-`mobile/ios` itself is only the Xcode product shell: signing, plist, assets and the minimal Swift entry point required to launch the exported Kotlin view controller.
+`mobile/ios` itself is only the Xcode product shell: signing, plist, assets and the one Swift entry point required to launch the exported Kotlin view controller.
 
-Platform adapters may translate native events into common state, but they must not introduce a duplicate frame codec, protocol parser, session model or application UI.
+Platform adapters translate native events into `DplsTransportListener` events. They must not introduce a second frame codec, parser, session controller or application UI.
 
 ## Command truth model
 
@@ -99,24 +101,25 @@ A successful BLE write is not proof that hardware entered the requested mode.
 
 ```text
 operator request
-    → GATT write
+    → DplsClient assigns command id
+    → platform transport writes GATT
     → firmware validates + applies/rejects
-    → COMMAND_RESULT
+    → matching COMMAND_RESULT
     → STATE_REPORT
     → shared UI reflects confirmed hardware state
 ```
 
-The final `STATE_REPORT` is the application-visible source of truth.
+A `COMMAND_RESULT` with a different command id is ignored. The final `STATE_REPORT` is the application-visible source of hardware truth.
 
 ## Dependency direction
 
 Allowed:
 
 ```text
-mobile/android             → mobile/core/commonMain
-mobile/core/iosMain        → mobile/core/commonMain
-mobile/ios Xcode bootstrap → DplsCore framework
-firmware target adapter    → pinned vendor SDK
+mobile/android transport/shell → mobile/core/commonMain
+mobile/core/iosMain transport  → mobile/core/commonMain
+mobile/ios Xcode bootstrap     → DplsCore framework
+firmware target adapter        → pinned vendor SDK
 ```
 
 Not allowed:
@@ -124,7 +127,7 @@ Not allowed:
 ```text
 commonMain → Android/CoreBluetooth/UIKit APIs
 portable firmware/src → vendor SDK headers
-platform code → duplicate protocol/domain/UI implementations
+platform code → duplicate protocol/controller/UI implementations
 mobile app → hardware safety decisions
 ```
 
@@ -134,24 +137,28 @@ Put a test at the lowest layer that can prove the behavior once:
 
 - firmware behavior → firmware host tests;
 - wire bytes/CRC/auth/message parsing → KMP common tests;
-- session transitions → KMP common tests;
-- Android framework integration → Android tests/lint/build;
+- application/session behavior → `DplsClient` fake-transport common tests;
+- Android framework integration → Android lint/build + hardware E2E;
 - iOS framework/export integration → Kotlin/Native tests + XCTest smoke;
 - physical outputs/BLE pairing/radio behavior → hardware bring-up/E2E.
 
-The common suite contains known-answer CRC and crypto vectors, all-message round trips, deterministic session tests, binary control/state/log contracts, 10,000 malformed decoder inputs and 2,000 randomized valid frame round trips.
+The common suite includes CRC and crypto known-answer vectors, all-message round trips, binary control/state/log contracts, session reset tests, shared-controller flow tests, stale command-id rejection, 10,000 malformed decoder inputs and 2,000 randomized valid frame round trips.
 
-Coverage percentages are only used where they describe unit-testable code honestly. Bluetooth callback glue is not excluded from a broad percentage and then presented as if the subsystem were covered.
+## Repository invariants
+
+`tools/check_repo_layout.sh` prevents the architecture from drifting back into duplicate implementations. It rejects legacy top-level directories as well as old Android/Swift controllers, duplicate platform protocol facades, duplicate UI trees and obsolete KMP bridges.
+
+Production iOS intentionally contains one Swift bootstrap source. The Android BLE package intentionally contains one transport implementation.
 
 ## Developer experience rule
 
-A developer adding an ordinary product feature should usually touch **one shared Kotlin area**, not Android + Swift copies.
+An ordinary product feature should normally touch **one shared Kotlin area**, not Android + Swift copies.
 
-- screen/presentation → `mobile/core/src/commonMain/.../app/`
-- protocol contract → `mobile/core/src/commonMain/.../protocol/`
-- deterministic state/session rule → `mobile/core/src/commonMain/.../session/`
-- Android OS quirk → `mobile/android/`
-- iOS OS quirk → `mobile/core/src/iosMain/`
+- screen or application flow → `mobile/core/src/commonMain/.../app/`
+- protocol/auth contract → `mobile/core/src/commonMain/.../protocol/`
+- secret/session runtime → `mobile/core/src/commonMain/.../session/`
+- Android OS/Bluetooth quirk → `mobile/android/`
+- iOS OS/Bluetooth quirk → `mobile/core/src/iosMain/`
 
 Use `bash tools/check_mobile.sh` for the mobile loop and `bash tools/check_all.sh` for all host-side repository gates.
 
