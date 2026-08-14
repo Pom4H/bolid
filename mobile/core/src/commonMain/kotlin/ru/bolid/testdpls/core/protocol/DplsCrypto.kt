@@ -2,8 +2,14 @@ package ru.bolid.testdpls.core.protocol
 
 /** Small dependency-free SHA-256/HMAC/PBKDF2 implementation used by Test-DPLS authentication. */
 object DplsCrypto {
-    fun deriveVerifier(password: String, salt: ByteArray): ByteArray =
-        pbkdf2HmacSha256(password.encodeToByteArray(), salt, DplsAuth.PBKDF2_ITERATIONS, DplsAuth.VERIFIER_SIZE)
+    fun deriveVerifier(password: String, salt: ByteArray): ByteArray {
+        val passwordBytes = password.encodeToByteArray()
+        return try {
+            pbkdf2HmacSha256(passwordBytes, salt, DplsAuth.PBKDF2_ITERATIONS, DplsAuth.VERIFIER_SIZE)
+        } finally {
+            passwordBytes.fill(0)
+        }
+    }
 
     fun hmacSha256(key: ByteArray, message: ByteArray): ByteArray {
         val blockKey = if (key.size > 64) sha256(key) else key.copyOf()
