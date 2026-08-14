@@ -15,7 +15,7 @@ class DplsControlMessagesTest {
         val result = requireNotNull(parseAuthResult(raw))
         assertEquals(0, result.status)
         assertEquals(0x1234, result.retryAfterSeconds)
-        assertContentEquals(token, result.sessionToken)
+        assertContentEquals(token, requireNotNull(result.sessionToken))
     }
 
     @Test
