@@ -20,6 +20,25 @@ static uint16_t log_event_count(const dpls_server_t *s);
 
 static bool event_type_valid(uint8_t type) { return type >= EVT_BOOT && type <= EVT_LAST; }
 
+/* Advance the optional wall clock from the same monotonic millisecond source
+ * used by the safety state machine. The update is incremental, so the 32-bit
+ * OSAL millisecond counter may wrap without breaking UTC as long as the normal
+ * server tick keeps running (well inside one 2^32-ms interval). */
+static void update_now(dpls_server_t *s, uint32_t now_ms) {
+    if (s->wall_clock_valid) {
+        uint32_t delta_ms = now_ms - s->wall_clock_last_ms;
+        uint64_t total_ms = (uint64_t)s->wall_clock_fraction_ms + delta_ms;
+        s->wall_clock_unix_seconds += (uint32_t)(total_ms / 1000u);
+        s->wall_clock_fraction_ms = (uint16_t)(total_ms % 1000u);
+        s->wall_clock_last_ms = now_ms;
+    }
+    s->now_ms = now_ms;
+}
+
+static uint32_t event_timestamp_seconds(const dpls_server_t *s) {
+    return s->wall_clock_valid ? s->wall_clock_unix_seconds : s->now_ms / 1000u;
+}
+
 static bool event_at_export_index(const dpls_server_t *s, uint16_t export_index, dpls_event_t *out) {
     uint32_t sequence;
     if (!s->log_export_active || export_index >= s->log_export_count ||
@@ -74,7 +93,7 @@ void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter) {
     if (!event_type_valid(type) || !s->hal.event_storage_append) return;
     memset(&event, 0, sizeof(event));
     event.sequence = s->next_event_sequence;
-    event.timestamp_seconds = s->now_ms / 1000u;
+    event.timestamp_seconds = event_timestamp_seconds(s);
     event.event_type = type;
     event.parameter = parameter;
     if (!s->hal.event_storage_append(s->hal.context, &event)) {
@@ -125,7 +144,7 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
 }
 
 void dpls_server_connected(dpls_server_t *s, uint32_t now_ms) {
-    s->now_ms = now_ms;
+    update_now(s, now_ms);
     if (s->connected) return;
     s->connected = true; s->authenticated = false; s->hello_received = false;
     s->setup_disconnect_deadline_ms = 0;
@@ -137,7 +156,7 @@ void dpls_server_connected(dpls_server_t *s, uint32_t now_ms) {
 }
 
 void dpls_server_disconnected(dpls_server_t *s, uint32_t now_ms) {
-    s->now_ms = now_ms;
+    update_now(s, now_ms);
     if (!s->connected) return;
     s->connected = false; s->authenticated = false;
     s->hello_received = false; s->setup_disconnect_deadline_ms = 0;
@@ -178,7 +197,7 @@ static void poll_real_short(dpls_server_t *s) {
 }
 
 void dpls_server_tick(dpls_server_t *s, uint32_t now_ms) {
-    s->now_ms = now_ms;
+    update_now(s, now_ms);
     poll_power_state(s);
     poll_real_short(s);
     if (s->mode != DPLS_MODE_NORMAL && s->mode_deadline_ms && elapsed(now_ms, s->mode_deadline_ms))
@@ -400,7 +419,7 @@ static bool auth_block_active(dpls_server_t *s, uint32_t now) {
 }
 
 bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, uint32_t now_ms) {
-    dpls_frame_t f; s->now_ms = now_ms;
+    dpls_frame_t f; update_now(s, now_ms);
     if (!dpls_frame_decode(bytes, length, &f)) { send_error(s, 1); return false; }
     if (s->identify_active && f.type != DPLS_MSG_IDENTIFY_START && f.type != DPLS_MSG_IDENTIFY_STOP)
         stop_identify(s);
@@ -497,6 +516,22 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
         s->authenticated = false;
         memset(s->session_token, 0, sizeof(s->session_token));
         s->setup_disconnect_deadline_ms = now_ms + 500u;
+        break;
+    }
+    case DPLS_MSG_TIME_SYNC: {
+        uint32_t unix_seconds;
+        if (!session_matches(s, &f, 16) || f.payload_length != 16u) { send_error(s, 2); break; }
+        unix_seconds = rd32(f.payload + 12);
+        if (unix_seconds < DPLS_TIME_MIN_UNIX_SECONDS || unix_seconds > DPLS_TIME_MAX_UNIX_SECONDS) {
+            send_error(s, 3);
+            break;
+        }
+        /* TIME_SYNC never touches now_ms or any safety deadline. It only says
+         * "at this monotonic instant, UTC was X". No NV write is performed. */
+        s->wall_clock_valid = true;
+        s->wall_clock_unix_seconds = unix_seconds;
+        s->wall_clock_last_ms = now_ms;
+        s->wall_clock_fraction_ms = 0u;
         break;
     }
     case DPLS_MSG_STATE_GET: if (session_matches(s, &f, 12)) send_state(s); else send_error(s, 2); break;
