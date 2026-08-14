@@ -13,19 +13,19 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import ru.bolid.testdpls.ble.ConnectionPhase
-import ru.bolid.testdpls.ble.DplsMode
-import ru.bolid.testdpls.ble.DplsUiState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import ru.bolid.testdpls.core.domain.ConnectionPhase
+import ru.bolid.testdpls.core.domain.DplsMode
+import ru.bolid.testdpls.core.domain.DplsUiState
 
 class BleConnectionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val client by lazy { (application as DplsApplication).bleClient }
+    private val client by lazy { (application as DplsApplication).client }
     private var lastError: String? = null
     private var previousMode: DplsMode? = null
 
@@ -67,7 +67,11 @@ class BleConnectionService : Service() {
 
         val mode = state.state?.mode
         if (previousMode?.dangerous == true && mode == DplsMode.NORMAL) {
-            postAlert(NORMAL_NOTIFICATION_ID, "Test-DPLS: режим Норма", "Устройство вернулось в безопасный режим.")
+            postAlert(
+                NORMAL_NOTIFICATION_ID,
+                "Test-DPLS: режим Норма",
+                "Устройство вернулось в безопасный режим.",
+            )
         }
         if (mode != null) previousMode = mode
     }
