@@ -11,13 +11,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import android.content.pm.ApplicationInfo
-import ru.bolid.testdpls.ui.DplsScreen
+import ru.bolid.testdpls.core.app.DplsApp
 import ru.bolid.testdpls.ui.MainViewModel
-import ru.bolid.testdpls.ui.theme.TestDplsTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -43,14 +39,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private var pendingExport: (() -> String)? = null
+    private var pendingExportText: String? = null
     private val createDocumentLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
-        val content = pendingExport?.invoke()
-        pendingExport = null
+        val content = pendingExportText
+        pendingExportText = null
         if (uri != null && content != null) {
-            contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { it.write(content) }
+            contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+                writer.write(content)
+            }
         }
     }
 
@@ -59,20 +57,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            TestDplsTheme {
-                DplsScreen(
-                    viewModel = viewModel,
-                    onExportCsv = {
-                        pendingExport = viewModel::eventLogCsv
-                        createDocumentLauncher.launch("test-dpls-events.csv")
-                    },
-                    onExportJson = {
-                        pendingExport = viewModel::eventLogTxt
-                        createDocumentLauncher.launch("test-dpls-events.txt")
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
+            DplsApp(
+                controller = viewModel,
+                shareText = { title, text ->
+                    pendingExportText = text
+                    createDocumentLauncher.launch(title)
+                },
+            )
         }
 
         requestRequiredPermissions()
@@ -80,7 +71,6 @@ class MainActivity : ComponentActivity() {
 
     private fun requestRequiredPermissions() {
         val permissions = REQUESTED_PERMISSIONS.filterNot(::isPermissionGranted)
-
         if (permissions.isEmpty()) {
             ensureBluetoothEnabledAndConnect()
         } else {
