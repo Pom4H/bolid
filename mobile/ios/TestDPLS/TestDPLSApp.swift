@@ -1,16 +1,20 @@
 import SwiftUI
+import DplsCore
+
+private struct ComposeRoot: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        IosAppKt.MainViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
 
 @main
 struct TestDPLSApp: App {
-    @StateObject private var bleClient = BleClient()
-
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(bleClient)
-                .onAppear {
-                    // Kick an initial scan once Bluetooth is up (BleClient reacts to poweredOn).
-                }
+            ComposeRoot()
+                .ignoresSafeArea()
         }
     }
 }
