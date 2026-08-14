@@ -55,6 +55,7 @@ class DplsClient(
     private var cachedVerifier: ByteArray? = null
     private var identifyAfterConnect = false
     private var pendingIdentifyAck = false
+    private var pendingModeCommandId: Long? = null
     private var reconnectAttempt = 0
     private var reachedReady = false
     private var legacyFirmware = false
@@ -112,6 +113,7 @@ class DplsClient(
         selectedAddress = address
         legacyFirmware = false
         awaitingDeviceInfo = false
+        pendingModeCommandId = null
         updateState {
             it.copy(
                 phase = ConnectionPhase.CONNECTING,
@@ -122,6 +124,7 @@ class DplsClient(
                 setupPassword = "",
                 setupRepeatPassword = "",
                 identifyLedLive = false,
+                commandInProgress = false,
                 error = null,
             )
         }
@@ -191,6 +194,7 @@ class DplsClient(
     override fun confirmMode() {
         val mode = state.pendingMode ?: return
         val commandId = session.nextCommandId()
+        pendingModeCommandId = commandId
         val payload = ByteArray(17)
         putU32(payload, 0, session.sessionId)
         session.sessionToken.copyInto(payload, 4)
@@ -202,7 +206,7 @@ class DplsClient(
         commandTimeoutJob?.cancel()
         commandTimeoutJob = scope.launch {
             delay(COMMAND_TIMEOUT_MS)
-            if (state.commandInProgress) {
+            if (state.commandInProgress && pendingModeCommandId == commandId) {
                 send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
                 updateState { it.copy(statusText = "Запрос состояния устройства…") }
             }
@@ -324,6 +328,7 @@ class DplsClient(
 
     override fun onBluetoothUnavailable() {
         cancelConnectionJobs()
+        pendingModeCommandId = null
         session.resetLink()
         updateState {
             it.copy(
@@ -476,7 +481,13 @@ class DplsClient(
 
     private fun handleCommandResult(payload: ByteArray) {
         val result = parseCommandResult(payload) ?: return fail("Повреждённый COMMAND_RESULT")
-        if (result.status != 0) return fail(commandRejectReason(result.status))
+        if (pendingModeCommandId != result.commandId) return
+        if (result.status != 0) {
+            pendingModeCommandId = null
+            commandTimeoutJob?.cancel()
+            return fail(commandRejectReason(result.status))
+        }
+        pendingModeCommandId = null
         commandTimeoutJob?.cancel()
         updateState {
             it.copy(
@@ -507,7 +518,7 @@ class DplsClient(
         pendingSettings = null
         if (result.status == 0) {
             when (pending) {
-                is PendingSettings.Password -> replaceCachedVerifier(pending.verifier, wipeOldOnly = true)
+                is PendingSettings.Password -> replaceCachedVerifier(pending.verifier)
                 is PendingSettings.Name -> requestDeviceInfoInternal()
             }
             updateState { it.copy(settingsOp = SettingsOp.DONE, settingsError = null) }
@@ -529,7 +540,6 @@ class DplsClient(
                 authenticated = true,
                 identifyActive = false,
                 identifyLedLive = false,
-                commandInProgress = false,
                 staleState = false,
                 lastAckMillis = now,
                 error = null,
@@ -681,6 +691,7 @@ class DplsClient(
     private fun scheduleReconnect() {
         if (reconnectJob?.isActive == true || selectedAddress == null) return
         cancelConnectionJobs()
+        pendingModeCommandId = null
         session.resetLink()
         updateState {
             it.copy(
@@ -732,6 +743,7 @@ class DplsClient(
     private fun disconnectInternal(clearSelection: Boolean, clearVerifier: Boolean) {
         scanJob?.cancel()
         cancelConnectionJobs()
+        pendingModeCommandId = null
         logTimeoutJob?.cancel()
         settingsTimeoutJob?.cancel()
         clearPendingSettings()
@@ -744,11 +756,10 @@ class DplsClient(
         if (clearVerifier) replaceCachedVerifier(null)
     }
 
-    private fun replaceCachedVerifier(verifier: ByteArray?, wipeOldOnly: Boolean = false) {
+    private fun replaceCachedVerifier(verifier: ByteArray?) {
         val old = cachedVerifier
         if (old !== verifier) old?.fill(0)
         cachedVerifier = verifier
-        if (wipeOldOnly && verifier == null) old?.fill(0)
     }
 
     private fun failLog(message: String) {
@@ -759,6 +770,8 @@ class DplsClient(
     }
 
     private fun fail(message: String) {
+        pendingModeCommandId = null
+        commandTimeoutJob?.cancel()
         updateState {
             it.copy(
                 phase = ConnectionPhase.ERROR,
