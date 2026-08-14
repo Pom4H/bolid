@@ -47,4 +47,24 @@ class DplsControlMessagesTest {
         assertEquals(DplsMode.SHORT_1, parsedCommand.mode)
         assertEquals(30, parsedCommand.automaticReturnSeconds)
     }
+
+    @Test
+    fun timeSyncCarriesAuthenticatedUnixUtcSeconds() {
+        val token = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
+        val unixSeconds = 1_786_732_800L
+        val payload = requireNotNull(buildTimeSyncPayload(0x78563412, token, unixSeconds))
+        assertEquals(16, payload.size)
+        assertEquals(0x78563412, readU32(payload, 0))
+        assertContentEquals(token, payload.copyOfRange(4, 12))
+        assertEquals(unixSeconds, readU32(payload, 12))
+        assertEquals(DplsProtocol.Type.TIME_SYNC, DplsProtocol.Type.fromWire(0x0b))
+    }
+
+    @Test
+    fun timeSyncRejectsClearlyInvalidPhoneClock() {
+        val token = ByteArray(8) { it.toByte() }
+        assertNull(buildTimeSyncPayload(1, token, DplsProtocol.TIME_MIN_UNIX_SECONDS - 1))
+        assertNull(buildTimeSyncPayload(1, token, DplsProtocol.TIME_MAX_UNIX_SECONDS + 1))
+        assertNull(buildTimeSyncPayload(1, ByteArray(7), 1_786_732_800L))
+    }
 }
