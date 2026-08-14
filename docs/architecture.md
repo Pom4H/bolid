@@ -1,77 +1,101 @@
 # Architecture
 
-This document defines ownership boundaries in Test-DPLS. A change that moves safety or protocol responsibility across these boundaries should be treated as an architecture change, not a local refactor.
+This document defines ownership boundaries in Test-DPLS. Moving a responsibility across one of these boundaries is an architecture change, not a local refactor.
 
-## Components
+## Runtime model
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│ firmware/                                                   │
-│                                                             │
-│ portable C99 server ─────── PHY6252 HAL/GATT adapter        │
-│ safety · persistence · outputs · ATT TX serialization       │
-└───────────────────────────────┬─────────────────────────────┘
-                                │ Test-DPLS binary protocol
-┌───────────────────────────────▼─────────────────────────────┐
-│ mobile/core/                                                │
-│ protocol · domain · message contracts · session state       │
-└───────────────────────┬───────────────────────┬─────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ firmware/                                                    │
+│ portable C99 server + PHY6252 adapter                        │
+│ safety · persistence · outputs · ATT indication queue        │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ Test-DPLS binary protocol
+                               ▼
+┌──────────────────────────────────────────────────────────────┐
+│ mobile/core/src/commonMain                                   │
+│                                                              │
+│ frame/CRC · auth contracts · message parsers                 │
+│ domain/session state · deterministic rules · shared DplsApp  │
+└───────────────────────┬───────────────────────┬──────────────┘
                         │                       │
-              ┌─────────▼─────────┐   ┌────────▼──────────┐
-              │ mobile/android/   │   │ mobile/ios/       │
-              │ BluetoothGatt     │   │ CoreBluetooth     │
-              │ Compose           │   │ SwiftUI           │
-              └───────────────────┘   └───────────────────┘
+               DplsController            DplsController
+                        │                       │
+              ┌─────────▼──────────┐   ┌────────▼────────────┐
+              │ mobile/android/    │   │ core/src/iosMain/   │
+              │ BluetoothGatt      │   │ CoreBluetooth       │
+              │ service/permissions│   │ iOS controller      │
+              │ MainActivity       │   │ ComposeUIViewCtrl   │
+              └────────────────────┘   └────────┬────────────┘
+                                                │
+                                      ┌─────────▼──────────┐
+                                      │ mobile/ios/        │
+                                      │ Xcode shell/assets │
+                                      │ tiny Swift bootstrap│
+                                      └────────────────────┘
 ```
+
+Both platforms render the same `DplsApp` from `commonMain`. Platform code supplies a `DplsController` and handles operating-system APIs; it does not own a second screen tree or protocol implementation.
 
 ## Ownership rules
 
 ### Firmware owns safety
 
-Only firmware is allowed to decide whether an electrical test mode may remain energized. Mobile clients request actions; they never constitute the safety boundary.
+Only firmware decides whether an electrical test mode may remain energized. Mobile software requests actions; it is never the safety boundary.
 
 Firmware owns:
 
 - safe `NORMAL` state at boot/disconnect/error;
 - break-before-make output switching;
-- dangerous-mode timeout;
-- session timeout;
+- dangerous-mode and session timeouts;
 - reserve and real-short safety overrides;
 - persistent settings/authentication lock/event journal;
 - physical ADC/readback and board mapping;
-- ATT indication queue/confirmation timeout.
+- ATT indication serialization and confirmation timeout.
 
-A mobile bug must not be able to keep a dangerous output active indefinitely.
+A mobile crash or stale connection must not be able to keep a dangerous output active indefinitely.
 
-### `mobile/core` owns cross-platform semantics
+### `commonMain` owns shared application semantics
 
-Code belongs in `mobile/core` when Android and iOS must produce the same answer from the same input.
+Put code in `mobile/core/src/commonMain` when Android and iOS must produce the same answer or show the same application behavior.
 
-Core currently owns:
+It owns:
 
 - frame types and CRC-16/CCITT-FALSE;
 - binary encode/decode;
-- `STATE_REPORT`, device-info and journal parsing;
+- authentication byte contracts and known-answer crypto implementation;
+- `AUTH_*`, `COMMAND_RESULT`, `SETTINGS_RESULT`, `STATE_REPORT`, device-info and journal parsing;
 - shared domain types;
-- session identifiers/tokens/nonces and reset semantics;
-- deterministic session state transitions;
-- Swift-facing codec bridge.
+- session ids/tokens/nonces and reset semantics;
+- deterministic session transitions;
+- the Compose `DplsApp` screen tree.
 
-Core code must not import Android framework classes, CoreBluetooth, SwiftUI, Compose or global platform clocks.
+`commonMain` must not import Android framework APIs, CoreBluetooth, UIKit or other platform-only APIs.
 
-### Platform clients own adapters and presentation
+### Platform source owns operating-system adaptation
 
-`mobile/android` owns Android-specific BLE scanning, permissions, bonding/GATT recovery, lifecycle and Compose presentation.
+Android platform code owns:
 
-`mobile/ios` owns CoreBluetooth lifecycle, Apple platform integration and SwiftUI presentation.
+- runtime Bluetooth permissions;
+- bond/GATT recovery;
+- foreground service/lifecycle integration;
+- `BluetoothGatt` callbacks;
+- Android application entry point.
 
-Platform code may translate native events into core semantics, but it should not introduce a second framing/CRC/message parser implementation.
+iOS platform code in `core/src/iosMain` owns:
+
+- `CBCentralManager` / `CBPeripheral` callbacks;
+- secure random bytes from Apple Security;
+- reconnect behavior tied to CoreBluetooth;
+- the Compose `UIViewController` host.
+
+`mobile/ios` itself is only the Xcode product shell: signing, plist, assets and the minimal Swift entry point required to launch the exported Kotlin view controller.
+
+Platform adapters may translate native events into common state, but they must not introduce a duplicate frame codec, protocol parser, session model or application UI.
 
 ## Command truth model
 
 A successful BLE write is not proof that hardware entered the requested mode.
-
-The client state progression is:
 
 ```text
 operator request
@@ -79,57 +103,56 @@ operator request
     → firmware validates + applies/rejects
     → COMMAND_RESULT
     → STATE_REPORT
-    → UI reflects confirmed hardware state
+    → shared UI reflects confirmed hardware state
 ```
 
 The final `STATE_REPORT` is the application-visible source of truth.
-
-## Compatibility strategy
-
-Firmware is C and the mobile core is Kotlin Multiplatform. They share a wire contract, not a source-language runtime.
-
-Compatibility is protected by:
-
-- firmware protocol tests;
-- common CRC known-answer tests;
-- all-message round-trip tests;
-- randomized decoder tests;
-- binary message contract tests;
-- Kotlin/JVM and Kotlin/Native execution of the same core tests;
-- native Android/iOS integration tests.
-
-The PHY62XX SDK version is separately pinned in `firmware/sdk/phy6252-sdk.env`; updating it is not part of ordinary application refactoring.
 
 ## Dependency direction
 
 Allowed:
 
 ```text
-mobile/android → mobile/core
-mobile/ios     → DplsCore framework generated from mobile/core
-firmware       → vendor SDK through target adapter only
+mobile/android             → mobile/core/commonMain
+mobile/core/iosMain        → mobile/core/commonMain
+mobile/ios Xcode bootstrap → DplsCore framework
+firmware target adapter    → pinned vendor SDK
 ```
 
 Not allowed:
 
 ```text
-mobile/core → Android/iOS UI or Bluetooth APIs
+commonMain → Android/CoreBluetooth/UIKit APIs
 portable firmware/src → vendor SDK headers
-mobile platform code → a duplicate wire protocol implementation
+platform code → duplicate protocol/domain/UI implementations
+mobile app → hardware safety decisions
 ```
 
-## Testing policy
+## Test placement
 
-Coverage percentages are used only where they describe code that can be meaningfully unit-tested. Platform Bluetooth callback glue is not excluded from a broad `ble` percentage and then presented as if the entire subsystem were covered.
+Put a test at the lowest layer that can prove the behavior once:
 
-Quality gates instead combine:
+- firmware behavior → firmware host tests;
+- wire bytes/CRC/auth/message parsing → KMP common tests;
+- session transitions → KMP common tests;
+- Android framework integration → Android tests/lint/build;
+- iOS framework/export integration → Kotlin/Native tests + XCTest smoke;
+- physical outputs/BLE pairing/radio behavior → hardware bring-up/E2E.
 
-- compiler warnings as errors for project code;
-- firmware host tests + coverage + cppcheck;
-- KMP common tests on JVM and Kotlin/Native;
-- Android compatibility-facade coverage;
-- Android lint/build;
-- native iOS build/XCTest;
-- hardware bring-up/E2E for physical behavior.
+The common suite contains known-answer CRC and crypto vectors, all-message round trips, deterministic session tests, binary control/state/log contracts, 10,000 malformed decoder inputs and 2,000 randomized valid frame round trips.
 
-See [bring-up-checklist.md](bring-up-checklist.md) for hardware acceptance.
+Coverage percentages are only used where they describe unit-testable code honestly. Bluetooth callback glue is not excluded from a broad percentage and then presented as if the subsystem were covered.
+
+## Developer experience rule
+
+A developer adding an ordinary product feature should usually touch **one shared Kotlin area**, not Android + Swift copies.
+
+- screen/presentation → `mobile/core/src/commonMain/.../app/`
+- protocol contract → `mobile/core/src/commonMain/.../protocol/`
+- deterministic state/session rule → `mobile/core/src/commonMain/.../session/`
+- Android OS quirk → `mobile/android/`
+- iOS OS quirk → `mobile/core/src/iosMain/`
+
+Use `bash tools/check_mobile.sh` for the mobile loop and `bash tools/check_all.sh` for all host-side repository gates.
+
+The PHY62XX SDK remains independently pinned in `firmware/sdk/phy6252-sdk.env`; changing the SDK is not part of ordinary application work.
