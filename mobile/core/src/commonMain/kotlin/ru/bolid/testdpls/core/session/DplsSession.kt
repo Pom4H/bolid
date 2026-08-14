@@ -1,17 +1,8 @@
 package ru.bolid.testdpls.core.session
 
-import ru.bolid.testdpls.core.domain.ConnectionPhase
-import ru.bolid.testdpls.core.domain.DeviceState
-import ru.bolid.testdpls.core.domain.DplsUiState
 import ru.bolid.testdpls.core.protocol.putU32
 
-/**
- * Platform-independent Test-DPLS application session state.
- *
- * BLE implementations own transport/lifecycle details. Protocol sequence,
- * command ids, authentication material and UI-safe connection transitions live
- * here so Android and iOS cannot silently diverge.
- */
+/** Secret-bearing wire session state shared by the single mobile controller. */
 class DplsSessionRuntime {
     var sequence: Int = 1
     var commandId: Long = 1
@@ -42,9 +33,6 @@ class DplsSessionRuntime {
         }
 
     var initialized: Boolean = false
-    var awaitingDeviceInfo: Boolean = false
-    var legacyFirmware: Boolean = false
-    var reachedReady: Boolean = false
 
     fun nextSequence(): Int = sequence.also { sequence = (sequence + 1) and 0xffff }
     fun nextCommandId(): Long = commandId++
@@ -80,8 +68,6 @@ class DplsSessionRuntime {
         deviceNonce = ByteArray(16)
         authSalt = ByteArray(16)
         sessionId = 0
-        awaitingDeviceInfo = false
-        reachedReady = false
     }
 
     fun resetAll() {
@@ -90,75 +76,5 @@ class DplsSessionRuntime {
         sequence = 1
         commandId = 1
         initialized = false
-        legacyFirmware = false
     }
-}
-
-sealed interface SessionEvent {
-    data object Reset : SessionEvent
-    data object LinkLost : SessionEvent
-    data object Authenticating : SessionEvent
-    data object Authenticated : SessionEvent
-    data class StateReceived(val state: DeviceState, val nowMillis: Long) : SessionEvent
-    data object CommandStarted : SessionEvent
-    data class CommandCompleted(val nowMillis: Long) : SessionEvent
-    data class Failed(val message: String) : SessionEvent
-}
-
-fun reduceSession(state: DplsUiState, event: SessionEvent): DplsUiState = when (event) {
-    SessionEvent.Reset -> DplsUiState()
-    SessionEvent.LinkLost -> state.copy(
-        phase = ConnectionPhase.RECONNECTING,
-        statusText = "Восстановление связи…",
-        authenticated = false,
-        credentialsReady = false,
-        commandInProgress = false,
-        staleState = state.state != null,
-        identifyLedLive = false,
-        error = null,
-    )
-    SessionEvent.Authenticating -> state.copy(
-        phase = ConnectionPhase.AUTHENTICATING,
-        statusText = "Подключение…",
-        error = null,
-    )
-    SessionEvent.Authenticated -> state.copy(
-        phase = ConnectionPhase.SYNCHRONIZING,
-        statusText = "Чтение состояния…",
-        authenticated = true,
-        awaitingUserPassword = false,
-        identifyActive = false,
-        identifyLedLive = false,
-        error = null,
-    )
-    is SessionEvent.StateReceived -> state.copy(
-        phase = ConnectionPhase.READY,
-        statusText = "Состояние получено",
-        state = event.state,
-        deviceBootEpochSeconds = event.nowMillis / 1000 - event.state.uptimeSeconds,
-        authenticated = true,
-        identifyActive = false,
-        identifyLedLive = false,
-        commandInProgress = false,
-        staleState = false,
-        lastAckMillis = event.nowMillis,
-        error = null,
-    )
-    SessionEvent.CommandStarted -> state.copy(
-        commandInProgress = true,
-        pendingMode = null,
-        statusText = "Команда отправлена…",
-    )
-    is SessionEvent.CommandCompleted -> state.copy(
-        commandInProgress = false,
-        statusText = "Команда применена, чтение состояния…",
-        lastAckMillis = event.nowMillis,
-    )
-    is SessionEvent.Failed -> state.copy(
-        phase = ConnectionPhase.ERROR,
-        statusText = event.message,
-        error = event.message,
-        commandInProgress = false,
-        logProgress = null,
-    )
 }
