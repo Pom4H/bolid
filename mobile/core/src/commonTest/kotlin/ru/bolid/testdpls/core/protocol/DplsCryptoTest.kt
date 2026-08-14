@@ -7,7 +7,7 @@ class DplsCryptoTest {
     @Test
     fun sha256MatchesKnownAnswer() {
         assertContentEquals(
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".hexToBytesOrNull(),
+            requireNotNull("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".hexToBytesOrNull()),
             DplsCrypto.sha256("abc".encodeToByteArray()),
         )
     }
@@ -15,7 +15,7 @@ class DplsCryptoTest {
     @Test
     fun hmacSha256MatchesKnownAnswer() {
         assertContentEquals(
-            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8".hexToBytesOrNull(),
+            requireNotNull("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8".hexToBytesOrNull()),
             DplsCrypto.hmacSha256("key".encodeToByteArray(), "The quick brown fox jumps over the lazy dog".encodeToByteArray()),
         )
     }
@@ -23,7 +23,7 @@ class DplsCryptoTest {
     @Test
     fun pbkdf2Sha256MatchesKnownAnswer() {
         assertContentEquals(
-            "5ec02b91a4b59c6f59dd5fbe4ca649ece4fa8568cdb8ba36cf41426e8805522b".hexToBytesOrNull(),
+            requireNotNull("5ec02b91a4b59c6f59dd5fbe4ca649ece4fa8568cdb8ba36cf41426e8805522b".hexToBytesOrNull()),
             DplsCrypto.pbkdf2HmacSha256("password".encodeToByteArray(), "salt".encodeToByteArray(), 10_000, 32),
         )
     }
