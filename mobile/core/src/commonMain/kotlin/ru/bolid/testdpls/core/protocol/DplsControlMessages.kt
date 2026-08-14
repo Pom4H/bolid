@@ -59,3 +59,18 @@ fun parseSettingsResult(raw: ByteArray): SettingsResult? {
     if (raw.size < 5) return null
     return SettingsResult(readU32(raw, 0), raw[4].toInt() and 0xff)
 }
+
+/**
+ * TIME_SYNC payload: session_id (u32 LE) + session_token (8 B) + Unix UTC seconds (u32 LE).
+ * Returns null instead of emitting a bogus clock value if the phone clock is clearly unset.
+ */
+fun buildTimeSyncPayload(sessionId: Long, sessionToken: ByteArray, unixSeconds: Long): ByteArray? {
+    if (sessionToken.size != 8 || unixSeconds !in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS) {
+        return null
+    }
+    return ByteArray(16).also { payload ->
+        putU32(payload, 0, sessionId)
+        sessionToken.copyInto(payload, 4)
+        putU32(payload, 12, unixSeconds)
+    }
+}
