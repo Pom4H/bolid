@@ -239,7 +239,7 @@ fun DplsApp(
             items(state.eventLog, key = { it.sequence }) { e ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 9.dp)) {
                     Text(eventTitle(e), color = Color.White)
-                    Text("#${e.sequence} · +${formatUptime(e.timestampSeconds)}", color = Muted, fontSize = 11.sp)
+                    Text("#${e.sequence} · ${eventTimestampText(e.timestampSeconds)}", color = Muted, fontSize = 11.sp)
                 }
             }
         }
@@ -302,9 +302,4 @@ private fun eventTitle(e: EventRecord): String = when (e.type) {
     10 -> "Идентификация остановлена"
     11 -> "Пароль установлен"
     else -> "Событие ${e.type} · ${e.parameter}"
-}
-
-private fun formatUptime(value: Long): String {
-    fun two(value: Long): String = value.toString().padStart(2, '0')
-    return "${two(value / 3600)}:${two((value % 3600) / 60)}:${two(value % 60)}"
 }
