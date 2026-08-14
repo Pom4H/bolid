@@ -20,29 +20,9 @@ import platform.Foundation.NSError
 import platform.Foundation.NSNumber
 import platform.darwin.NSObject
 
-internal interface IosBleTransportListener {
-    fun onBluetoothAvailable() = Unit
-    fun onBluetoothUnavailable()
-    fun onDiscovered(device: IosDiscoveredDevice)
-    fun onConnected()
-    fun onSubscribed(writeLimit: Int)
-    fun onBytes(bytes: ByteArray)
-    fun onWriteComplete(errorCode: Long?)
-    fun onDisconnected(error: String?)
-    fun onTransportError(message: String)
-}
-
-internal data class IosDiscoveredDevice(
-    val address: String,
-    val name: String,
-    val deviceId: Long?,
-    val rssi: Int,
-)
-
-/** Thin CoreBluetooth adapter. It owns no Test-DPLS protocol or session semantics. */
-internal class IosBleTransport(
-    private val listener: IosBleTransportListener,
-) {
+/** Thin CoreBluetooth implementation of the shared [DplsTransport] boundary. */
+internal class IosBleTransport : DplsTransport {
+    private var listener: DplsTransportListener? = null
     private val serviceUuid = CBUUID.UUIDWithString(SERVICE_UUID)
     private val rxUuid = CBUUID.UUIDWithString(RX_UUID)
     private val txUuid = CBUUID.UUIDWithString(TX_UUID)
@@ -57,13 +37,12 @@ internal class IosBleTransport(
     private val delegate = object : NSObject(), CBCentralManagerDelegateProtocol, CBPeripheralDelegateProtocol {
         override fun centralManagerDidUpdateState(central: CBCentralManager) {
             if (central.state == CBManagerStatePoweredOn) {
-                listener.onBluetoothAvailable()
-                if (selectedAddress != null && peripheral == null) reconnect()
+                listener?.onBluetoothAvailable()
             } else {
                 peripheral = null
                 rx = null
                 resetWrites()
-                listener.onBluetoothUnavailable()
+                listener?.onBluetoothUnavailable()
             }
         }
 
@@ -82,7 +61,7 @@ internal class IosBleTransport(
             val name = localName ?: didDiscoverPeripheral.name ?: deviceId?.let {
                 "Test-DPLS-${(it and 0xffff).toString(16).uppercase().padStart(4, '0')}"
             } ?: "Test-DPLS"
-            listener.onDiscovered(IosDiscoveredDevice(address, name, deviceId, RSSI.intValue))
+            listener?.onDiscovered(DplsTransportDevice(address, name, deviceId, RSSI.intValue))
         }
 
         @ObjCSignatureOverride
@@ -93,7 +72,7 @@ internal class IosBleTransport(
             }
             peripheral = didConnectPeripheral
             didConnectPeripheral.delegate = this
-            listener.onConnected()
+            listener?.onConnected()
             didConnectPeripheral.discoverServices(listOf(serviceUuid))
         }
 
@@ -104,7 +83,7 @@ internal class IosBleTransport(
             error: NSError?,
         ) {
             if (didFailToConnectPeripheral.identifier.UUIDString != selectedAddress) return
-            listener.onDisconnected(error?.localizedDescription)
+            listener?.onDisconnected(error?.localizedDescription)
         }
 
         @ObjCSignatureOverride
@@ -117,21 +96,21 @@ internal class IosBleTransport(
             peripheral = null
             rx = null
             resetWrites()
-            listener.onDisconnected(error?.localizedDescription)
+            listener?.onDisconnected(error?.localizedDescription)
         }
 
         @ObjCSignatureOverride
         override fun peripheral(peripheral: CBPeripheral, didDiscoverServices: NSError?) {
             if (!isCurrent(peripheral)) return
             if (didDiscoverServices != null) {
-                listener.onTransportError("Поиск службы: ${didDiscoverServices.localizedDescription}")
+                listener?.onTransportError("Поиск службы: ${didDiscoverServices.localizedDescription}")
                 return
             }
             val service = peripheral.services
                 ?.filterIsInstance<CBService>()
                 ?.firstOrNull { it.UUID == serviceUuid }
             if (service == null) {
-                listener.onTransportError("Служба Test-DPLS не найдена")
+                listener?.onTransportError("Служба Test-DPLS не найдена")
                 return
             }
             peripheral.discoverCharacteristics(listOf(rxUuid, txUuid), service)
@@ -145,7 +124,7 @@ internal class IosBleTransport(
         ) {
             if (!isCurrent(peripheral)) return
             if (error != null) {
-                listener.onTransportError("Характеристики: ${error.localizedDescription}")
+                listener?.onTransportError("Характеристики: ${error.localizedDescription}")
                 return
             }
             val characteristics = didDiscoverCharacteristicsForService.characteristics
@@ -154,7 +133,7 @@ internal class IosBleTransport(
             rx = characteristics.firstOrNull { it.UUID == rxUuid }
             val notify = characteristics.firstOrNull { it.UUID == txUuid }
             if (rx == null || notify == null) {
-                listener.onTransportError("Служба Test-DPLS не найдена")
+                listener?.onTransportError("Служба Test-DPLS не найдена")
                 return
             }
             writeLimit = peripheral.maximumWriteValueLengthForType(CBCharacteristicWriteWithResponse)
@@ -171,10 +150,10 @@ internal class IosBleTransport(
         ) {
             if (!isCurrent(peripheral) || didUpdateNotificationStateForCharacteristic.UUID != txUuid) return
             if (error != null) {
-                listener.onTransportError("Подписка на BLE-события: ${error.localizedDescription}")
+                listener?.onTransportError("Подписка на BLE-события: ${error.localizedDescription}")
                 return
             }
-            listener.onSubscribed(writeLimit)
+            listener?.onSubscribed(writeLimit)
         }
 
         @ObjCSignatureOverride
@@ -185,10 +164,10 @@ internal class IosBleTransport(
         ) {
             if (!isCurrent(peripheral) || didUpdateValueForCharacteristic.UUID != txUuid) return
             if (error != null) {
-                listener.onTransportError("Ошибка BLE-индикации: ${error.localizedDescription}")
+                listener?.onTransportError("Ошибка BLE-индикации: ${error.localizedDescription}")
                 return
             }
-            didUpdateValueForCharacteristic.value?.let { listener.onBytes(it.toByteArrayCopy()) }
+            didUpdateValueForCharacteristic.value?.let { listener?.onBytes(it.toByteArrayCopy()) }
         }
 
         @ObjCSignatureOverride
@@ -199,14 +178,18 @@ internal class IosBleTransport(
         ) {
             if (!isCurrent(peripheral) || didWriteValueForCharacteristic.UUID != rxUuid) return
             writeInProgress = false
-            listener.onWriteComplete(error?.code)
+            listener?.onWriteComplete(error?.code)
             drainWrites()
         }
     }
 
     private val central = CBCentralManager(delegate = delegate, queue = null)
 
-    fun startScan(): Boolean {
+    override fun setListener(listener: DplsTransportListener) {
+        this.listener = listener
+    }
+
+    override fun startScan(): Boolean {
         if (central.state != CBManagerStatePoweredOn) return false
         central.stopScan()
         central.scanForPeripheralsWithServices(
@@ -216,9 +199,9 @@ internal class IosBleTransport(
         return true
     }
 
-    fun stopScan() = central.stopScan()
+    override fun stopScan() = central.stopScan()
 
-    fun connect(address: String): Boolean {
+    override fun connect(address: String): Boolean {
         val target = known[address] ?: return false
         stopScan()
         disconnect(clearSelection = false)
@@ -229,9 +212,9 @@ internal class IosBleTransport(
         return true
     }
 
-    fun reconnect(): Boolean = selectedAddress?.let(::connect) ?: false
+    override fun reconnect(): Boolean = selectedAddress?.let(::connect) ?: false
 
-    fun send(bytes: ByteArray, priority: Boolean = false, flush: Boolean = false): Boolean {
+    override fun send(bytes: ByteArray, priority: Boolean, flush: Boolean): Boolean {
         if (bytes.size > writeLimit) return false
         if (flush) resetWrites()
         if (priority) writeQueue.addFirst(bytes.copyOf()) else writeQueue.addLast(bytes.copyOf())
@@ -239,7 +222,7 @@ internal class IosBleTransport(
         return true
     }
 
-    fun disconnect(clearSelection: Boolean = true) {
+    override fun disconnect(clearSelection: Boolean) {
         stopScan()
         peripheral?.let(central::cancelPeripheralConnection)
         peripheral = null
@@ -248,7 +231,13 @@ internal class IosBleTransport(
         if (clearSelection) selectedAddress = null
     }
 
-    fun hasConnection(): Boolean = peripheral != null && rx != null
+    override fun hasConnection(): Boolean = peripheral != null && rx != null
+
+    override fun close() {
+        disconnect(clearSelection = true)
+        listener = null
+        known.clear()
+    }
 
     private fun isCurrent(candidate: CBPeripheral): Boolean = peripheral === candidate
 
