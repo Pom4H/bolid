@@ -1,15 +1,14 @@
 #include "dpls_ble_identity.h"
 
 #include "OSAL.h"
+#include "flash.h"
 #include "gap.h"
 #include "hci.h"
 #include "ll_enc.h"
 #include "osal_snv.h"
 #include "peripheral.h"
-#include "flash.h"
 #include <string.h>
 
-#define DPLS_CHIP_MAC_FLASH_ADDR 0x4000u
 #define DPLS_BLE_MAC_SNV_ID 0x82u
 #define DPLS_BLE_MAC_MAGIC 0x43414D44u /* "DMAC" */
 
@@ -17,6 +16,11 @@ typedef struct {
     uint32_t magic;
     uint8_t addr[B_ADDR_LEN];
 } dpls_ble_mac_record_t;
+
+/* PHY62XX SDK 3.1.2 defines this object in flash.c but omits the extern from
+ * flash.h. Use the vendor decoder/state instead of depending on a raw flash
+ * offset or reimplementing the one-hot factory-MAC format here. */
+extern chipMAddr_t g_chipMAddr;
 
 static uint8_t s_identity_mac[B_ADDR_LEN];
 static bool s_identity_mac_valid;
@@ -36,33 +40,25 @@ static bool key_is_invalid(const uint8_t *key)
     return buffer_is_fill(key, 0x00, KEYLEN) || buffer_is_fill(key, 0xFF, KEYLEN);
 }
 
-static void read_chip_mac(uint8_t out[B_ADDR_LEN])
+static bool read_factory_mac(uint8_t out[B_ADDR_LEN])
 {
-    uint32_t addr = DPLS_CHIP_MAC_FLASH_ADDR;
-    hal_flash_read(addr++, &out[3], 1);
-    hal_flash_read(addr++, &out[2], 1);
-    hal_flash_read(addr++, &out[1], 1);
-    hal_flash_read(addr++, &out[0], 1);
-    hal_flash_read(addr++, &out[5], 1);
-    hal_flash_read(addr, &out[4], 1);
+    uint8_t i;
+
+    check_chip_mAddr();
+    if (g_chipMAddr.chipMAddrStatus != CHIP_ID_VALID) return false;
+
+    /* flash.c decodes the programmed words into controller B_ADDR byte order.
+     * DPLS keeps the identity in human/display order, so reverse it here. */
+    for (i = 0; i < B_ADDR_LEN; ++i) {
+        out[i] = g_chipMAddr.mAddr[B_ADDR_LEN - 1u - i];
+    }
+    return !mac_is_invalid(out);
 }
 
 static bool snv_mac_is_usable(const uint8_t mac[B_ADDR_LEN])
 {
     /* Older builds stored static-random addresses; SMP needs public identity. */
     return !mac_is_invalid(mac) && (mac[0] & 0xC0u) != 0xC0u;
-}
-
-static void write_chip_mac_flash(const uint8_t mac[B_ADDR_LEN])
-{
-    uint32_t addr = DPLS_CHIP_MAC_FLASH_ADDR;
-    uint8_t byte;
-    byte = mac[3]; (void)hal_flash_write(addr++, &byte, 1);
-    byte = mac[2]; (void)hal_flash_write(addr++, &byte, 1);
-    byte = mac[1]; (void)hal_flash_write(addr++, &byte, 1);
-    byte = mac[0]; (void)hal_flash_write(addr++, &byte, 1);
-    byte = mac[5]; (void)hal_flash_write(addr++, &byte, 1);
-    byte = mac[4]; (void)hal_flash_write(addr, &byte, 1);
 }
 
 static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
@@ -122,18 +118,9 @@ static uint8_t identity_addr_type(const uint8_t display_mac[B_ADDR_LEN])
 
 static bool ensure_mac(uint8_t mac[B_ADDR_LEN])
 {
-    bool chip_invalid;
-    read_chip_mac(mac);
-    chip_invalid = mac_is_invalid(mac);
-    if (!chip_invalid) {
-        return set_controller_public_addr(mac);
-    }
-    if (read_mac_snv(mac)) {
-        if (chip_invalid) write_chip_mac_flash(mac);
-        return set_controller_public_addr(mac);
-    }
+    if (read_factory_mac(mac)) return set_controller_public_addr(mac);
+    if (read_mac_snv(mac)) return set_controller_public_addr(mac);
     if (!generate_mac(mac) || !write_mac_snv(mac)) return false;
-    write_chip_mac_flash(mac);
     return set_controller_public_addr(mac);
 }
 
