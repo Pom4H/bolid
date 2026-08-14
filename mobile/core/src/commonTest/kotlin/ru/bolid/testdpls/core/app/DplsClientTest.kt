@@ -65,17 +65,20 @@ class DplsClientTest {
         assertEquals(DplsProtocol.Type.MODE_SET, command.type)
         assertTrue(client.uiState.value.commandInProgress)
 
-        val commandResult = ByteArray(8)
-        putU32(commandResult, 0, 1)
-        commandResult[4] = 0
-        commandResult[5] = DplsMode.SHORT_1.wire.toByte()
-        putU16(commandResult, 6, 30)
-        transport.receive(DplsProtocol.Type.COMMAND_RESULT, commandResult)
+        val staleResult = commandResult(commandId = 999, mode = DplsMode.SHORT_1)
+        transport.receive(DplsProtocol.Type.COMMAND_RESULT, staleResult)
+        assertTrue(client.uiState.value.commandInProgress)
+        assertEquals(DplsProtocol.Type.MODE_SET, transport.lastFrame().type)
+
+        transport.receive(
+            DplsProtocol.Type.COMMAND_RESULT,
+            commandResult(commandId = 1, mode = DplsMode.SHORT_1),
+        )
+        assertFalse(client.uiState.value.commandInProgress)
         assertEquals(DplsProtocol.Type.STATE_GET, transport.lastFrame().type)
 
         transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.SHORT_1, revision = 2))
         assertEquals(DplsMode.SHORT_1, client.uiState.value.state?.mode)
-        assertFalse(client.uiState.value.commandInProgress)
 
         client.disconnect()
         assertEquals(ConnectionPhase.IDLE, client.uiState.value.phase)
@@ -116,6 +119,13 @@ class DplsClientTest {
         assertEquals(ConnectionPhase.RECONNECTING, client.uiState.value.phase)
         assertTrue(client.uiState.value.staleState)
         client.close()
+    }
+
+    private fun commandResult(commandId: Long, mode: DplsMode): ByteArray = ByteArray(8).also { raw ->
+        putU32(raw, 0, commandId)
+        raw[4] = 0
+        raw[5] = mode.wire.toByte()
+        putU16(raw, 6, 30)
     }
 
     private fun statePayload(mode: DplsMode, revision: Long): ByteArray = ByteArray(25).also { raw ->
