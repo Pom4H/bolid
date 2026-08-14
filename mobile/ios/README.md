@@ -1,47 +1,57 @@
-# Test-DPLS for iOS
+# Test-DPLS iOS host
 
-Native iOS host for Test-DPLS. CoreBluetooth and SwiftUI stay platform-native; protocol framing and other cross-platform semantics are provided by the Kotlin Multiplatform `DplsCore` module in `../core/`.
+This directory is intentionally small. The iOS application UI, Test-DPLS protocol/session logic and CoreBluetooth implementation are Kotlin code in `../core/`.
 
-## Boundary
+## What remains here
 
-| Layer | Responsibility |
+| Path | Responsibility |
 |---|---|
-| `../core/` | CRC, framing, binary contracts, domain/session primitives |
-| `TestDPLS/Protocol/DplsProtocol.swift` | Thin Swift compatibility facade over `DplsCore` |
-| `TestDPLS/BLE/BleClient.swift` | CoreBluetooth lifecycle and platform orchestration |
-| `TestDPLS/BLE/DplsCrypto.swift` | Apple crypto adapter for PBKDF2/HMAC |
-| `TestDPLS/UI/` | SwiftUI screens |
-| `TestDPLSTests/` | Native iOS integration/compatibility tests |
+| `TestDPLS/TestDPLSApp.swift` | Minimal SwiftUI/Xcode bootstrap that displays the Compose `UIViewController` |
+| `TestDPLS/Info.plist` | Bluetooth permissions, background mode and app metadata |
+| `TestDPLS/Resources/` | App icon and assets |
+| `TestDPLSTests/` | Native smoke test that verifies the exported KMP entry point |
+| `TestDPLS.xcodeproj/` | Signing, build settings and Gradle framework integration |
 
-`DplsProtocol.swift` does not implement a second CRC or frame codec. It converts small BLE frames to a primitive/String interop representation and delegates encode/decode/CRC to `DplsCore`.
+There is deliberately no Swift BLE client, protocol codec, domain model, crypto implementation or duplicate SwiftUI screen tree.
+
+The actual iOS implementation lives in:
+
+```text
+../core/src/iosMain/.../IosBleTransport.kt   CoreBluetooth callbacks + writes
+../core/src/iosMain/.../IosDplsController.kt iOS lifecycle/controller adapter
+../core/src/iosMain/.../IosApp.kt            Compose UIViewController entry point
+../core/src/commonMain/.../DplsApp.kt         shared Android+iOS UI
+```
 
 ## Xcode integration
 
-The app target contains a `Build DplsCore` phase before `Compile Sources`. The phase runs:
+The `Build DplsCore` phase runs before Swift compilation:
 
 ```sh
 cd "$SRCROOT/.."
 ./gradlew :core:embedAndSignAppleFrameworkForXcode
 ```
 
-The app imports the resulting framework as `DplsCore`. User Script Sandboxing is disabled for the app target because the Gradle integration needs access to the shared build outputs.
-
-## Build and test
+Swift imports `DplsCore` and calls `IosAppKt.MainViewController()`. That is the entire application bridge.
 
 Requirements: macOS, Xcode and Java 17.
-
-```sh
-open mobile/ios/TestDPLS.xcodeproj
-```
-
-For a simulator build from the repository root:
 
 ```sh
 cd mobile
 ./gradlew :core:iosSimulatorArm64Test
 ./gradlew :core:linkDebugFrameworkIosSimulatorArm64
-cd ..
+open ios/TestDPLS.xcodeproj
+```
 
+Or from the repository root:
+
+```sh
+bash tools/check_mobile.sh
+```
+
+To run XCTest from the command line:
+
+```sh
 xcodebuild test \
   -project mobile/ios/TestDPLS.xcodeproj \
   -scheme TestDPLS \
@@ -49,21 +59,12 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-For a real iPhone, select a development team in Signing & Capabilities and run the `TestDPLS` scheme. BLE behavior should be validated on hardware; the simulator is primarily for compilation, shared-core tests and UI/native unit tests.
+For a real iPhone, choose a development team in Signing & Capabilities and run the `TestDPLS` scheme. The simulator validates compilation, shared-core tests and host integration; BLE behavior must be accepted on real hardware.
 
-## BLE service
+## iOS-specific rules
 
-| Item | UUID |
-|---|---|
-| Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` |
-| RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
-| TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
-
-The app treats a test mode as applied only after the device returns `COMMAND_RESULT` followed by the corresponding `STATE_REPORT`.
-
-## iOS-specific behavior
-
-- Device identity exposed to the UI is based on `CBPeripheral.identifier`; iOS does not expose a BLE MAC address to applications.
-- Write capacity comes from `maximumWriteValueLength(for: .withResponse)`; the CoreBluetooth stack owns ATT MTU negotiation.
-- Pairing is initiated by iOS when the app writes to the protected RX characteristic.
-- Platform lifecycle/reconnect behavior remains in the native adapter; protocol compatibility must not depend on CoreBluetooth callbacks.
+- iOS device identity exposed to the app is `CBPeripheral.identifier`; applications do not receive a BLE MAC address.
+- CoreBluetooth owns ATT MTU negotiation; the adapter uses the maximum write length reported for `.withResponse`.
+- Pairing is initiated by iOS when protected GATT access requires it.
+- CoreBluetooth callbacks must stay in `iosMain`; protocol parsing and application screens must stay in `commonMain`.
+- Do not add Swift wrappers around common Kotlin APIs unless an Apple framework genuinely requires a Swift-only boundary.
