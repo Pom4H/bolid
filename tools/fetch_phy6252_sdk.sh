@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Fetch the complete PHY62XX SDK 3.1.2 at the commit pinned in
-# Firmware/sdk/phy6252-sdk.env. The vendor tree stays outside version control;
-# our product target is kept separately under Firmware/targets/phy6252.
+# firmware/sdk/phy6252-sdk.env. The fetched vendor SDK stays outside version
+# control; the product target is maintained under firmware/targets/phy6252.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
-source "$ROOT/Firmware/sdk/phy6252-sdk.env"
+source "$ROOT/firmware/sdk/phy6252-sdk.env"
 SDK_DIR="$ROOT/$PHY6252_SDK_DIR"
 
 if [ -d "$SDK_DIR/.git" ]; then

@@ -6,26 +6,26 @@ pb03f-original-flash-2026-07-10.bin
 wch-driver/
 
 **/.venv/
-pvvx-PHY62x2/.venv/
+third_party/phy62x2/.venv/
 
-Firmware/build/
-Firmware/build-cov/
-Firmware/sdk/PHY62XX_SDK_3.1.2/
-Firmware/sdk/release_bbb_sdk-*/
-Firmware/sdk/**/ac6/out/
-Firmware/sdk/**/ac6/tmp/
-Firmware/sdk/**/ac6/*.cbuild-idx.yml
-Firmware/sdk/**/ac6/*.cbuild-pack.yml
-Firmware/targets/phy6252/out/
-Firmware/targets/phy6252/tmp/
-Firmware/targets/phy6252/build/
-Firmware/targets/phy6252/RTE/
-Firmware/targets/phy6252/*.cbuild-idx.yml
-Firmware/targets/phy6252/*.cbuild-pack.yml
+firmware/build/
+firmware/build-cov/
+firmware/sdk/PHY62XX_SDK_3.1.2/
+firmware/sdk/release_bbb_sdk-*/
+firmware/sdk/**/ac6/out/
+firmware/sdk/**/ac6/tmp/
+firmware/sdk/**/ac6/*.cbuild-idx.yml
+firmware/sdk/**/ac6/*.cbuild-pack.yml
+firmware/targets/phy6252/out/
+firmware/targets/phy6252/tmp/
+firmware/targets/phy6252/build/
+firmware/targets/phy6252/RTE/
+firmware/targets/phy6252/*.cbuild-idx.yml
+firmware/targets/phy6252/*.cbuild-pack.yml
 **/.ninja_log
 
-TestDPLS/**/build/
-TestDPLS/.gradle/
-TestDPLS/local.properties
+mobile/**/build/
+mobile/.gradle/
+mobile/local.properties
 
 **/__pycache__/

@@ -8,11 +8,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET="$ROOT/Firmware/targets/phy6252"
+TARGET="$ROOT/firmware/targets/phy6252"
 TOOLCHAIN="keil"
 OUT="$ROOT/tmp/test-dpls.hex"
 REGION_ROOT=""
-
 BUILD_LOG=""
 
 usage() {
@@ -30,24 +29,14 @@ reject_warnings() {
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage ;;
-        keil|ac6|gcc)
-            TOOLCHAIN="$1"
-            shift
-            ;;
-        *)
-            OUT="$1"
-            shift
-            ;;
+        keil|ac6|gcc) TOOLCHAIN="$1"; shift ;;
+        *) OUT="$1"; shift ;;
     esac
 done
-if [ "$TOOLCHAIN" = "ac6" ]; then
-    TOOLCHAIN="keil"
-fi
+if [ "$TOOLCHAIN" = "ac6" ]; then TOOLCHAIN="keil"; fi
 
 cleanup() {
-    if [ -n "$REGION_ROOT" ]; then
-        rm -rf "$REGION_ROOT"
-    fi
+    if [ -n "$REGION_ROOT" ]; then rm -rf "$REGION_ROOT"; fi
 }
 trap cleanup EXIT
 
@@ -86,8 +75,6 @@ build_keil() {
         fi
     done
 
-    # fromelf emits an entry-point record in every region. The PHY62x2 flasher
-    # stops parsing at the first such record, so keep it only on ER_IROM1.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
@@ -112,8 +99,4 @@ build_gcc() {
     echo "hex: $OUT"
 }
 
-if [ "$TOOLCHAIN" = "gcc" ]; then
-    build_gcc
-else
-    build_keil
-fi
+if [ "$TOOLCHAIN" = "gcc" ]; then build_gcc; else build_keil; fi

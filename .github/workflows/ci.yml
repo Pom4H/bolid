@@ -6,8 +6,17 @@ on:
   pull_request:
 
 jobs:
+  repository-contract:
+    name: Repository layout + wire smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify repository layout
+        run: bash tools/check_repo_layout.sh
+      - name: Verify language-neutral wire contract
+        run: python3 tools/test_dpls_protocol_crc.py
+
   firmware-host-tests:
-    # Portable DPLS core: -Wall -Wextra -Werror, ctest, 80% coverage, cppcheck.
     name: Firmware host tests + lint
     runs-on: ubuntu-latest
     steps:
@@ -42,36 +51,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' Firmware/phy6252/dpls_board.h
-          # The sampler derives its channel from the pin macros above, so the
-          # mapping is checked where it now lives instead of in the driver.
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' Firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' Firmware/phy6252/dpls_board.h
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' Firmware/phy6252/dpls_phy6252_app.c
-          # P11 drives the RGB green channel, so it must never be sampled.
-          ! grep -q 'ADC_CH1N_P11' Firmware/phy6252/dpls_board.h Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_ADC_NEED_ALL' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_2_VALID' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_T_VALID' Firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'STATE_REFRESH_MS = 1_000L' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
-          grep -q 'port2VoltageValid' TestDPLS/app/src/main/java/ru/bolid/testdpls/ble/DplsWire.kt
+          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' firmware/phy6252/dpls_board.h
+          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' firmware/phy6252/dpls_board.h
+          grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
+          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'STATE_REFRESH_MS = 1_000L' mobile/android/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
+          grep -q 'port2VoltageValid' mobile/android/src/main/java/ru/bolid/testdpls/ble/DplsWire.kt
           test -f docs/live-voltage-requirements.md
 
   android:
-    name: Android lint, tests, debug APK
+    name: Core + Android lint, tests, debug APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -81,19 +88,62 @@ jobs:
           java-version: "17"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
-      - name: Unit tests + coverage
-        working-directory: TestDPLS
-        run: ./gradlew testDebugUnitTest koverVerifyDebug koverXmlReportDebug
+      - name: Core tests
+        working-directory: mobile
+        run: ./gradlew :core:testDebugUnitTest
+      - name: Android unit tests + coverage
+        working-directory: mobile
+        run: ./gradlew :android:testDebugUnitTest :android:koverVerifyDebug :android:koverXmlReportDebug
       - name: Upload Android coverage
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: android-kover
-          path: TestDPLS/app/build/reports/kover/
+          path: mobile/android/build/reports/kover/
           if-no-files-found: warn
       - name: Lint
-        working-directory: TestDPLS
-        run: ./gradlew lintDebug
+        working-directory: mobile
+        run: ./gradlew :core:lintDebug :android:lintDebug
       - name: Assemble debug APK
-        working-directory: TestDPLS
-        run: ./gradlew assembleDebug
+        working-directory: mobile
+        run: ./gradlew :android:assembleDebug
+
+  ios:
+    name: Kotlin/Native core + iOS tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+      - name: Core tests on Kotlin/Native
+        working-directory: mobile
+        run: ./gradlew :core:iosSimulatorArm64Test
+      - name: Compile core framework for iOS simulator
+        working-directory: mobile
+        run: ./gradlew :core:linkDebugFrameworkIosSimulatorArm64
+      - name: Select available iPhone simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)["devices"]
+          for runtime in data.values():
+              for d in runtime:
+                  if d.get("isAvailable") and d.get("name", "").startswith("iPhone"):
+                      print(d["udid"])
+                      raise SystemExit
+          raise SystemExit("no available iPhone simulator")')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+      - name: Run native iOS XCTest suite
+        run: |
+          xcodebuild test \
+            -project mobile/ios/TestDPLS.xcodeproj \
+            -scheme TestDPLS \
+            -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
+            CODE_SIGNING_ALLOWED=NO

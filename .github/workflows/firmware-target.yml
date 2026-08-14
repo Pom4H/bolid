@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "Firmware/**"
+      - "firmware/**"
       - "tools/build_firmware.sh"
       - "tools/fetch_phy6252_sdk.sh"
       - ".github/workflows/firmware-target.yml"
   push:
     branches: [main]
     paths:
-      - "Firmware/**"
+      - "firmware/**"
       - "tools/build_firmware.sh"
       - "tools/fetch_phy6252_sdk.sh"
       - ".github/workflows/firmware-target.yml"
@@ -39,8 +39,8 @@ jobs:
       - name: Activate CMSIS Toolbox and Arm Compiler 6
         uses: ARM-software/cmsis-actions/vcpkg@v1
         with:
-          config: Firmware/targets/phy6252/vcpkg-configuration.json
-          cache: phy6252-keil-ac6-${{ hashFiles('Firmware/targets/phy6252/vcpkg-configuration.json') }}
+          config: firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
       - name: Build
@@ -49,8 +49,8 @@ jobs:
           set -o pipefail
           mkdir -p tmp
           bash tools/build_firmware.sh keil tmp/test-dpls.hex 2>&1 | tee tmp/keil-build.log
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
-          cp Firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -86,6 +86,6 @@ jobs:
           path: |
             tmp/gcc-build.log
             tmp/test-dpls-gcc.hex
-            Firmware/targets/phy6252/build/test-dpls.elf
-            Firmware/targets/phy6252/build/test-dpls.map
+            firmware/targets/phy6252/build/test-dpls.elf
+            firmware/targets/phy6252/build/test-dpls.map
           if-no-files-found: error

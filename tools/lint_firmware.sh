@@ -22,8 +22,8 @@ cppcheck \
     --suppress=missingIncludeSystem \
     --suppress=assertWithSideEffect \
     --suppress=unmatchedSuppression \
-    -I "$ROOT/Firmware/include" \
-    "$ROOT/Firmware/src" \
-    "$ROOT/Firmware/include" \
-    "$ROOT/Firmware/tests" \
+    -I "$ROOT/firmware/include" \
+    "$ROOT/firmware/src" \
+    "$ROOT/firmware/include" \
+    "$ROOT/firmware/tests" \
     2> >(tee "$REPORT" >&2)
