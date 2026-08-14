@@ -29,12 +29,7 @@ import ru.bolid.testdpls.core.app.DplsTransport
 import ru.bolid.testdpls.core.app.DplsTransportDevice
 import ru.bolid.testdpls.core.app.DplsTransportListener
 
-/**
- * Android-only BluetoothGatt adapter.
- *
- * This class deliberately knows nothing about Test-DPLS frames, authentication,
- * modes, journal transfer or UI state. Those live in common [DplsClient].
- */
+/** Android-only BluetoothGatt adapter. Product semantics live in common DplsClient. */
 class AndroidBleTransport(context: Context) : DplsTransport {
     private val appContext = context.applicationContext
     private val adapter = appContext.getSystemService(BluetoothManager::class.java).adapter
@@ -126,12 +121,8 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         if (!adapter.isEnabled) return false
         stopScan()
         scanning = true
-        val filters = listOf(
-            ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build(),
-        )
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
+        val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build())
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         scanner.startScan(filters, settings, scanCallback)
         return true
     }
@@ -180,7 +171,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         pairing = false
         subscribed = false
         resetWrites()
-        if (clearSelection) selectedAddress = null
+        if (clearSelection) {
+            selectedAddress = null
+            preSubscribeGatt133Count = 0
+        }
     }
 
     override fun hasConnection(): Boolean = gatt != null && rx != null && subscribed
@@ -209,14 +203,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val name = record.deviceName ?: result.device.name ?: deviceId?.let {
             "Test-DPLS-${(it and 0xffff).toString(16).uppercase().padStart(4, '0')}"
         } ?: "Test-DPLS"
-        listener?.onDiscovered(
-            DplsTransportDevice(
-                address = result.device.address,
-                name = name,
-                deviceId = deviceId,
-                rssi = result.rssi,
-            ),
-        )
+        listener?.onDiscovered(DplsTransportDevice(result.device.address, name, deviceId, result.rssi))
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -228,7 +215,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             }
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 listener?.onConnected()
-                preSubscribeGatt133Count = 0
                 when (current.device.bondState) {
                     BluetoothDevice.BOND_BONDED -> beginGattNegotiation()
                     BluetoothDevice.BOND_BONDING -> {
@@ -316,6 +302,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 return
             }
             subscribed = true
+            preSubscribeGatt133Count = 0
             listener?.onSubscribed((negotiatedMtu - ATT_HEADER_BYTES).coerceAtLeast(20))
         }
 
@@ -357,11 +344,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
         pendingWrite = bytes
-        val result = current.writeCharacteristic(
-            characteristic,
-            bytes,
-            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
-        )
+        val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
         if (result != BluetoothStatusCodes.SUCCESS) {
             writeInProgress = false
             completeWrite(result)
@@ -377,7 +360,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             drainWriteQueue()
             return
         }
-
         val retry = pendingWrite
         pendingWrite = null
         if (retry != null && status in TRANSIENT_WRITE_STATUSES && writeRetryCount < MAX_WRITE_RETRIES) {
