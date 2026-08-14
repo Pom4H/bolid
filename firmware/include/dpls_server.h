@@ -12,8 +12,12 @@
 /* Firmware version reported in DEVICE_INFO_REPORT (semantic-ish). Bump on
  * behaviour changes visible to the operator app. */
 #define DPLS_FW_VERSION_MAJOR 1u
-#define DPLS_FW_VERSION_MINOR 2u
-#define DPLS_FW_VERSION_PATCH 1u
+#define DPLS_FW_VERSION_MINOR 3u
+#define DPLS_FW_VERSION_PATCH 0u
+/* Authenticated TIME_SYNC accepts sane UTC values only. This catches an unset
+ * phone clock without making the safety timers depend on wall-clock time. */
+#define DPLS_TIME_MIN_UNIX_SECONDS 1577836800u /* 2020-01-01T00:00:00Z */
+#define DPLS_TIME_MAX_UNIX_SECONDS 4102444799u /* 2099-12-31T23:59:59Z */
 /* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
  * features the hardware/firmware does not actually provide. */
 enum {
@@ -188,6 +192,14 @@ typedef struct {
     uint32_t last_auth_proof_ms;
     uint32_t boot_ms;
     uint32_t now_ms;
+    /* Wall clock is deliberately separate from now_ms. now_ms remains the only
+     * source for safety/session/mode deadlines; TIME_SYNC merely anchors UTC
+     * for journal timestamps. It is RAM-only and therefore invalid after a
+     * cold boot until an authenticated phone synchronizes it again. */
+    bool wall_clock_valid;
+    uint32_t wall_clock_unix_seconds;
+    uint32_t wall_clock_last_ms;
+    uint16_t wall_clock_fraction_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
     uint32_t mode_deadline_ms;
