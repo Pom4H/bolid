@@ -71,7 +71,8 @@ test "$(find mobile/android/src/main/java/ru/bolid/testdpls/ble -type f -name '*
 
 # PHY6252 integration must use the supported SDK boundary instead of reaching
 # into Link Layer RAM or an obsolete raw-MAC flash slot. Target manifests must
-# not re-add drivers that DPLS does not use.
+# not compile unused example drivers. The key include path is intentionally
+# retained because vendor halPeripheral.h includes key.h transitively.
 identity=firmware/phy6252/dpls_ble_identity.c
 gnu_target=firmware/targets/phy6252/Makefile
 ac6_target=firmware/targets/phy6252/test-dpls.cproject.yml
@@ -80,9 +81,11 @@ grep -q 'check_chip_mAddr' "$identity"
 ! grep -q '0x1fff0965' "$identity"
 ! grep -q 'DPLS_CHIP_MAC_FLASH_ADDR' "$identity"
 ! grep -q '0x4000u' "$identity"
-for driver in key pwm led_light; do
-  ! grep -q "components/driver/$driver" "$gnu_target"
-  ! grep -q "components/driver/$driver" "$ac6_target"
+grep -q 'components/driver/key' "$gnu_target"
+grep -q 'components/driver/key' "$ac6_target"
+for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
+  ! grep -q "components/driver/$source" "$gnu_target"
+  ! grep -q "components/driver/$source" "$ac6_target"
 done
 
 echo "OK: repository layout and ownership boundaries"
