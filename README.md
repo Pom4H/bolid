@@ -2,20 +2,20 @@
 
 Firmware and mobile software for a BLE-controlled DPLS test device based on PHY6252 / PB-03F.
 
-The repository has three ownership rules:
+The repository follows three ownership rules:
 
 1. **firmware owns hardware safety**;
-2. **Kotlin `commonMain` owns behavior shared by Android and iOS**;
-3. **platform code only adapts OS APIs and application entry points**.
+2. **Kotlin `commonMain` owns the product behavior shared by Android and iOS**;
+3. **platform code only adapts operating-system APIs and application entry points**.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
-| `mobile/core/` | Kotlin Multiplatform protocol, crypto contract, domain/session state and shared Compose UI |
-| `mobile/android/` | Android BluetoothGatt/service/permission adapter and Activity shell |
-| `mobile/ios/` | Minimal Xcode host: app metadata, assets and a tiny Swift bootstrap |
+| `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
+| `mobile/android/` | `BluetoothGatt` transport, permissions/service shell and Android entry point |
+| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap |
 | `docs/` | Architecture, bring-up and PHY6252 engineering references |
 | `tools/` | Build, flash, lint, coverage and one-command checks |
 | `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
@@ -24,40 +24,38 @@ The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK comm
 
 ## Mobile architecture
 
-There is one application UI and one cross-platform protocol/session implementation:
+There is one application controller, one UI and one protocol implementation:
 
 ```text
-                         Test-DPLS BLE wire contract
-                                  │
-                         ┌────────▼────────┐
-                         │ mobile/core/    │
-                         │ commonMain      │
-                         │                │
-                         │ protocol/CRC   │
-                         │ auth contracts │
-                         │ domain/session │
-                         │ message parser │
-                         │ DplsApp Compose│
-                         └───────┬────────┘
-                                 │
-                  ┌──────────────┴──────────────┐
-                  │                             │
-         Android platform edge           iOS platform edge
-         mobile/android/                 mobile/core/iosMain
-         BluetoothGatt                   CoreBluetooth
-         service/permissions             IosDplsController
-         MainActivity                    IosBleTransport
-                  │                             │
-                  │                      mobile/ios/
-                  │                      Xcode + ~bootstrap Swift
-                  └──────── same DplsApp UI ────┘
+                    Test-DPLS BLE wire contract
+                              │
+                    ┌─────────▼──────────┐
+                    │ mobile/core/       │
+                    │ commonMain         │
+                    │                    │
+                    │ DplsClient         │
+                    │ protocol + crypto  │
+                    │ domain + session   │
+                    │ message parsers    │
+                    │ DplsApp Compose UI │
+                    └─────────┬──────────┘
+                              │ DplsTransport
+                 ┌────────────┴────────────┐
+                 │                         │
+        Android platform edge      iOS platform edge
+        mobile/android/            mobile/core/iosMain/
+        AndroidBleTransport        IosBleTransport
+        service/permissions        Apple clock/random
+        MainActivity               Compose UIViewController
+                 │                         │
+                 │                  mobile/ios/
+                 │                  Xcode + one Swift bootstrap
+                 └────── same DplsClient + DplsApp ──────┘
 ```
 
-`mobile/core/src/commonMain` contains no Android or Apple framework APIs. `iosMain` is intentionally inside the KMP module: it is the thin CoreBluetooth implementation behind the same `DplsController` contract that Android implements with `BluetoothGatt`.
+`commonMain` contains no Android or Apple framework APIs. Android and iOS implement only the `DplsTransport`/platform-services boundary. Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application.
 
-Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application. It only asks `DplsCore` for the Compose `UIViewController` required by the Xcode app target.
-
-See [docs/architecture.md](docs/architecture.md) for the ownership rules.
+See [docs/architecture.md](docs/architecture.md) for the detailed ownership rules.
 
 ## Safety model
 
@@ -75,7 +73,7 @@ A mobile crash, reconnect bug or stale UI state must not be able to keep a dange
 
 ## Developer quick start
 
-Run the mobile checks from any directory:
+Run the complete mobile loop from the repository root:
 
 ```sh
 bash tools/check_mobile.sh
@@ -87,7 +85,7 @@ Run all host-side repository checks:
 bash tools/check_all.sh
 ```
 
-On macOS, `check_mobile.sh` also runs the Kotlin/Native simulator tests and links the iOS framework. Hardware BLE behavior still requires a real iPhone/device pair.
+On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `DplsCore` and executes the Xcode integration smoke test. Physical BLE behavior still requires a real phone/device pair.
 
 ### Firmware
 
@@ -106,8 +104,7 @@ tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 ```sh
 cd mobile
 ./gradlew :core:testDebugUnitTest
-./gradlew :android:testDebugUnitTest :android:koverVerifyDebug
-./gradlew :android:lintDebug :android:assembleDebug
+./gradlew :core:lintDebug :android:lintDebug :android:assembleDebug
 ```
 
 On macOS:
@@ -124,6 +121,17 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
+## Where to make changes
+
+- Shared screen/presentation behavior → `mobile/core/src/commonMain/.../app/`.
+- Protocol, auth or binary contract → `mobile/core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
+- Session secret/runtime rules → `mobile/core/src/commonMain/.../session/`.
+- Android Bluetooth/lifecycle quirk → `mobile/android/`.
+- iOS CoreBluetooth/lifecycle quirk → `mobile/core/src/iosMain/`.
+- Xcode signing/assets/capabilities → `mobile/ios/`.
+
+An ordinary product feature should normally require **one shared Kotlin change**, not parallel Android + Swift implementations.
+
 ## Test strategy
 
 Behavior-heavy checks live at the lowest reusable layer:
@@ -132,14 +140,14 @@ Behavior-heavy checks live at the lowest reusable layer:
 - CRC known-answer and all-message frame round trips;
 - 10,000 randomized malformed decoder inputs;
 - 2,000 randomized valid frame round trips;
-- binary state/device-info/journal/control-message contracts;
+- binary auth/command/state/device-info/journal contracts;
 - PBKDF2/HMAC/SHA-256 known-answer vectors;
-- deterministic session safety/reset tests;
+- shared `DplsClient` fake-transport tests including stale command-id rejection and reconnect safety;
 - the same KMP common tests on JVM and Kotlin/Native;
-- Android lint/build and a small compatibility-facade coverage gate;
-- native Xcode integration smoke test.
+- Android adapter lint/build;
+- native Xcode/KMP integration smoke test.
 
-Platform Bluetooth callbacks are validated through platform builds/integration instead of hiding them behind a misleading coverage percentage.
+The repository layout check also rejects reintroducing duplicate platform controllers, UI trees or protocol facades.
 
 ## GATT
 
