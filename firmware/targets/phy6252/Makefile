@@ -88,14 +88,16 @@ SDK_INCLUDES := \
 	-isystem $(SDK)/misc \
 	-isystem $(SDK)/components/driver/log \
 	-isystem $(SDK)/components/libraries/cliface \
+	-isystem $(SDK)/components/driver/key \
 	-isystem $(SDK)/components/driver/flash \
 	-isystem $(SDK)/components/libraries/fs \
 	-isystem $(SDK)/components/libraries/tinycrypt-0.2.8/lib/include
 INCLUDES := $(APP_INCLUDES) $(SDK_INCLUDES)
 
 # Keep the target surface to drivers actually owned by this application or
-# required by the vendor BLE runtime. key/pwm/led_light are example baggage;
-# DPLS owns its button polling and LED scene state and talks to GPIO directly.
+# required by the vendor BLE runtime. key.c/pwm/led_light are example baggage;
+# key.h remains because the vendor OSAL sample includes it transitively through
+# halPeripheral.h. DPLS owns button polling and LED scene state itself.
 SDK_SOURCES := \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/main.c \
 	$(SDK)/components/driver/uart/uart.c \
