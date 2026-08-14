@@ -21,7 +21,7 @@ import platform.Foundation.NSNumber
 import platform.darwin.NSObject
 
 internal interface IosBleTransportListener {
-    fun onBluetoothAvailable()
+    fun onBluetoothAvailable() = Unit
     fun onBluetoothUnavailable()
     fun onDiscovered(device: IosDiscoveredDevice)
     fun onConnected()
@@ -58,6 +58,7 @@ internal class IosBleTransport(
         override fun centralManagerDidUpdateState(central: CBCentralManager) {
             if (central.state == CBManagerStatePoweredOn) {
                 listener.onBluetoothAvailable()
+                if (selectedAddress != null && peripheral == null) reconnect()
             } else {
                 peripheral = null
                 rx = null
