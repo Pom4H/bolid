@@ -6,7 +6,6 @@
 #include "ll_enc.h"
 #include "osal_snv.h"
 #include "peripheral.h"
-#include "rom_sym_def.h"
 #include "flash.h"
 #include <string.h>
 
@@ -18,9 +17,6 @@ typedef struct {
     uint32_t magic;
     uint8_t addr[B_ADDR_LEN];
 } dpls_ble_mac_record_t;
-
-/* PHY6222 LL RAM layout for the public identity address (see bleuart_at_cmd.c). */
-#define DPLS_OWN_PUBLIC_ADDR ((volatile uint8_t *)(uintptr_t)0x1fff0965u)
 
 static uint8_t s_identity_mac[B_ADDR_LEN];
 static bool s_identity_mac_valid;
@@ -77,6 +73,7 @@ static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
     memcpy(out, record.addr, B_ADDR_LEN);
     return true;
 }
+
 static bool write_mac_snv(const uint8_t mac[B_ADDR_LEN])
 {
     dpls_ble_mac_record_t record;
@@ -101,16 +98,21 @@ static bool generate_mac(uint8_t out[B_ADDR_LEN])
     return false;
 }
 
-static void write_own_public_addr(const uint8_t mac[B_ADDR_LEN])
+static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
 {
-    volatile uint8_t *p = DPLS_OWN_PUBLIC_ADDR;
-    p[0] = mac[5];
-    p[1] = mac[4];
-    p[2] = mac[3];
-    p[3] = mac[2];
-    p[4] = mac[1];
-    p[5] = mac[0];
+    uint8_t controller_addr[B_ADDR_LEN];
+    uint8_t i;
+
+    /* DPLS keeps addresses in display order; the controller stores B_ADDR in
+     * little-endian order. Preserve the exact byte layout used by the old
+     * direct ownPublicAddr write, but go through the supported SDK API. */
+    for (i = 0; i < B_ADDR_LEN; ++i) {
+        controller_addr[i] = mac[B_ADDR_LEN - 1u - i];
+    }
+
+    if (HCI_EXT_SetBDADDRCmd(controller_addr) != HCI_SUCCESS) return false;
     (void)HCI_ReadBDADDRCmd();
+    return true;
 }
 
 static uint8_t identity_addr_type(const uint8_t display_mac[B_ADDR_LEN])
@@ -124,18 +126,15 @@ static bool ensure_mac(uint8_t mac[B_ADDR_LEN])
     read_chip_mac(mac);
     chip_invalid = mac_is_invalid(mac);
     if (!chip_invalid) {
-        write_own_public_addr(mac);
-        return true;
+        return set_controller_public_addr(mac);
     }
     if (read_mac_snv(mac)) {
         if (chip_invalid) write_chip_mac_flash(mac);
-        write_own_public_addr(mac);
-        return true;
+        return set_controller_public_addr(mac);
     }
     if (!generate_mac(mac) || !write_mac_snv(mac)) return false;
     write_chip_mac_flash(mac);
-    write_own_public_addr(mac);
-    return true;
+    return set_controller_public_addr(mac);
 }
 
 static bool read_key_snv(uint16_t snv_id, uint8_t out[KEYLEN])
