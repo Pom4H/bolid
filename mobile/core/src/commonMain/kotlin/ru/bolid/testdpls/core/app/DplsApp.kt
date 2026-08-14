@@ -62,8 +62,13 @@ fun DplsApp(
 }
 
 @Composable private fun Header(text: String) {
-    Text(text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.fillMaxWidth().padding(20.dp))
+    Text(
+        text,
+        color = Color.White,
+        fontSize = 20.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().padding(20.dp),
+    )
 }
 
 @Composable private fun Devices(state: DplsUiState, c: DplsController, open: (DiscoveredDevice) -> Unit) {
@@ -72,7 +77,10 @@ fun DplsApp(
         Header("Устройства рядом")
         LazyColumn(Modifier.weight(1f).padding(horizontal = 16.dp)) {
             items(state.devices, key = { it.address }) { d ->
-                Row(Modifier.fillMaxWidth().clickable { open(d) }.padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { open(d) }.padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Column(Modifier.weight(1f)) {
                         Text(d.userName ?: d.advertisedName, color = Color.White, fontSize = 16.sp)
                         Text(d.address, color = Muted, fontSize = 11.sp)
@@ -82,7 +90,11 @@ fun DplsApp(
                 HorizontalDivider(color = Color(0xFF263B46))
             }
         }
-        Button({ c.startScan() }, Modifier.fillMaxWidth().padding(16.dp), enabled = state.phase != ConnectionPhase.SCANNING) {
+        Button(
+            onClick = c::startScan,
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            enabled = state.phase != ConnectionPhase.SCANNING,
+        ) {
             Text(if (state.phase == ConnectionPhase.SCANNING) "Поиск…" else "Обновить")
         }
     }
@@ -93,7 +105,10 @@ fun DplsApp(
     LaunchedEffect(device.address) { c.identify(device.address) }
     LaunchedEffect(state.identifyLedLive) {
         if (!state.identifyLedLive) return@LaunchedEffect
-        while (seconds > 0) { delay(1000); seconds-- }
+        while (seconds > 0) {
+            delay(1_000)
+            seconds--
+        }
     }
     Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Header("Показать на объекте")
@@ -116,7 +131,11 @@ fun DplsApp(
 }
 
 @Composable private fun Connecting(state: DplsUiState, c: DplsController) {
-    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
         CircularProgressIndicator()
         Text(state.statusText, color = Color.White, modifier = Modifier.padding(16.dp))
         TextButton(c::disconnect) { Text("Отмена") }
@@ -130,9 +149,30 @@ fun DplsApp(
     val firstSetup = !state.initialized
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         Header(if (firstSetup) "Первичная настройка" else "Вход")
-        if (firstSetup) OutlinedTextField(name, { name = it; c.updateSetupName(it) }, label = { Text("Имя устройства") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(password, { password = it; c.updateSetupPassword(it) }, label = { Text("Пароль") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-        if (firstSetup) OutlinedTextField(repeat, { repeat = it; c.updateSetupRepeatPassword(it) }, label = { Text("Повторите пароль") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+        if (firstSetup) {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it; c.updateSetupName(it) },
+                label = { Text("Имя устройства") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it; c.updateSetupPassword(it) },
+            label = { Text("Пароль") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+        )
+        if (firstSetup) {
+            OutlinedTextField(
+                value = repeat,
+                onValueChange = { repeat = it; c.updateSetupRepeatPassword(it) },
+                label = { Text("Повторите пароль") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            )
+        }
         state.error?.let { Text(it, color = Orange, modifier = Modifier.padding(top = 12.dp)) }
         Spacer(Modifier.height(16.dp))
         Button(
@@ -152,7 +192,12 @@ fun DplsApp(
         Spacer(Modifier.height(18.dp))
         Surface(shape = RoundedCornerShape(12.dp), color = Panel, modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp)) {
-                Text(device?.mode?.title ?: "—", color = if (device?.mode?.dangerous == true) Orange else Green, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    device?.mode?.title ?: "—",
+                    color = if (device?.mode?.dangerous == true) Orange else Green,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text("${device?.voltageMv ?: 0} mV · ${device?.powerSource?.title ?: "—"}", color = Color.White)
                 if (device?.reserveLow == true) Text("Низкий резерв", color = Orange)
                 if (device?.realShort == true) Text("Обнаружено реальное КЗ", color = Orange)
@@ -160,9 +205,18 @@ fun DplsApp(
         }
         Spacer(Modifier.height(18.dp))
         DplsMode.entries.filter { it.dangerous }.forEach { mode ->
-            OutlinedButton({ c.requestMode(mode) }, Modifier.fillMaxWidth().padding(vertical = 4.dp), enabled = state.controlsEnabled) { Text(mode.title) }
+            OutlinedButton(
+                onClick = { c.requestMode(mode) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                enabled = state.controlsEnabled,
+            ) { Text(mode.title) }
         }
-        Button(c::returnToNormal, Modifier.fillMaxWidth().padding(top = 10.dp), enabled = state.controlsEnabled, colors = ButtonDefaults.buttonColors(containerColor = Green)) { Text("Норма") }
+        Button(
+            onClick = c::returnToNormal,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            enabled = state.controlsEnabled,
+            colors = ButtonDefaults.buttonColors(containerColor = Green),
+        ) { Text("Норма") }
         TextButton(c::refreshState, Modifier.fillMaxWidth()) { Text("Обновить состояние") }
     }
     state.pendingMode?.let { mode ->
@@ -205,9 +259,25 @@ fun DplsApp(
         Header("Настройки")
         OutlinedTextField(name, { name = it }, label = { Text("Имя") }, modifier = Modifier.fillMaxWidth())
         Button({ c.setDeviceName(name) }, Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Сохранить имя") }
-        OutlinedTextField(current, { current = it }, label = { Text("Текущий пароль") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().padding(top = 18.dp))
-        OutlinedTextField(next, { next = it }, label = { Text("Новый пароль") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-        Button({ c.changePassword(current, next) }, Modifier.fillMaxWidth().padding(top = 8.dp), enabled = current.length >= 8 && next.length >= 8) { Text("Сменить пароль") }
+        OutlinedTextField(
+            current,
+            { current = it },
+            label = { Text("Текущий пароль") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+        )
+        OutlinedTextField(
+            next,
+            { next = it },
+            label = { Text("Новый пароль") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        Button(
+            { c.changePassword(current, next) },
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            enabled = current.length >= 8 && next.length >= 8,
+        ) { Text("Сменить пароль") }
         state.settingsError?.let { Text(it, color = Orange, modifier = Modifier.padding(top = 8.dp)) }
         Spacer(Modifier.height(18.dp))
         state.deviceInfo?.let { info ->
@@ -221,9 +291,20 @@ fun DplsApp(
 }
 
 private fun eventTitle(e: EventRecord): String = when (e.type) {
-    1 -> "Запуск устройства"; 2 -> "BLE подключение"; 3 -> "BLE отключение"; 4 -> "Успешный вход"
-    5 -> "Ошибка входа · попытка ${e.parameter}"; 6 -> "Вход заблокирован"
-    7 -> "Режим: ${DplsMode.fromWire(e.parameter)?.title ?: e.parameter}"; 9 -> "Идентификация начата"
-    10 -> "Идентификация остановлена"; 11 -> "Пароль установлен"; else -> "Событие ${e.type} · ${e.parameter}"
+    1 -> "Запуск устройства"
+    2 -> "BLE подключение"
+    3 -> "BLE отключение"
+    4 -> "Успешный вход"
+    5 -> "Ошибка входа · попытка ${e.parameter}"
+    6 -> "Вход заблокирован"
+    7 -> "Режим: ${DplsMode.fromWire(e.parameter)?.title ?: e.parameter}"
+    9 -> "Идентификация начата"
+    10 -> "Идентификация остановлена"
+    11 -> "Пароль установлен"
+    else -> "Событие ${e.type} · ${e.parameter}"
 }
-private fun formatUptime(value: Long): String = "%02d:%02d:%02d".format(value / 3600, (value % 3600) / 60, value % 60)
+
+private fun formatUptime(value: Long): String {
+    fun two(value: Long): String = value.toString().padStart(2, '0')
+    return "${two(value / 3600)}:${two((value % 3600) / 60)}:${two(value % 60)}"
+}
