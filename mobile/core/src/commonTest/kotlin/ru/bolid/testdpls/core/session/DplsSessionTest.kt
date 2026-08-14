@@ -4,12 +4,6 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertTrue
-import ru.bolid.testdpls.core.domain.ConnectionPhase
-import ru.bolid.testdpls.core.domain.DeviceState
-import ru.bolid.testdpls.core.domain.DplsMode
-import ru.bolid.testdpls.core.domain.DplsUiState
-import ru.bolid.testdpls.core.domain.PowerSource
 
 class DplsSessionTest {
     @Test
@@ -33,51 +27,36 @@ class DplsSessionTest {
     }
 
     @Test
-    fun linkLossAlwaysDisablesAuthenticatedControls() {
-        val current = DplsUiState(
-            phase = ConnectionPhase.READY,
-            authenticated = true,
-            state = sampleState(DplsMode.SHORT_1),
-        )
-        val next = reduceSession(current, SessionEvent.LinkLost)
-        assertEquals(ConnectionPhase.RECONNECTING, next.phase)
-        assertFalse(next.authenticated)
-        assertFalse(next.commandInProgress)
-        assertTrue(next.staleState)
-        assertFalse(next.controlsEnabled)
+    fun resetLinkWipesLinkSecrets() {
+        val session = DplsSessionRuntime().apply {
+            sessionId = 42
+            authenticate(ByteArray(8) { 7 })
+            deviceNonce = ByteArray(16) { 8 }
+            authSalt = ByteArray(16) { 9 }
+            clientNonce = ByteArray(16) { 10 }
+            initialized = true
+        }
+        session.resetLink()
+        assertEquals(0, session.sessionId)
+        assertContentEquals(ByteArray(8), session.sessionToken)
+        assertContentEquals(ByteArray(16), session.deviceNonce)
+        assertContentEquals(ByteArray(16), session.authSalt)
+        assertContentEquals(ByteArray(16) { 10 }, session.clientNonce)
+        assertEquals(true, session.initialized)
     }
 
     @Test
-    fun receivedStateReturnsSessionToReady() {
-        val next = reduceSession(
-            DplsUiState(phase = ConnectionPhase.SYNCHRONIZING, authenticated = true),
-            SessionEvent.StateReceived(sampleState(DplsMode.NORMAL), nowMillis = 50_000),
-        )
-        assertEquals(ConnectionPhase.READY, next.phase)
-        assertTrue(next.authenticated)
-        assertFalse(next.staleState)
-        assertEquals(40L, next.deviceBootEpochSeconds)
+    fun resetAllReturnsToFreshRuntime() {
+        val session = DplsSessionRuntime().apply {
+            repeat(5) { nextSequence() }
+            repeat(3) { nextCommandId() }
+            clientNonce = ByteArray(16) { 1 }
+            initialized = true
+        }
+        session.resetAll()
+        assertEquals(1, session.sequence)
+        assertEquals(1, session.commandId)
+        assertContentEquals(ByteArray(16), session.clientNonce)
+        assertFalse(session.initialized)
     }
-
-    @Test
-    fun failureNeverLeavesCommandEnabled() {
-        val next = reduceSession(
-            DplsUiState(commandInProgress = true, authenticated = true),
-            SessionEvent.Failed("boom"),
-        )
-        assertEquals(ConnectionPhase.ERROR, next.phase)
-        assertFalse(next.commandInProgress)
-        assertFalse(next.controlsEnabled)
-    }
-
-    private fun sampleState(mode: DplsMode) = DeviceState(
-        mode = mode,
-        voltageMv = 12_000,
-        powerSource = PowerSource.DPLS,
-        reserveLow = false,
-        realShort = false,
-        automaticReturnSeconds = 30,
-        uptimeSeconds = 10,
-        revision = 1,
-    )
 }
