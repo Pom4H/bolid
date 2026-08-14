@@ -19,6 +19,7 @@ import ru.bolid.testdpls.core.domain.SettingsOp
 import ru.bolid.testdpls.core.protocol.DplsAuth
 import ru.bolid.testdpls.core.protocol.DplsCrypto
 import ru.bolid.testdpls.core.protocol.DplsProtocol
+import ru.bolid.testdpls.core.protocol.buildTimeSyncPayload
 import ru.bolid.testdpls.core.protocol.commandRejectReason
 import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
@@ -60,6 +61,7 @@ class DplsClient(
     private var reachedReady = false
     private var legacyFirmware = false
     private var awaitingDeviceInfo = false
+    private var timeSyncPending = false
 
     private sealed interface PendingSettings {
         val commandId: Long
@@ -113,6 +115,7 @@ class DplsClient(
         selectedAddress = address
         legacyFirmware = false
         awaitingDeviceInfo = false
+        timeSyncPending = false
         pendingModeCommandId = null
         updateState {
             it.copy(
@@ -303,8 +306,10 @@ class DplsClient(
     }
 
     override fun eventLogCsv(): String = buildString {
-        appendLine("sequence;uptime_seconds;event_type;parameter")
-        state.eventLog.forEach { appendLine("${it.sequence};${it.timestampSeconds};${it.type};${it.parameter}") }
+        appendLine("sequence;timestamp_seconds;time_basis;event_type;parameter")
+        state.eventLog.forEach {
+            appendLine("${it.sequence};${it.timestampSeconds};${eventTimestampBasis(it.timestampSeconds)};${it.type};${it.parameter}")
+        }
     }
 
     override fun eventLogTxt(): String = buildString {
@@ -312,7 +317,7 @@ class DplsClient(
         appendLine("Устройство: ${state.deviceInfo?.userName ?: state.selectedDevice?.userName ?: "—"}")
         appendLine("Записей: ${state.eventLog.size}")
         appendLine("—".repeat(32))
-        state.eventLog.forEach { appendLine("#${it.sequence}  +${it.timestampSeconds} с  событие ${it.type} · ${it.parameter}") }
+        state.eventLog.forEach { appendLine("#${it.sequence}  ${eventTimestampText(it.timestampSeconds)}  событие ${it.type} · ${it.parameter}") }
     }
 
     fun close() {
@@ -329,6 +334,7 @@ class DplsClient(
     override fun onBluetoothUnavailable() {
         cancelConnectionJobs()
         pendingModeCommandId = null
+        timeSyncPending = false
         session.resetLink()
         updateState {
             it.copy(
@@ -471,9 +477,14 @@ class DplsClient(
                 identifyActive = false,
                 identifyLedLive = false,
                 phase = ConnectionPhase.SYNCHRONIZING,
-                statusText = "Чтение состояния…",
+                statusText = "Синхронизация времени…",
                 error = null,
             )
+        }
+        val unixSeconds = platform.nowMillis() / 1000L
+        buildTimeSyncPayload(session.sessionId, session.sessionToken, unixSeconds)?.let { timePayload ->
+            timeSyncPending = true
+            send(DplsProtocol.Type.TIME_SYNC, timePayload)
         }
         send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
         scheduleKeepAlive()
@@ -531,6 +542,7 @@ class DplsClient(
     private fun handleState(payload: ByteArray) {
         val now = platform.nowMillis()
         val deviceState = parseStateReport(payload, now) ?: return fail("Повреждённый STATE_REPORT")
+        timeSyncPending = false
         updateState {
             it.copy(
                 phase = ConnectionPhase.READY,
@@ -609,6 +621,13 @@ class DplsClient(
     }
 
     private fun handleDeviceError(code: Int) {
+        if (code == 5 && timeSyncPending) {
+            /* Firmware before TIME_SYNC reports "unsupported message". Keep the
+             * connection usable and fall back to the legacy uptime journal. */
+            timeSyncPending = false
+            legacyFirmware = true
+            return
+        }
         if (state.logProgress != null) return failLog("Ошибка загрузки журнала: $code")
         if (code == 5 && awaitingDeviceInfo) {
             awaitingDeviceInfo = false
@@ -692,6 +711,7 @@ class DplsClient(
         if (reconnectJob?.isActive == true || selectedAddress == null) return
         cancelConnectionJobs()
         pendingModeCommandId = null
+        timeSyncPending = false
         session.resetLink()
         updateState {
             it.copy(
@@ -744,6 +764,7 @@ class DplsClient(
         scanJob?.cancel()
         cancelConnectionJobs()
         pendingModeCommandId = null
+        timeSyncPending = false
         logTimeoutJob?.cancel()
         settingsTimeoutJob?.cancel()
         clearPendingSettings()
