@@ -6,12 +6,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
-import ru.bolid.testdpls.ble.AndroidBleTransport
+import ru.bolid.testdpls.core.app.AndroidBleTransport
+import ru.bolid.testdpls.core.app.AndroidPlatformServices
 import ru.bolid.testdpls.core.app.DplsClient
 
 class DplsApplication : Application() {
     val transport: AndroidBleTransport by lazy { AndroidBleTransport(this) }
-    val client: DplsClient by lazy { DplsClient(transport, AndroidPlatformServices()) }
+    val client: DplsClient by lazy { DplsClient(transport, AndroidPlatformServices(this)) }
 
     private val e2eDriver: AndroidE2eDriver by lazy { AndroidE2eDriver(this, client, transport) }
     private var e2eReceiver: BroadcastReceiver? = null

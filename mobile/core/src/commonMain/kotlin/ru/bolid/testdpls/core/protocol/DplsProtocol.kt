@@ -15,6 +15,7 @@ object DplsProtocol {
         STATE_GET(0x10), STATE_REPORT(0x11), MODE_SET(0x12), COMMAND_RESULT(0x13),
         IDENTIFY_START(0x14), IDENTIFY_STOP(0x15), LOG_START(0x20), LOG_INFO(0x21),
         LOG_CHUNK(0x22), LOG_ACK(0x23), LOG_FINISH(0x24), LOG_RESULT(0x25),
+        LOG_HIST_GET(0x26), LOG_HIST_REPORT(0x27),
         KEEP_ALIVE(0x30), ERROR(0x7f);
 
         companion object {

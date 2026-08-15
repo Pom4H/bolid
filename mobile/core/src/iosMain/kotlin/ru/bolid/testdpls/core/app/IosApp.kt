@@ -1,6 +1,7 @@
 package ru.bolid.testdpls.core.app
 
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.window.ComposeUIViewController
 import platform.UIKit.UIActivityViewController
 import platform.UIKit.UIViewController
@@ -11,7 +12,14 @@ fun MainViewController(): UIViewController {
     var host: UIViewController? = null
     val viewController = ComposeUIViewController {
         DisposableEffect(Unit) {
-            onDispose(client::close)
+            onDispose { client.close() }
+        }
+        LaunchedEffect(Unit) {
+            try {
+                runIosE2eIfRequested(client)
+            } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+            }
         }
         DplsApp(
             controller = client,

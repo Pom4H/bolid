@@ -19,24 +19,24 @@ This document defines ownership boundaries in Test-DPLS. Moving a responsibility
 │ frame/CRC · auth/crypto · parsers · domain/session           │
 │ reconnect · commands · settings · journal · shared DplsApp   │
 └──────────────────────────────┬───────────────────────────────┘
-                               │ DplsTransport + platform services
+                               │ DplsTransport + DplsPlatformServices
                  ┌─────────────┴─────────────┐
                  │                           │
         ┌────────▼──────────┐       ┌────────▼──────────┐
-        │ mobile/android/   │       │ core/src/iosMain/ │
+        │ core/androidMain  │       │ core/iosMain      │
         │ AndroidBleTransport│      │ IosBleTransport  │
-        │ service/permissions│      │ Apple clock/RNG  │
-        │ MainActivity      │       │ Compose UI host  │
-        └───────────────────┘       └────────┬──────────┘
-                                             │
-                                    ┌────────▼──────────┐
-                                    │ mobile/ios/       │
-                                    │ Xcode shell/assets│
-                                    │ one Swift bootstrap│
-                                    └───────────────────┘
+        │ AndroidPlatform   │       │ IosPlatform      │
+        │ BLE keep-alive FGS│       │ local alerts     │
+        └────────┬──────────┘       └────────┬─────────┘
+                 │                           │
+        ┌────────▼──────────┐       ┌────────▼──────────┐
+        │ mobile/android/   │       │ mobile/ios/       │
+        │ Activity, perms,  │       │ Xcode shell       │
+        │ debug E2E         │       │ one Swift bootstrap│
+        └───────────────────┘       └───────────────────┘
 ```
 
-Both platforms use the same `DplsClient` and render the same `DplsApp`. Platform code only supplies BLE transport, clock/random services and OS lifecycle integration.
+Both platforms use the same `DplsClient` and render the same `DplsApp`. Platform code in `core/androidMain` and `core/iosMain` supplies BLE transport, clock/random, operator alerts and keep-screen-on. `mobile/android` and `mobile/ios` are OS shells (permissions, manifest/plist, debug E2E, one Swift bootstrap).
 
 ## Ownership rules
 
@@ -76,24 +76,28 @@ It owns:
 
 ### Platform code owns operating-system adaptation
 
-Android platform code owns:
+Android platform code in `core/src/androidMain` owns:
 
-- runtime Bluetooth permissions;
 - `BluetoothGatt` callbacks, bonding, MTU and CCCD subscription;
 - transient write retries and stale-bond/GATT-133 recovery;
-- foreground service/lifecycle integration;
-- Android application entry point and debug E2E broadcast driver.
+- foreground-service keep-alive and local operator notifications.
+
+`mobile/android` owns:
+
+- runtime Bluetooth permissions and the enable-Bluetooth prompt;
+- Activity/application entry point and debug E2E broadcast driver.
 
 iOS platform code in `core/src/iosMain` owns:
 
 - `CBCentralManager` / `CBPeripheral` callbacks;
 - write queue and CoreBluetooth lifecycle;
 - secure random bytes and clock from Apple frameworks;
+- local operator notifications;
 - the Compose `UIViewController` host.
 
 `mobile/ios` itself is only the Xcode product shell: signing, plist, assets and the one Swift entry point required to launch the exported Kotlin view controller.
 
-Platform adapters translate native events into `DplsTransportListener` events. They must not introduce a second frame codec, parser, session controller or application UI.
+Platform adapters translate native events into `DplsTransportListener` events. Advertisement identity (name, manufacturer payload, device id) is parsed once in `DplsBle.discovered`. Keep-screen-on is applied from shared Compose through `PlatformSessionEffects`. Adapters must not introduce a second frame codec, parser, session controller or application UI.
 
 ## Command truth model
 
@@ -116,8 +120,9 @@ A `COMMAND_RESULT` with a different command id is ignored. The final `STATE_REPO
 Allowed:
 
 ```text
-mobile/android transport/shell → mobile/core/commonMain
-mobile/core/iosMain transport  → mobile/core/commonMain
+mobile/android shell           → core/androidMain + commonMain
+core/androidMain transport     → commonMain
+core/iosMain transport         → commonMain
 mobile/ios Xcode bootstrap     → DplsCore framework
 firmware target adapter        → pinned vendor SDK
 ```
@@ -148,7 +153,7 @@ The common suite includes CRC and crypto known-answer vectors, all-message round
 
 `tools/check_repo_layout.sh` prevents the architecture from drifting back into duplicate implementations. It rejects legacy top-level directories as well as old Android/Swift controllers, duplicate platform protocol facades, duplicate UI trees and obsolete KMP bridges.
 
-Production iOS intentionally contains one Swift bootstrap source. The Android BLE package intentionally contains one transport implementation.
+Production iOS intentionally contains one Swift bootstrap source. Each OS has one BLE transport in the KMP module (`androidMain` / `iosMain`).
 
 ## Developer experience rule
 
@@ -157,8 +162,9 @@ An ordinary product feature should normally touch **one shared Kotlin area**, no
 - screen or application flow → `mobile/core/src/commonMain/.../app/`
 - protocol/auth contract → `mobile/core/src/commonMain/.../protocol/`
 - secret/session runtime → `mobile/core/src/commonMain/.../session/`
-- Android OS/Bluetooth quirk → `mobile/android/`
+- Android OS/Bluetooth quirk → `mobile/core/src/androidMain/`
 - iOS OS/Bluetooth quirk → `mobile/core/src/iosMain/`
+- Android/iOS product shell → `mobile/android/` or `mobile/ios/`
 
 Use `bash tools/check_mobile.sh` for the mobile loop and `bash tools/check_all.sh` for all host-side repository gates.
 

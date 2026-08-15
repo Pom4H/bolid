@@ -4,6 +4,7 @@ import ru.bolid.testdpls.core.domain.DeviceInfo
 import ru.bolid.testdpls.core.domain.DeviceState
 import ru.bolid.testdpls.core.domain.DplsMode
 import ru.bolid.testdpls.core.domain.EventRecord
+import ru.bolid.testdpls.core.domain.LogHistogram
 import ru.bolid.testdpls.core.domain.PowerSource
 
 object StateValidity {
@@ -24,6 +25,22 @@ object DeviceCaps {
 }
 
 data class LogChunkBatch(val firstIndex: Int, val records: List<EventRecord>)
+
+fun parseLogHistogramReport(raw: ByteArray): LogHistogram? {
+    if (raw.size < 23) return null
+    val bucketCount = raw[22].toInt() and 0xff
+    if (bucketCount > 48 || raw.size != 23 + bucketCount) return null
+    val counts = IntArray(bucketCount) { raw[23 + it].toInt() and 0xff }
+    return LogHistogram(
+        firstTimestampSeconds = readU32(raw, 0),
+        lastTimestampSeconds = readU32(raw, 4),
+        firstSequence = readU32(raw, 8),
+        lastSequence = readU32(raw, 12),
+        eventCount = readU16(raw, 16),
+        bucketSeconds = readU32(raw, 18),
+        counts = counts.toList(),
+    )
+}
 
 fun parseDeviceInfoReport(raw: ByteArray): DeviceInfo? {
     if (raw.size < 12) return null

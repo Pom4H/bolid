@@ -14,7 +14,7 @@ The repository follows three ownership rules:
 |---|---|
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
 | `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
-| `mobile/android/` | `BluetoothGatt` transport, permissions/service shell and Android entry point |
+| `mobile/android/` | Android shell: permissions, Activity, debug E2E |
 | `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap |
 | `docs/` | Architecture, bring-up and PHY6252 engineering references |
 | `tools/` | Build, flash, lint, coverage and one-command checks |
@@ -42,14 +42,13 @@ There is one application controller, one UI and one protocol implementation:
                               │ DplsTransport
                  ┌────────────┴────────────┐
                  │                         │
-        Android platform edge      iOS platform edge
-        mobile/android/            mobile/core/iosMain/
-        AndroidBleTransport        IosBleTransport
-        service/permissions        Apple clock/random
-        MainActivity               Compose UIViewController
-                 │                         │
-                 │                  mobile/ios/
-                 │                  Xcode + one Swift bootstrap
+        Android platform edge              iOS platform edge
+        core/androidMain                  core/iosMain
+        AndroidBleTransport               IosBleTransport
+        AndroidPlatformServices           IosPlatformServices
+                 │                                 │
+        mobile/android/                    mobile/ios/
+        Activity + permissions             Xcode + one Swift bootstrap
                  └────── same DplsClient + DplsApp ──────┘
 ```
 

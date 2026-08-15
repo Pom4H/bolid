@@ -5,19 +5,24 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import ru.bolid.testdpls.core.app.DplsApp
-import ru.bolid.testdpls.ui.MainViewModel
+import ru.bolid.testdpls.core.domain.UiTheme
 
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: MainViewModel by viewModels()
+    private val client get() = (application as DplsApplication).client
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -25,7 +30,7 @@ class MainActivity : ComponentActivity() {
         if (BLE_PERMISSIONS.all(::isPermissionGranted)) {
             ensureBluetoothEnabledAndConnect()
         } else {
-            viewModel.permissionsDenied()
+            Toast.makeText(this, "Нет разрешений Bluetooth", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -33,9 +38,9 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult(),
     ) {
         if (isBluetoothEnabled()) {
-            viewModel.resumeOrScan()
+            resumeOrScan()
         } else {
-            viewModel.bluetoothDisabled()
+            Toast.makeText(this, "Включите Bluetooth", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -57,8 +62,31 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
+            val state by client.uiState.collectAsState()
+            val dark = when (state.uiTheme) {
+                UiTheme.DARK -> true
+                UiTheme.LIGHT -> false
+                UiTheme.SYSTEM ->
+                    (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                        Configuration.UI_MODE_NIGHT_YES
+            }
+            val transparent = android.graphics.Color.TRANSPARENT
+            SideEffect {
+                enableEdgeToEdge(
+                    statusBarStyle = if (dark) {
+                        SystemBarStyle.dark(transparent)
+                    } else {
+                        SystemBarStyle.light(transparent, transparent)
+                    },
+                    navigationBarStyle = if (dark) {
+                        SystemBarStyle.dark(transparent)
+                    } else {
+                        SystemBarStyle.light(transparent, transparent)
+                    },
+                )
+            }
             DplsApp(
-                controller = viewModel,
+                controller = client,
                 shareText = { title, text ->
                     pendingExportText = text
                     createDocumentLauncher.launch(title)
@@ -67,6 +95,10 @@ class MainActivity : ComponentActivity() {
         }
 
         requestRequiredPermissions()
+    }
+
+    private fun resumeOrScan() {
+        if (client.uiState.value.selectedDevice == null) client.startScan()
     }
 
     private fun requestRequiredPermissions() {
@@ -82,7 +114,7 @@ class MainActivity : ComponentActivity() {
         if (!isBluetoothEnabled()) {
             enableBluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
         } else {
-            viewModel.resumeOrScan()
+            resumeOrScan()
         }
     }
 

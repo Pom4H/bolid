@@ -24,7 +24,24 @@ for path in "${required[@]}"; do
   test -d "$path" || { echo "missing required directory: $path" >&2; exit 1; }
 done
 
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+legacy_is_required() {
+  local candidate="$1"
+  local req
+  for req in "${required[@]}"; do
+    if [[ "$(lower "$candidate")" == "$(lower "$req")" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 for path in "${legacy[@]}"; do
+  # macOS is case-insensitive: Firmware and firmware are the same directory.
+  if legacy_is_required "$path"; then
+    continue
+  fi
   test ! -e "$path" || { echo "legacy directory must not exist: $path" >&2; exit 1; }
 done
 
@@ -41,10 +58,16 @@ test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTranspo
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
 
-# Platform source contains adapters only, never a second app/protocol implementation.
-test -f mobile/android/src/main/java/ru/bolid/testdpls/ble/AndroidBleTransport.kt
+# Platform adapters live next to each other in the KMP module.
+test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt
+test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsPlatformEffects.kt
+test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt
+test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidPlatformServices.kt
 test -f mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt
+test -f mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosPlatform.kt
 test -f mobile/ios/TestDPLS/TestDPLSApp.swift
+test ! -e mobile/android/src/main/java/ru/bolid/testdpls/ble
+test ! -e mobile/android/src/main/java/ru/bolid/testdpls/ui/MainViewModel.kt
 
 duplicates=(
   mobile/android/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
@@ -66,8 +89,9 @@ done
 
 # Production iOS host is intentionally one Swift bootstrap file.
 test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" = "1"
-# Android BLE package is intentionally one transport implementation.
-test "$(find mobile/android/src/main/java/ru/bolid/testdpls/ble -type f -name '*.kt' | wc -l | tr -d ' ')" = "1"
+# Each OS has one BLE transport in the KMP module.
+test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
+test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
 # PHY6252 integration must use the supported SDK boundary instead of reaching
 # into Link Layer RAM or an obsolete raw-MAC flash slot. Target manifests must

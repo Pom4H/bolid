@@ -41,13 +41,28 @@ enum class ConnectionPhase {
 
 enum class SettingsOp { NONE, IN_PROGRESS, DONE, FAILED }
 
+enum class UiTheme(val title: String, val wire: String) {
+    SYSTEM("Система", "system"),
+    DARK("Тёмная", "dark"),
+    LIGHT("Светлая", "light");
+
+    companion object {
+        fun fromWire(value: String?): UiTheme = entries.firstOrNull { it.wire == value } ?: SYSTEM
+    }
+}
+
 data class DiscoveredDevice(
     val address: String,
     val advertisedName: String,
     val userName: String?,
     val deviceId: Long?,
     val rssi: Int,
-)
+    val realShort: Boolean = false,
+    val fromReserve: Boolean = false,
+    val reserveLow: Boolean = false,
+) {
+    val hasLineFault: Boolean get() = realShort || reserveLow || fromReserve
+}
 
 data class DeviceState(
     val mode: DplsMode,
@@ -81,6 +96,35 @@ data class EventRecord(
     val parameter: Int,
 )
 
+data class JournalTimeAnchor(
+    val bootFirstSequence: Long,
+    val bootEpochSeconds: Long,
+    val lastSequence: Long,
+)
+
+data class LogHistogram(
+    val firstTimestampSeconds: Long,
+    val lastTimestampSeconds: Long,
+    val firstSequence: Long,
+    val lastSequence: Long,
+    val eventCount: Int,
+    val bucketSeconds: Long,
+    val counts: List<Int>,
+) {
+    val bucketCount: Int get() = counts.size
+    val startSeconds: Long get() = firstTimestampSeconds
+    val endSeconds: Long get() = startSeconds + bucketSeconds * bucketCount
+
+    fun bucketStart(index: Int): Long = startSeconds + bucketSeconds * index.coerceAtLeast(0)
+
+    fun rangeSeconds(fromBucket: Int, toBucket: Int): Pair<Long, Long> {
+        if (bucketCount <= 0) return firstTimestampSeconds to lastTimestampSeconds
+        val from = minOf(fromBucket, toBucket).coerceIn(0, bucketCount - 1)
+        val to = maxOf(fromBucket, toBucket).coerceIn(0, bucketCount - 1)
+        return bucketStart(from) to bucketStart(to + 1)
+    }
+}
+
 data class DeviceInfo(
     val deviceId: Long,
     val protocolVersion: Int,
@@ -112,8 +156,18 @@ data class DplsUiState(
     val eventLog: List<EventRecord> = emptyList(),
     val deviceBootEpochSeconds: Long? = null,
     val logProgress: Float? = null,
+    val logTotal: Int = 0,
+    val logHasMore: Boolean = false,
+    val logFirstTimestampSeconds: Long? = null,
+    val logLastTimestampSeconds: Long? = null,
+    val logHistogram: LogHistogram? = null,
+    val journalTimeAnchors: List<JournalTimeAnchor> = emptyList(),
+    val browsingDevices: Boolean = false,
+    val scanning: Boolean = false,
     val identifyActive: Boolean = false,
     val identifyLedLive: Boolean = false,
+    val identifyLedPhaseOffsetMs: Long = 0,
+    val linkRssi: Int? = null,
     val setupName: String = "",
     val setupPassword: String = "",
     val setupRepeatPassword: String = "",
@@ -121,16 +175,19 @@ data class DplsUiState(
     val deviceInfo: DeviceInfo? = null,
     val settingsOp: SettingsOp = SettingsOp.NONE,
     val settingsError: String? = null,
+    val settingsNotice: String? = null,
     val error: String? = null,
+    val staleBond: Boolean = false,
+    val uiTheme: UiTheme = UiTheme.SYSTEM,
+    val keepScreenOn: Boolean = true,
+    val hapticsEnabled: Boolean = true,
+    val savedCredentials: Boolean = false,
 ) {
     val controlsEnabled: Boolean
         get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
 
     val needsPeriodicStateRefresh: Boolean
-        get() {
-            if (!authenticated || commandInProgress || state == null || logProgress != null) return false
-            return state.mode.dangerous || phase != ConnectionPhase.READY
-        }
+        get() = authenticated && !commandInProgress && state != null && logProgress == null
 
     val setupFormReady: Boolean
         get() = credentialsReady &&

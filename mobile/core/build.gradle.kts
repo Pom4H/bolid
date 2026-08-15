@@ -30,12 +30,15 @@ kotlin {
         commonMain.dependencies {
             implementation(compose.runtime)
             implementation(compose.foundation)
+            implementation(compose.animation)
             implementation(compose.material3)
             implementation(compose.ui)
+            implementation(compose.components.resources)
             implementation(libs.kotlinx.coroutines.core)
         }
         androidMain.dependencies {
             implementation(libs.kotlinx.coroutines.android)
+            implementation(libs.androidx.core.ktx)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
@@ -54,9 +57,19 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        compose = true
+    }
+
     lint {
         abortOnError = true
         warningsAsErrors = true
         disable += setOf("GradleDependency", "NewerVersionAvailable")
+    }
+}
+
+compose {
+    resources {
+        packageOfResClass = "ru.bolid.testdpls.core.app"
     }
 }

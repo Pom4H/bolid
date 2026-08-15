@@ -5,7 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import java.io.File
-import ru.bolid.testdpls.ble.AndroidBleTransport
+import ru.bolid.testdpls.core.app.AndroidBleTransport
 import ru.bolid.testdpls.core.app.DplsClient
 import ru.bolid.testdpls.core.domain.DplsMode
 

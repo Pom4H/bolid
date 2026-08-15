@@ -19,7 +19,16 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.2.1</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>16</string>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>settings-navigation</string>
+		<string>App-Prefs</string>
+		<string>App-prefs</string>
+		<string>prefs</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>

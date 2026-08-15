@@ -8,8 +8,9 @@ Test-DPLS has one Kotlin Multiplatform application for Android and iOS.
 |---|---|
 | `core/src/commonMain/` | `DplsClient`, shared Compose UI, protocol/CRC/auth, binary parsers, domain and session runtime |
 | `core/src/commonTest/` | Cross-platform controller/protocol/crypto/session tests |
-| `core/src/iosMain/` | `IosBleTransport`, Apple clock/random services and Compose `UIViewController` entry point |
-| `android/` | `AndroidBleTransport`, permissions/service shell, Activity/ViewModel and debug E2E driver |
+| `core/src/androidMain/` | `AndroidBleTransport`, Android clock/prefs/alerts/BLE keep-alive |
+| `core/src/iosMain/` | `IosBleTransport`, Apple clock/random/alerts and Compose `UIViewController` entry point |
+| `android/` | permissions/Activity shell and debug E2E driver |
 | `ios/` | Xcode project, plist/assets and one minimal Swift bootstrap |
 
 The rule is simple: **if Android and iOS should produce the same answer or show the same product behavior, put it in `commonMain`.** Platform code only translates operating-system APIs into `DplsTransport` events.
@@ -22,8 +23,7 @@ Android:
 
 ```text
 MainActivity
-  → MainViewModel (thin service/lifecycle wrapper)
-  → DplsClient(AndroidBleTransport, AndroidPlatformServices)
+  → DplsApplication.client (DplsClient + Android adapters)
   → DplsApp (commonMain Compose)
 ```
 
@@ -69,8 +69,8 @@ open ios/TestDPLS.xcodeproj
 - Screen/presentation or application flow → `core/src/commonMain/.../app/`.
 - Protocol field/message/auth contract → `core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
 - Secret/session runtime rule → `core/src/commonMain/.../session/`.
-- Android Bluetooth/lifecycle quirk → `android/` only.
-- iOS CoreBluetooth/lifecycle quirk → `core/src/iosMain/` only.
+- Android Bluetooth/lifecycle quirk → `core/src/androidMain/`
+- iOS CoreBluetooth/lifecycle quirk → `core/src/iosMain/`
 - Xcode signing/assets/capabilities → `ios/` only.
 
 An ordinary product feature should normally touch one shared Kotlin area. Do not add compatibility facades or platform controllers unless an OS API genuinely requires a new boundary.
