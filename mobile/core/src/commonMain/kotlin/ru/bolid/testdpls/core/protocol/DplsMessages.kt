@@ -69,7 +69,7 @@ fun parseDeviceInfoReport(raw: ByteArray): DeviceInfo? {
 
 fun parseStateReport(raw: ByteArray, nowMillis: Long): DeviceState? {
     if (raw.size < 16) return null
-    val mode = DplsMode.fromWire(raw[0].toInt() and 0xff) ?: DplsMode.NORMAL
+    val mode = DplsMode.fromWire(raw[0].toInt() and 0xff) ?: return null
     val power = if ((raw[1].toInt() and 0xff) == 0) PowerSource.DPLS else PowerSource.RESERVE
     val voltage = readU16(raw, 2)
     val automaticReturn = readU16(raw, 4)

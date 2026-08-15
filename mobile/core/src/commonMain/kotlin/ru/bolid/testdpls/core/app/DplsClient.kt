@@ -71,6 +71,7 @@ class DplsClient(
     private var pendingModeCommandId: Long? = null
     private var reconnectAttempt = 0
     private var reachedReady = false
+    private var setupReconnectExpected = false
     private var legacyFirmware = false
     private var awaitingDeviceInfo = false
     private var timeSyncPending = false
@@ -110,6 +111,9 @@ class DplsClient(
     private var commandTimeoutJob: Job? = null
     private var connectTimeoutJob: Job? = null
     private var rssiJob: Job? = null
+    private var deviceInfoTimeoutJob: Job? = null
+    private var logHistogramTimeoutJob: Job? = null
+    private var timeSyncTimeoutJob: Job? = null
 
     init {
         transport.setListener(this)
@@ -197,11 +201,16 @@ class DplsClient(
         keepAliveJob?.cancel()
         stateRefreshJob?.cancel()
         preAuthKeepAliveJob?.cancel()
+        deviceInfoTimeoutJob?.cancel()
+        logHistogramTimeoutJob?.cancel()
+        timeSyncTimeoutJob?.cancel()
         session.resetAll()
         reachedReady = false
+        setupReconnectExpected = false
         selectedAddress = address
         legacyFirmware = false
         awaitingDeviceInfo = false
+        awaitingLogHistogram = false
         timeSyncPending = false
         timeSyncAttempted = false
         pendingModeCommandId = null
@@ -312,13 +321,14 @@ class DplsClient(
     }
 
     override fun requestMode(mode: DplsMode) {
-        if (state.controlsEnabled) updateState { it.copy(pendingMode = mode) }
+        if (state.controlsEnabled && !timeSyncPending) updateState { it.copy(pendingMode = mode) }
     }
 
     override fun cancelMode() = updateState { it.copy(pendingMode = null) }
 
     override fun confirmMode() {
         val mode = state.pendingMode ?: return
+        if (timeSyncPending && mode != DplsMode.NORMAL) return
         val commandId = session.nextCommandId()
         pendingModeCommandId = commandId
         val payload = ByteArray(17)
@@ -345,13 +355,13 @@ class DplsClient(
     }
 
     override fun loadEventLog() {
-        if (logExporting || state.logProgress != null || !state.authenticated) return
+        if (logExporting || state.logProgress != null || !state.authenticated || timeSyncPending) return
         if (state.eventLog.isNotEmpty() || state.logHasMore) return
         startEventLogTransfer()
     }
 
     override fun refreshEventLog() {
-        if (logExporting || state.logProgress != null || !state.authenticated) return
+        if (logExporting || state.logProgress != null || !state.authenticated || timeSyncPending) return
         startEventLogTransfer(incremental = logRecords.isNotEmpty())
     }
 
@@ -390,14 +400,22 @@ class DplsClient(
     }
 
     override fun loadLogHistogram() {
-        if (!state.authenticated || !transport.hasConnection() || awaitingLogHistogram) return
+        if (!state.authenticated || !transport.hasConnection() || awaitingLogHistogram || timeSyncPending) return
         if (logExporting || state.logProgress != null) return
         awaitingLogHistogram = true
+        logHistogramTimeoutJob?.cancel()
+        logHistogramTimeoutJob = scope.launch {
+            delay(ONE_SHOT_REQUEST_TIMEOUT_MS)
+            if (awaitingLogHistogram) {
+                awaitingLogHistogram = false
+                if (state.authenticated && state.eventLog.isEmpty() && !logExporting) loadEventLog()
+            }
+        }
         send(DplsProtocol.Type.LOG_HIST_GET, session.authenticatedPayload() + byteArrayOf(24))
     }
 
     override fun loadMoreEventLog() {
-        if (!state.authenticated || !state.logHasMore || logExporting) return
+        if (!state.authenticated || !state.logHasMore || logExporting || timeSyncPending) return
         val missing = nextGlobalMissingLogIndex() ?: return
         logPrefetchFrom = missing
         val windowEnd = minOf(expectedLogEvents, missing + LOG_PAGE_SIZE)
@@ -412,20 +430,20 @@ class DplsClient(
     }
 
     override fun loadRemainingEventLog() {
-        if (!state.authenticated || logExporting || !state.logHasMore) return
+        if (!state.authenticated || logExporting || !state.logHasMore || timeSyncPending) return
         drainLog = true
         loadMoreEventLog()
     }
 
     override fun refreshState() {
-        if (state.authenticated && !logExporting && state.logProgress == null && transport.hasConnection()) {
+        if (state.authenticated && !logExporting && state.logProgress == null && transport.hasConnection() && !timeSyncPending) {
             send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
             scheduleStateRefresh()
         }
     }
 
     override fun requestDeviceInfo() {
-        if (state.authenticated && transport.hasConnection()) requestDeviceInfoInternal()
+        if (state.authenticated && transport.hasConnection() && !timeSyncPending) requestDeviceInfoInternal()
     }
 
     override fun clearSettingsOp() {
@@ -437,6 +455,7 @@ class DplsClient(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return settingsFailure("Введите имя устройства")
         if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
+        if (timeSyncPending) return settingsFailure("Подождите завершения синхронизации времени")
 
         val nameBytes = utf8Truncate(trimmed, 31)
         val commandId = session.nextCommandId()
@@ -454,6 +473,7 @@ class DplsClient(
     override fun changePassword(current: String, newPassword: String) {
         if (newPassword.length < 8) return settingsFailure("Пароль должен содержать не менее 8 символов")
         if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
+        if (timeSyncPending) return settingsFailure("Подождите завершения синхронизации времени")
 
         val currentVerifier = DplsCrypto.deriveVerifier(current, session.authSalt)
         val matches = cachedVerifier?.let { constantTimeEquals(it, currentVerifier) } == true
@@ -570,9 +590,12 @@ class DplsClient(
     override fun onBluetoothUnavailable() {
         cancelConnectionJobs()
         pendingModeCommandId = null
+        awaitingDeviceInfo = false
+        awaitingLogHistogram = false
         timeSyncPending = false
         timeSyncAttempted = false
         session.resetLink()
+        platform.keepConnectionAlive(false)
         updateState {
             it.copy(
                 phase = ConnectionPhase.RECONNECTING,
@@ -691,6 +714,11 @@ class DplsClient(
             onStaleBond()
             return
         }
+        if (setupReconnectExpected && selectedAddress != null && state.phase != ConnectionPhase.ERROR) {
+            setupReconnectExpected = false
+            scheduleReconnect(immediate = true)
+            return
+        }
         if (reachedReady && selectedAddress != null && state.phase != ConnectionPhase.ERROR) {
             scheduleReconnect()
             return
@@ -702,6 +730,7 @@ class DplsClient(
             return
         }
         selectedAddress = null
+        platform.keepConnectionAlive(false)
         updateState {
             it.copy(
                 phase = ConnectionPhase.IDLE,
@@ -728,6 +757,7 @@ class DplsClient(
         reconnectJob?.cancel()
         identifyAfterConnect = false
         pendingIdentifyAck = false
+        setupReconnectExpected = false
         val name = state.selectedDevice?.userName
             ?: state.selectedDevice?.advertisedName
             ?: "Test-DPLS"
@@ -779,6 +809,7 @@ class DplsClient(
         preAuthKeepAliveJob?.cancel()
         if (result.status == 3) {
             persistCachedVerifier()
+            setupReconnectExpected = true
             updateState {
                 it.copy(
                     phase = ConnectionPhase.RECONNECTING,
@@ -801,6 +832,7 @@ class DplsClient(
                 else "Неверный пароль",
             )
         }
+        setupReconnectExpected = false
         persistCachedVerifier()
         val token = result.sessionToken ?: return fail("AUTH_RESULT без session token")
         session.authenticate(token)
@@ -843,6 +875,8 @@ class DplsClient(
 
     private fun handleDeviceInfo(payload: ByteArray) {
         awaitingDeviceInfo = false
+        deviceInfoTimeoutJob?.cancel()
+        deviceInfoTimeoutJob = null
         val info = parseDeviceInfoReport(payload) ?: return
         updateState {
             it.copy(
@@ -1141,6 +1175,8 @@ class DplsClient(
 
     private fun handleLogHistogram(payload: ByteArray) {
         awaitingLogHistogram = false
+        logHistogramTimeoutJob?.cancel()
+        logHistogramTimeoutJob = null
         val report = parseLogHistogramReport(payload) ?: return
         updateState {
             it.copy(
@@ -1154,16 +1190,10 @@ class DplsClient(
     }
 
     private fun handleDeviceError(code: Int) {
-        if (code == 5 && timeSyncPending) {
-            /* Firmware before TIME_SYNC reports "unsupported message". Keep the
-             * connection usable and fall back to the legacy uptime journal. */
-            timeSyncPending = false
-            legacyFirmware = true
-            if (state.state == null) send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
-            return
-        }
         if (awaitingLogHistogram) {
             awaitingLogHistogram = false
+            logHistogramTimeoutJob?.cancel()
+            logHistogramTimeoutJob = null
             if (code == 5) legacyFirmware = true
             if (state.eventLog.isEmpty() && !logExporting) loadEventLog()
             return
@@ -1171,6 +1201,8 @@ class DplsClient(
         if (logExporting || state.logProgress != null) return failLog("Ошибка загрузки журнала: $code")
         if (code == 5 && awaitingDeviceInfo) {
             awaitingDeviceInfo = false
+            deviceInfoTimeoutJob?.cancel()
+            deviceInfoTimeoutJob = null
             legacyFirmware = true
             attemptTimeSync()
             return
@@ -1179,6 +1211,16 @@ class DplsClient(
             clearPendingSettings()
             legacyFirmware = true
             return settingsFailure("Прошивка устройства не поддерживает изменение настроек")
+        }
+        if (code == 5 && timeSyncPending) {
+            /* Firmware before TIME_SYNC reports "unsupported message". The probe
+             * owns ERROR 5 only inside a bounded, non-overlapping request window. */
+            timeSyncPending = false
+            timeSyncTimeoutJob?.cancel()
+            timeSyncTimeoutJob = null
+            legacyFirmware = true
+            scheduleStateRefresh()
+            return
         }
         fail(
             if (code == 7) "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку."
@@ -1209,16 +1251,36 @@ class DplsClient(
     }
 
     private fun requestDeviceInfoInternal() {
+        if (awaitingDeviceInfo || !state.authenticated || !transport.hasConnection()) return
         awaitingDeviceInfo = true
+        deviceInfoTimeoutJob?.cancel()
+        deviceInfoTimeoutJob = scope.launch {
+            delay(ONE_SHOT_REQUEST_TIMEOUT_MS)
+            if (awaitingDeviceInfo) {
+                awaitingDeviceInfo = false
+                if (state.authenticated && transport.hasConnection() && state.deviceInfo == null && !legacyFirmware) {
+                    requestDeviceInfoInternal()
+                }
+            }
+        }
         send(DplsProtocol.Type.DEVICE_INFO_GET, session.authenticatedPayload())
     }
 
     private fun attemptTimeSync() {
-        if (timeSyncAttempted || legacyFirmware) return
+        if (timeSyncAttempted || timeSyncPending || legacyFirmware || !state.authenticated || !transport.hasConnection()) return
         val unixSeconds = platform.nowMillis() / 1000L
         val payload = buildTimeSyncPayload(session.sessionId, session.sessionToken, unixSeconds) ?: return
         timeSyncAttempted = true
         timeSyncPending = true
+        stateRefreshJob?.cancel()
+        timeSyncTimeoutJob?.cancel()
+        timeSyncTimeoutJob = scope.launch {
+            delay(TIME_SYNC_ERROR_WINDOW_MS)
+            if (timeSyncPending) {
+                timeSyncPending = false
+                scheduleStateRefresh()
+            }
+        }
         send(DplsProtocol.Type.TIME_SYNC, payload)
     }
 
@@ -1248,11 +1310,11 @@ class DplsClient(
 
     private fun scheduleStateRefresh() {
         stateRefreshJob?.cancel()
-        if (logExporting || !state.needsPeriodicStateRefresh || !transport.hasConnection()) return
+        if (timeSyncPending || logExporting || !state.needsPeriodicStateRefresh || !transport.hasConnection()) return
         stateRefreshJob = scope.launch {
-            while (!logExporting && state.needsPeriodicStateRefresh && transport.hasConnection()) {
+            while (!timeSyncPending && !logExporting && state.needsPeriodicStateRefresh && transport.hasConnection()) {
                 delay(STATE_REFRESH_MS)
-                if (logExporting || !state.needsPeriodicStateRefresh) break
+                if (timeSyncPending || logExporting || !state.needsPeriodicStateRefresh) break
                 val receivedAt = state.state?.receivedAtMillis
                 if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) {
                     updateState { it.copy(staleState = true) }
@@ -1262,13 +1324,16 @@ class DplsClient(
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(immediate: Boolean = false) {
         if (reconnectJob?.isActive == true || selectedAddress == null) return
         cancelConnectionJobs()
         pendingModeCommandId = null
+        awaitingDeviceInfo = false
+        awaitingLogHistogram = false
         timeSyncPending = false
         timeSyncAttempted = false
         session.resetLink()
+        platform.keepConnectionAlive(true)
         updateState {
             it.copy(
                 phase = ConnectionPhase.RECONNECTING,
@@ -1281,10 +1346,10 @@ class DplsClient(
             )
         }
         val delays = longArrayOf(500, 1_000, 2_000, 4_000, 5_000)
-        val delayMs = delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
+        val delayMs = if (immediate) 0L else delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
         reconnectAttempt++
         reconnectJob = scope.launch {
-            delay(delayMs)
+            if (delayMs > 0L) delay(delayMs)
             if (selectedAddress != null && !transport.reconnect()) {
                 fail("Устройство недоступно. Запустите поиск снова.")
             }
@@ -1347,7 +1412,13 @@ class DplsClient(
         stateRefreshJob?.cancel()
         commandTimeoutJob?.cancel()
         connectTimeoutJob?.cancel()
+        deviceInfoTimeoutJob?.cancel()
+        logHistogramTimeoutJob?.cancel()
+        timeSyncTimeoutJob?.cancel()
         connectTimeoutJob = null
+        deviceInfoTimeoutJob = null
+        logHistogramTimeoutJob = null
+        timeSyncTimeoutJob = null
         stopRssiPoll()
     }
 
@@ -1370,6 +1441,9 @@ class DplsClient(
         scanJob?.cancel()
         cancelConnectionJobs()
         pendingModeCommandId = null
+        setupReconnectExpected = false
+        awaitingDeviceInfo = false
+        awaitingLogHistogram = false
         timeSyncPending = false
         timeSyncAttempted = false
         logTimeoutJob?.cancel()
@@ -1454,11 +1528,22 @@ class DplsClient(
     }
 
     private fun fail(message: String, staleBond: Boolean = false) {
+        reconnectJob?.cancel()
+        preAuthKeepAliveJob?.cancel()
+        keepAliveJob?.cancel()
+        stateRefreshJob?.cancel()
         pendingModeCommandId = null
         commandTimeoutJob?.cancel()
         connectTimeoutJob?.cancel()
         connectTimeoutJob = null
+        deviceInfoTimeoutJob?.cancel()
+        logHistogramTimeoutJob?.cancel()
+        timeSyncTimeoutJob?.cancel()
+        awaitingDeviceInfo = false
+        awaitingLogHistogram = false
+        timeSyncPending = false
         stopRssiPoll()
+        platform.keepConnectionAlive(false)
         updateState {
             it.copy(
                 phase = ConnectionPhase.ERROR,
@@ -1518,6 +1603,8 @@ class DplsClient(
         private const val TELEMETRY_STALE_MS = 3_000L
         private const val LOG_CHUNK_TIMEOUT_MS = 15_000L
         private const val SETTINGS_TIMEOUT_MS = 10_000L
+        private const val ONE_SHOT_REQUEST_TIMEOUT_MS = 2_000L
+        private const val TIME_SYNC_ERROR_WINDOW_MS = 1_500L
         private const val MAX_LOG_EVENTS = 200
         private const val LOG_PAGE_SIZE = 15
         private const val RSSI_POLL_MS = 350L

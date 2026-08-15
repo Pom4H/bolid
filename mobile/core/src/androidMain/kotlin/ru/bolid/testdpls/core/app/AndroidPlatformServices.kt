@@ -6,19 +6,28 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import ru.bolid.testdpls.core.domain.UiTheme
+import java.security.KeyStore
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class AndroidPlatformServices(context: Context) : DplsPlatformServices {
     private val appContext = context.applicationContext
     private val random = SecureRandom()
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val verifierStore = AndroidVerifierStore(prefs)
 
     override fun nowMillis(): Long = System.currentTimeMillis()
 
@@ -56,24 +65,10 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
         prefs.edit { putBoolean(DplsPlatformPrefs.HAPTICS, enabled) }
     }
 
-    override fun readDeviceVerifier(deviceKey: String): ByteArray? {
-        val raw = prefs.getString(DplsPlatformPrefs.verifierKey(deviceKey), null) ?: return null
-        return try {
-            android.util.Base64.decode(raw, android.util.Base64.NO_WRAP)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-    }
+    override fun readDeviceVerifier(deviceKey: String): ByteArray? = verifierStore.read(deviceKey)
 
     override fun writeDeviceVerifier(deviceKey: String, verifier: ByteArray?) {
-        val key = DplsPlatformPrefs.verifierKey(deviceKey)
-        prefs.edit {
-            if (verifier == null) {
-                remove(key)
-            } else {
-                putString(key, android.util.Base64.encodeToString(verifier, android.util.Base64.NO_WRAP))
-            }
-        }
+        verifierStore.write(deviceKey, verifier)
     }
 
     override fun readDeviceString(key: String): String? = prefs.getString(key, null)
@@ -141,5 +136,89 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
         const val PREFS = "testdpls"
         const val ALERT_CHANNEL_ID = "dpls_alerts"
         val dateTimeFormat = SimpleDateFormat("d MMMM yyyy, HH:mm:ss", Locale.forLanguageTag("ru"))
+    }
+}
+
+/**
+ * Verifiers are authentication-equivalent secrets: possession is enough to build AUTH_PROOF.
+ * Keep only AES-GCM ciphertext in SharedPreferences; the AES key itself never leaves Android Keystore.
+ */
+private class AndroidVerifierStore(
+    private val prefs: SharedPreferences,
+) {
+    fun read(deviceKey: String): ByteArray? {
+        val prefKey = DplsPlatformPrefs.verifierKey(deviceKey)
+        val stored = prefs.getString(prefKey, null) ?: return null
+        if (!stored.startsWith(FORMAT_PREFIX)) return migrateLegacy(prefKey, deviceKey, stored)
+
+        return runCatching {
+            val parts = stored.removePrefix(FORMAT_PREFIX).split(':', limit = 2)
+            require(parts.size == 2)
+            val iv = android.util.Base64.decode(parts[0], android.util.Base64.NO_WRAP)
+            val ciphertext = android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.doFinal(ciphertext)
+        }.getOrElse {
+            prefs.edit { remove(prefKey) }
+            null
+        }
+    }
+
+    fun write(deviceKey: String, verifier: ByteArray?) {
+        val prefKey = DplsPlatformPrefs.verifierKey(deviceKey)
+        if (verifier == null) {
+            prefs.edit { remove(prefKey) }
+            return
+        }
+
+        val encoded = runCatching {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val ciphertext = cipher.doFinal(verifier)
+            val iv = android.util.Base64.encodeToString(cipher.iv, android.util.Base64.NO_WRAP)
+            val body = android.util.Base64.encodeToString(ciphertext, android.util.Base64.NO_WRAP)
+            "$FORMAT_PREFIX$iv:$body"
+        }.getOrNull() ?: return
+        prefs.edit { putString(prefKey, encoded) }
+    }
+
+    private fun migrateLegacy(prefKey: String, deviceKey: String, stored: String): ByteArray? {
+        val legacy = runCatching {
+            android.util.Base64.decode(stored, android.util.Base64.NO_WRAP)
+        }.getOrNull()
+        if (legacy == null || legacy.size != 32) {
+            prefs.edit { remove(prefKey) }
+            return null
+        }
+        write(deviceKey, legacy)
+        return legacy
+    }
+
+    private fun getOrCreateKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .setUserAuthenticationRequired(false)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+
+    private companion object {
+        const val KEYSTORE = "AndroidKeyStore"
+        const val KEY_ALIAS = "testdpls.device-verifier.v1"
+        const val TRANSFORMATION = "AES/GCM/NoPadding"
+        const val GCM_TAG_BITS = 128
+        const val FORMAT_PREFIX = "v1:"
     }
 }
