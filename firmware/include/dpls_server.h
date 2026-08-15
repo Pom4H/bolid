@@ -2,6 +2,7 @@
 #define DPLS_SERVER_H
 
 #include "dpls_protocol.h"
+#include "dpls_safety.h"
 
 #define DPLS_AUTH_NONCE_SIZE 16u
 #define DPLS_AUTH_SALT_SIZE 16u
@@ -9,60 +10,42 @@
 #define DPLS_SESSION_TOKEN_SIZE 8u
 #define DPLS_COMMAND_CACHE_SIZE 8u
 #define DPLS_NAME_MAX 31u
-/* Firmware version reported in DEVICE_INFO_REPORT (semantic-ish). Bump on
- * behaviour changes visible to the operator app. */
 #define DPLS_FW_VERSION_MAJOR 1u
 #define DPLS_FW_VERSION_MINOR 3u
 #define DPLS_FW_VERSION_PATCH 0u
-/* Authenticated TIME_SYNC accepts sane UTC values only. This catches an unset
- * phone clock without making the safety timers depend on wall-clock time. */
-#define DPLS_TIME_MIN_UNIX_SECONDS 1577836800u /* 2020-01-01T00:00:00Z */
-#define DPLS_TIME_MAX_UNIX_SECONDS 4102444799u /* 2099-12-31T23:59:59Z */
-/* Capability bits in DEVICE_INFO_REPORT so the app can drop pretence about
- * features the hardware/firmware does not actually provide. */
+#define DPLS_TIME_MIN_UNIX_SECONDS 1577836800u
+#define DPLS_TIME_MAX_UNIX_SECONDS 4102444799u
+
 enum {
     DPLS_CAP_ADC_PRESENT           = 1u << 0,
-    DPLS_CAP_HW_READBACK           = 1u << 1, /* power-stage feedback (false until stage 6) */
+    DPLS_CAP_HW_READBACK           = 1u << 1,
     DPLS_CAP_ADC_CALIBRATED        = 1u << 2,
     DPLS_CAP_MULTI_VOLTAGE_REPORT  = 1u << 3,
 };
+
 #ifndef DPLS_EVENT_CAPACITY
 #define DPLS_EVENT_CAPACITY 200u
 #endif
-/* Events packed into one LOG_CHUNK indication. 15 × 10 B + 3 B header = 153 B,
- * well within a 247-MTU payload; a 200-record journal exports in ~14 chunks. */
 #define DPLS_LOG_CHUNK_EVENTS 15u
-#define DPLS_MODE_MAX_MS 300000u
-#define DPLS_SESSION_TIMEOUT_MS 10000u
+#define DPLS_MODE_MAX_MS DPLS_SAFETY_MODE_MAX_MS
+#define DPLS_SESSION_TIMEOUT_MS DPLS_SAFETY_SESSION_TIMEOUT_MS
 #define DPLS_AUTH_BLOCK_MS 300000u
 #define DPLS_AUTH_MAX_ATTEMPTS 5u
-/* Minimum spacing between processed AUTH_PROOF attempts. A burst arriving faster
- * than this is rejected without a verify or a failed-attempt increment, so a
- * duplicate from a legit client is harmless while brute force is throttled. */
 #define DPLS_AUTH_MIN_INTERVAL_MS 1000u
-/* Commissioning window: SETUP of an uninitialised device is only accepted for
- * this long after power-on. After it closes, a power-cycle or factory reset
- * (both physical actions) re-opens it. Tighten for production; kept generous so
- * a normal commissioning flow — and the E2E — completes inside it. */
 #define DPLS_SETUP_WINDOW_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
 #define DPLS_IDENTIFY_BLINK_MS 500u
 
-typedef enum {
-    DPLS_MODE_NORMAL = 0,
-    DPLS_MODE_OPEN_T = 1,
-    DPLS_MODE_OPEN_MAIN = 2,
-    DPLS_MODE_SHORT_1 = 3,
-    DPLS_MODE_SHORT_2 = 4,
-    DPLS_MODE_SHORT_T = 5
-} dpls_mode_t;
+typedef dpls_safety_mode_t dpls_mode_t;
+#define DPLS_MODE_NORMAL DPLS_SAFE_NORMAL
+#define DPLS_MODE_OPEN_T DPLS_SAFE_OPEN_T
+#define DPLS_MODE_OPEN_MAIN DPLS_SAFE_OPEN_MAIN
+#define DPLS_MODE_SHORT_1 DPLS_SAFE_SHORT_1
+#define DPLS_MODE_SHORT_2 DPLS_SAFE_SHORT_2
+#define DPLS_MODE_SHORT_T DPLS_SAFE_SHORT_T
 
 typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
 
-/* Validity mask carried in STATE_REPORT byte 16. A zero measurement is a real
- * value (0 V is a legitimate reading), so the client must not treat it as
- * "measured" unless the matching bit is set. Before the first conversion lands
- * every bit is 0 and the app shows "—" / "Не определён" instead of a default. */
 enum {
     DPLS_STATE_LINE_VOLTAGE_VALID = 1u << 0,
     DPLS_STATE_RESERVE_VALID      = 1u << 1,
@@ -74,11 +57,13 @@ enum {
 };
 #define DPLS_STATE_PORT_1_VALID DPLS_STATE_LINE_VOLTAGE_VALID
 #define DPLS_STATE_RESERVE_VOLTAGE_VALID DPLS_STATE_RESERVE_VALID
+
 typedef enum {
     DPLS_SETTINGS_EMPTY = 0,
     DPLS_SETTINGS_VALID = 1,
     DPLS_SETTINGS_CORRUPT = 2,
 } dpls_settings_state_t;
+
 typedef enum {
     DPLS_RETURN_OPERATOR = 0,
     DPLS_RETURN_MODE_TIMEOUT = 1,
@@ -97,7 +82,6 @@ typedef struct {
     uint8_t parameter;
 } dpls_event_t;
 
-/* Stable, platform-supplied identity/capability facts for DEVICE_INFO_REPORT. */
 typedef struct {
     uint32_t device_id;
     uint8_t fw_major;
@@ -111,9 +95,6 @@ typedef struct {
     bool (*link_encrypted)(void *context);
     bool (*hardware_apply_mode)(void *context, dpls_mode_t mode);
     void (*hardware_safe_normal)(void *context);
-    /* Legacy DPLS voltage remains in STATE_REPORT bytes 2..3. Firmware 1.1.2+
-     * also appends four explicitly labelled live voltages. Missing physical
-     * channels return 0 and keep their validity bits clear. */
     uint16_t (*voltage_mv)(void *context);
     uint16_t (*port1_voltage_mv)(void *context);
     uint16_t (*port2_voltage_mv)(void *context);
@@ -121,41 +102,20 @@ typedef struct {
     uint16_t (*reserve_voltage_mv)(void *context);
     dpls_power_t (*power_source)(void *context);
     bool (*reserve_low)(void *context);
-    /* Optional: validity mask (DPLS_STATE_*_VALID bits) for the measured
-     * fields. NULL is treated as "nothing measured yet" (mask 0). */
     uint8_t (*measurement_validity)(void *context);
-    /* Reports identify mode entering/leaving. The blink shape is owned by the
-     * LED driver, so this is called once on start (true) and once on stop
-     * (false), not toggled per blink. */
     void (*identify_led)(void *context, bool enabled);
     bool (*random_bytes)(void *context, uint8_t *out, size_t length);
-    /* Optional: true while the hardware is isolating a real downstream short
-     * circuit (BRIZ-T function). NULL is treated as "never". */
     bool (*real_short_active)(void *context);
     dpls_settings_state_t (*settings_state)(void *context);
     void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
     bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
-    /* Copy the current user name (NUL-terminated, up to DPLS_NAME_MAX+1 bytes).
-     * Empty string if the device is not commissioned. */
     void (*settings_name)(void *context, char out[DPLS_NAME_MAX + 1u]);
-    /* Read-modify-write of just the name / just the password (salt+verifier) in
-     * the persisted settings record, with a read-back verify. Return false on
-     * any NV failure. Optional (NULL disables NAME_SET / PASSWORD_SET). */
     bool (*settings_set_name)(void *context, const char *name);
     bool (*settings_set_password)(void *context, const uint8_t salt[16], const uint8_t verifier[32]);
-    /* Fill stable identity and capability facts for DEVICE_INFO_REPORT. */
     void (*device_info)(void *context, dpls_device_info_t *out);
     bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
-    /* Optional persistent brute-force lock. auth_lock_read reports whether the
-     * device booted while locked; auth_lock_write persists (true) or clears
-     * (false) the marker and returns false if the NV write failed (the lock
-     * would then not survive a reboot — reported as a diagnostic fault). NULL
-     * on both keeps the lock RAM-only (cleared by a reboot). Cleared by factory
-     * reset alongside the password. */
     bool (*auth_lock_read)(void *context);
     bool (*auth_lock_write)(void *context, bool locked);
-    /* Journal storage is persistent and sequence-addressed. The server keeps
-     * only metadata and streams one record at a time during BLE export. */
     bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
     bool (*event_storage_append)(void *context, const dpls_event_t *event);
     bool (*event_storage_read)(void *context, uint32_t sequence, dpls_event_t *event);
@@ -177,6 +137,7 @@ typedef struct {
 
 typedef struct {
     dpls_hal_t hal;
+    dpls_safety_t safety;
     bool connected;
     bool authenticated;
     bool identify_active;
@@ -192,31 +153,21 @@ typedef struct {
     uint32_t last_auth_proof_ms;
     uint32_t boot_ms;
     uint32_t now_ms;
-    /* Wall clock is deliberately separate from now_ms. now_ms remains the only
-     * source for safety/session/mode deadlines; TIME_SYNC merely anchors UTC
-     * for journal timestamps. It is RAM-only and therefore invalid after a
-     * cold boot until an authenticated phone synchronizes it again. */
     bool wall_clock_valid;
     uint32_t wall_clock_unix_seconds;
     uint32_t wall_clock_last_ms;
     uint16_t wall_clock_fraction_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
-    uint32_t mode_deadline_ms;
     uint32_t identify_deadline_ms;
     uint32_t identify_blink_last_ms;
     uint32_t setup_disconnect_deadline_ms;
-    uint32_t state_revision;
     uint16_t tx_sequence;
     uint8_t device_nonce[16];
     uint8_t client_nonce[16];
     uint8_t session_token[8];
-    dpls_mode_t mode;
     dpls_cached_command_t command_cache[DPLS_COMMAND_CACHE_SIZE];
     uint8_t command_cache_cursor;
-    /* Outgoing frames used to be allocated on the 1 KiB Cortex-M0 stack.
-     * A journal response then nested this buffer with the decoded request and
-     * the SDK ATT indication buffer, overflowing into events[]. */
     uint8_t tx_encoded[DPLS_MAX_FRAME];
     uint16_t event_count;
     uint32_t next_event_sequence;
