@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-CONTROL = re.compile(r"\b(if|when|for|while|catch)\b")
+CONTROL = re.compile(r"\b(if|when|for|while|catch|switch)\b")
 BOOL = re.compile(r"(&&|\|\|)")
 LINE_COMMENT = re.compile(r"//.*$")
 
