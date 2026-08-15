@@ -31,28 +31,45 @@ import ru.bolid.testdpls.core.protocol.parseAuthChallenge
 import ru.bolid.testdpls.core.protocol.parseAuthResult
 import ru.bolid.testdpls.core.protocol.parseCommandResult
 import ru.bolid.testdpls.core.protocol.parseDeviceInfoReport
-import ru.bolid.testdpls.core.protocol.parseLogChunk
 import ru.bolid.testdpls.core.protocol.parseLogHistogramReport
 import ru.bolid.testdpls.core.protocol.parseSettingsResult
 import ru.bolid.testdpls.core.protocol.parseStateReport
 import ru.bolid.testdpls.core.protocol.putU16
 import ru.bolid.testdpls.core.protocol.putU32
-import ru.bolid.testdpls.core.protocol.readU16
-import ru.bolid.testdpls.core.protocol.readU32
+import ru.bolid.testdpls.core.runtime.AuthSession
+import ru.bolid.testdpls.core.runtime.DeviceSession
+import ru.bolid.testdpls.core.runtime.LinkEndpoint
+import ru.bolid.testdpls.core.runtime.LinkFailure
+import ru.bolid.testdpls.core.runtime.NodeId
+import ru.bolid.testdpls.core.runtime.credentialKey
 import ru.bolid.testdpls.core.session.DplsSessionRuntime
 
-/**
- * Single cross-platform Test-DPLS application controller.
- *
- * Android and iOS inject BLE transport plus [DplsPlatformServices]
- * (clock, prefs, keep-alive, operator alerts). Protocol parsing, authentication,
- * retries, session state, commands, journal transfer and settings live here once.
- */
 class DplsClient(
     private val transport: DplsTransport,
     private val platform: DplsPlatformServices,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
 ) : DplsController, DplsTransportListener {
+    private data class Target(
+        val address: String,
+        val reachedReady: Boolean = false,
+        val expectSetupReconnect: Boolean = false,
+    )
+
+    private sealed interface Operation {
+        data class Mode(val id: Long) : Operation
+        data object DeviceInfo : Operation
+        data object TimeSync : Operation
+        data object Histogram : Operation
+        data class Name(val id: Long, val value: String) : Operation
+        data class Password(val id: Long, val verifier: ByteArray) : Operation
+    }
+
+    private data class Identify(
+        val afterConnect: Boolean = false,
+        val awaitingWriteAck: Boolean = false,
+        val sentAtMillis: Long = 0L,
+    )
+
     private val mutableState = MutableStateFlow(
         DplsUiState(
             uiTheme = platform.readUiTheme(),
@@ -62,100 +79,53 @@ class DplsClient(
     )
     override val uiState: StateFlow<DplsUiState> = mutableState.asStateFlow()
 
-    private val session = DplsSessionRuntime()
-    private var selectedAddress: String? = null
+    private val wireSession = DplsSessionRuntime()
+    private val journal = JournalMachine()
+    private var runtimeSession: DeviceSession = DeviceSession.Offline
+    private var target: Target? = null
+    private var identify = Identify()
+    private var operation: Operation? = null
     private var cachedVerifier: ByteArray? = null
-    private var identifyAfterConnect = false
-    private var pendingIdentifyAck = false
-    private var identifySentAtMs = 0L
-    private var pendingModeCommandId: Long? = null
     private var reconnectAttempt = 0
-    private var reachedReady = false
-    private var setupReconnectExpected = false
     private var legacyFirmware = false
-    private var awaitingDeviceInfo = false
-    private var timeSyncPending = false
     private var timeSyncAttempted = false
-
-    private sealed interface PendingSettings {
-        val commandId: Long
-        data class Name(override val commandId: Long, val name: String) : PendingSettings
-        data class Password(override val commandId: Long, val verifier: ByteArray) : PendingSettings
-    }
-
-    private var pendingSettings: PendingSettings? = null
-    private var expectedLogEvents = 0
-    private var logPrefetchFrom = 0
-    private var logPrefetchUntil = 0
-    private val logRecords = mutableMapOf<Int, EventRecord>()
-    private var logLoadPending = false
-    private var logExporting = false
-    private var drainLog = false
-    private var logIncremental = false
-    private var timeAnchors: List<JournalTimeAnchor> = emptyList()
-    private var logKnownCount = 0
-    private var logKnownMaxSequence = 0L
-    private var awaitingLogHistogram = false
     private var previousMode: DplsMode? = null
     private var lastOperatorAlert: String? = null
-    private var pendingLogAckIndex: Int? = null
-    private var writeOutstanding = false
+    private var logLoadPending = false
+    private var drainLog = false
+    private var timeAnchors: List<JournalTimeAnchor> = emptyList()
 
     private var scanJob: Job? = null
     private var reconnectJob: Job? = null
-    private var preAuthKeepAliveJob: Job? = null
-    private var keepAliveJob: Job? = null
-    private var stateRefreshJob: Job? = null
+    private var sessionLoopJob: Job? = null
+    private var operationJob: Job? = null
     private var logTimeoutJob: Job? = null
-    private var settingsTimeoutJob: Job? = null
-    private var commandTimeoutJob: Job? = null
-    private var connectTimeoutJob: Job? = null
     private var rssiJob: Job? = null
-    private var deviceInfoTimeoutJob: Job? = null
-    private var logHistogramTimeoutJob: Job? = null
-    private var timeSyncTimeoutJob: Job? = null
+    private var connectTimeoutJob: Job? = null
 
-    init {
-        transport.setListener(this)
-    }
+    init { transport.setListener(this) }
 
     override fun startScan() {
-        if (state.authenticated && transport.hasConnection()) {
-            browseDevices()
-            return
-        }
+        if (state.authenticated && transport.hasConnection()) return browseDevices()
         disconnectInternal(clearSelection = true, clearVerifier = true)
-        mutableState.value = retainedUiState(
-            phase = ConnectionPhase.SCANNING,
-            statusText = "Поиск Test-DPLS…",
-            scanning = true,
-        )
-        if (!transport.startScan()) {
-            // Radio may still be coming up; onBluetoothAvailable starts the scan.
-            return
-        }
-        armScanDeadline(keepSession = false)
+        mutableState.value = retainedUiState(ConnectionPhase.SCANNING, "Поиск Test-DPLС…", scanning = true)
+        if (transport.startScan()) armScanDeadline(keepSession = false)
     }
 
     override fun stopScan() {
         transport.stopScan()
         scanJob?.cancel()
         scanJob = null
-        if (state.authenticated) {
-            updateState {
-                it.copy(
-                    scanning = false,
-                    statusText = if (it.devices.isEmpty()) "Устройства не найдены" else "Выберите устройство",
-                )
-            }
-            return
-        }
         updateState {
-            if (it.phase != ConnectionPhase.SCANNING) it else it.copy(
-                phase = ConnectionPhase.IDLE,
-                scanning = false,
-                statusText = if (it.devices.isEmpty()) "Устройства не найдены" else "Выберите устройство",
-            )
+            when {
+                it.authenticated -> it.copy(scanning = false, statusText = deviceListCaption(it.devices.size))
+                it.phase == ConnectionPhase.SCANNING -> it.copy(
+                    phase = ConnectionPhase.IDLE,
+                    scanning = false,
+                    statusText = deviceListCaption(it.devices.size),
+                )
+                else -> it
+            }
         }
     }
 
@@ -164,56 +134,35 @@ class DplsClient(
         transport.stopScan()
         scanJob?.cancel()
         scanJob = null
-        updateState {
-            it.copy(
-                browsingDevices = false,
-                scanning = false,
-                phase = ConnectionPhase.READY,
-                statusText = "Готово",
-                error = null,
-            )
-        }
+        updateState { it.copy(browsingDevices = false, scanning = false, phase = ConnectionPhase.READY, statusText = "Готово", error = null) }
     }
 
     private fun browseDevices() {
-        val seed = listOfNotNull(state.selectedDevice)
         updateState {
-            val devices = (seed + it.devices).distinctBy(DiscoveredDevice::address)
+            val selected = listOfNotNull(it.selectedDevice)
             it.copy(
                 browsingDevices = true,
                 scanning = true,
-                devices = devices,
+                devices = (selected + it.devices).distinctBy(DiscoveredDevice::address),
                 statusText = "Поиск Test-DPLS…",
                 error = null,
             )
         }
-        if (!transport.startScan()) return
-        armScanDeadline(keepSession = true)
+        if (transport.startScan()) armScanDeadline(keepSession = true)
     }
 
     override fun connect(address: String) {
-        if (state.authenticated && selectedAddress == address && transport.hasConnection()) {
-            resumeSession()
-            return
-        }
+        if (state.authenticated && target?.address == address && transport.hasConnection()) return resumeSession()
         stopScan()
-        reconnectJob?.cancel()
-        keepAliveJob?.cancel()
-        stateRefreshJob?.cancel()
-        preAuthKeepAliveJob?.cancel()
-        deviceInfoTimeoutJob?.cancel()
-        logHistogramTimeoutJob?.cancel()
-        timeSyncTimeoutJob?.cancel()
-        session.resetAll()
-        reachedReady = false
-        setupReconnectExpected = false
-        selectedAddress = address
+        cancelLinkJobs()
+        wireSession.resetAll()
+        operation = null
+        target = Target(address)
+        runtimeSession = DeviceSession.Connecting(LinkEndpoint.Ble(address))
         legacyFirmware = false
-        awaitingDeviceInfo = false
-        awaitingLogHistogram = false
-        timeSyncPending = false
         timeSyncAttempted = false
-        pendingModeCommandId = null
+        reconnectAttempt = 0
+        previousMode = null
         updateState {
             it.copy(
                 phase = ConnectionPhase.CONNECTING,
@@ -241,12 +190,8 @@ class DplsClient(
     }
 
     override fun identify(address: String) {
-        if (state.authenticated && selectedAddress == address && transport.hasConnection()) {
-            resumeSession()
-            return
-        }
-        identifyAfterConnect = true
-        pendingIdentifyAck = false
+        if (state.authenticated && target?.address == address && transport.hasConnection()) return resumeSession()
+        identify = Identify(afterConnect = true)
         updateState {
             it.copy(
                 identifyActive = true,
@@ -256,36 +201,26 @@ class DplsClient(
             )
         }
         connect(address)
+        identify = Identify(afterConnect = true)
     }
 
     override fun stopIdentify() {
-        identifyAfterConnect = false
-        pendingIdentifyAck = false
-        identifySentAtMs = 0
+        identify = Identify()
         stopRssiPoll()
-        updateState {
-            it.copy(
-                identifyActive = false,
-                identifyLedLive = false,
-                identifyLedPhaseOffsetMs = 0,
-                linkRssi = null,
-            )
-        }
+        updateState { it.copy(identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, linkRssi = null) }
         if (transport.hasConnection()) send(DplsProtocol.Type.IDENTIFY_STOP, priority = true)
     }
 
     override fun confirmIdentifiedDevice() {
         stopIdentify()
-        preAuthKeepAliveJob?.cancel()
         if (state.credentialsReady) return
         if (!transport.hasConnection()) {
-            selectedAddress = null
-            fail("Связь с платой оборвалась. Выберите устройство снова.")
+            target = null
             updateState { it.copy(selectedDevice = null) }
-            return
+            return fail("Связь с платой оборвалась. Выберите устройство снова.")
         }
         updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…", error = null) }
-        send(DplsProtocol.Type.HELLO, session.clientNonce, priority = true)
+        send(DplsProtocol.Type.HELLO, wireSession.clientNonce, priority = true)
     }
 
     override fun updateSetupName(name: String) = updateState { it.copy(setupName = name) }
@@ -294,8 +229,7 @@ class DplsClient(
 
     override fun authenticate(password: String) {
         if (password.length < 8) return fail("Пароль должен содержать не менее 8 символов")
-        preAuthKeepAliveJob?.cancel()
-        val verifier = DplsCrypto.deriveVerifier(password, session.authSalt)
+        val verifier = DplsCrypto.deriveVerifier(password, wireSession.authSalt)
         replaceCachedVerifier(verifier)
         sendAuthProof(verifier)
     }
@@ -304,14 +238,12 @@ class DplsClient(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return fail("Введите имя устройства")
         if (password.length < 8) return fail("Пароль должен содержать не менее 8 символов")
-
         val salt = platform.secureRandomBytes(DplsAuth.SALT_SIZE)
         val verifier = DplsCrypto.deriveVerifier(password, salt)
         replaceCachedVerifier(verifier)
-
         val nameBytes = utf8Truncate(trimmed, 31)
         val payload = ByteArray(5 + nameBytes.size + salt.size + verifier.size)
-        putU32(payload, 0, session.sessionId)
+        putU32(payload, 0, wireSession.sessionId)
         payload[4] = nameBytes.size.toByte()
         nameBytes.copyInto(payload, 5)
         salt.copyInto(payload, 5 + nameBytes.size)
@@ -321,29 +253,33 @@ class DplsClient(
     }
 
     override fun requestMode(mode: DplsMode) {
-        if (state.controlsEnabled && !timeSyncPending) updateState { it.copy(pendingMode = mode) }
+        if (state.controlsEnabled && (operation == null || mode == DplsMode.NORMAL)) updateState { it.copy(pendingMode = mode) }
     }
 
     override fun cancelMode() = updateState { it.copy(pendingMode = null) }
 
     override fun confirmMode() {
         val mode = state.pendingMode ?: return
-        if (timeSyncPending && mode != DplsMode.NORMAL) return
-        val commandId = session.nextCommandId()
-        pendingModeCommandId = commandId
+        if (operation != null && mode != DplsMode.NORMAL) return
+        val id = wireSession.nextCommandId()
         val payload = ByteArray(17)
-        putU32(payload, 0, session.sessionId)
-        session.sessionToken.copyInto(payload, 4)
-        putU32(payload, 12, commandId)
+        putU32(payload, 0, wireSession.sessionId)
+        wireSession.sessionToken.copyInto(payload, 4)
+        putU32(payload, 12, id)
         payload[16] = mode.wire.toByte()
+
+        if (operation != null && mode == DplsMode.NORMAL) {
+            updateState { it.copy(pendingMode = null, statusText = "Возврат в Норму…") }
+            send(DplsProtocol.Type.MODE_SET, payload, priority = true)
+            return
+        }
+
+        operation = Operation.Mode(id)
         updateState { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена…") }
         send(DplsProtocol.Type.MODE_SET, payload)
-        scheduleStateRefresh()
-        commandTimeoutJob?.cancel()
-        commandTimeoutJob = scope.launch {
-            delay(COMMAND_TIMEOUT_MS)
-            if (state.commandInProgress && pendingModeCommandId == commandId) {
-                send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
+        armOperationTimeout(COMMAND_TIMEOUT_MS) {
+            if (operation is Operation.Mode) {
+                send(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
                 updateState { it.copy(statusText = "Запрос состояния устройства…") }
             }
         }
@@ -355,99 +291,62 @@ class DplsClient(
     }
 
     override fun loadEventLog() {
-        if (logExporting || state.logProgress != null || !state.authenticated || timeSyncPending) return
-        if (state.eventLog.isNotEmpty() || state.logHasMore) return
-        startEventLogTransfer()
+        if (!canStartLog() || !journal.isEmpty || state.logHasMore) return
+        startLog(incremental = false)
     }
 
     override fun refreshEventLog() {
-        if (logExporting || state.logProgress != null || !state.authenticated || timeSyncPending) return
-        startEventLogTransfer(incremental = logRecords.isNotEmpty())
+        if (!canStartLog()) return
+        startLog(incremental = !journal.isEmpty)
     }
 
-    private fun startEventLogTransfer(incremental: Boolean = false) {
-        val keep = incremental && logRecords.isNotEmpty()
-        logExporting = true
+    private fun canStartLog(): Boolean = state.authenticated && operation == null && !journal.isActive && transport.hasConnection()
+
+    private fun startLog(incremental: Boolean) {
+        journal.begin(incremental)
         logLoadPending = true
-        pendingLogAckIndex = null
-        drainLog = false
-        logIncremental = keep
-        if (keep) {
-            logKnownCount = expectedLogEvents
-            logKnownMaxSequence = logRecords.values.maxOfOrNull { it.sequence } ?: 0L
-        } else {
-            expectedLogEvents = 0
-            logPrefetchFrom = 0
-            logPrefetchUntil = 0
-            logKnownCount = 0
-            logKnownMaxSequence = 0L
-            logRecords.clear()
-        }
-        keepAliveJob?.cancel()
-        stateRefreshJob?.cancel()
-        updateState {
-            it.copy(
-                logProgress = 0f,
-                error = null,
-            )
-        }
-        send(
-            DplsProtocol.Type.LOG_START,
-            session.authenticatedPayload() + ByteArray(2),
-            flush = true,
-        )
+        sessionLoopJob?.cancel()
+        updateState { it.copy(logProgress = 0f, error = null) }
+        send(DplsProtocol.Type.LOG_START, wireSession.authenticatedPayload() + ByteArray(2), flush = true)
         armLogTimeout()
     }
 
     override fun loadLogHistogram() {
-        if (!state.authenticated || !transport.hasConnection() || awaitingLogHistogram || timeSyncPending) return
-        if (logExporting || state.logProgress != null) return
-        awaitingLogHistogram = true
-        logHistogramTimeoutJob?.cancel()
-        logHistogramTimeoutJob = scope.launch {
-            delay(ONE_SHOT_REQUEST_TIMEOUT_MS)
-            if (awaitingLogHistogram) {
-                awaitingLogHistogram = false
-                if (state.authenticated && state.eventLog.isEmpty() && !logExporting) loadEventLog()
+        if (!state.authenticated || !transport.hasConnection() || operation != null || journal.isActive) return
+        operation = Operation.Histogram
+        send(DplsProtocol.Type.LOG_HIST_GET, wireSession.authenticatedPayload() + byteArrayOf(24))
+        armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS) {
+            if (operation is Operation.Histogram) {
+                clearOperation()
+                if (state.eventLog.isEmpty()) loadEventLog()
             }
         }
-        send(DplsProtocol.Type.LOG_HIST_GET, session.authenticatedPayload() + byteArrayOf(24))
     }
 
     override fun loadMoreEventLog() {
-        if (!state.authenticated || !state.logHasMore || logExporting || timeSyncPending) return
-        val missing = nextGlobalMissingLogIndex() ?: return
-        logPrefetchFrom = missing
-        val windowEnd = minOf(expectedLogEvents, missing + LOG_PAGE_SIZE)
-        logPrefetchUntil = (missing until windowEnd).firstOrNull { it in logRecords } ?: windowEnd
-        if (logPrefetchFrom >= logPrefetchUntil) return
-        logExporting = true
-        keepAliveJob?.cancel()
-        stateRefreshJob?.cancel()
-        updateLogProgress()
-        sendLogAck(nextMissingLogIndex())
-        armLogTimeout()
+        if (!state.authenticated || journal.isActive || !state.logHasMore || operation != null) return
+        sessionLoopJob?.cancel()
+        applyJournalEffect(journal.more())
     }
 
     override fun loadRemainingEventLog() {
-        if (!state.authenticated || logExporting || !state.logHasMore || timeSyncPending) return
+        if (!state.logHasMore) return
         drainLog = true
         loadMoreEventLog()
     }
 
     override fun refreshState() {
-        if (state.authenticated && !logExporting && state.logProgress == null && transport.hasConnection() && !timeSyncPending) {
-            send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
-            scheduleStateRefresh()
+        if (state.authenticated && !journal.isActive && transport.hasConnection() && operation !is Operation.TimeSync) {
+            send(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
         }
     }
 
     override fun requestDeviceInfo() {
-        if (state.authenticated && transport.hasConnection() && !timeSyncPending) requestDeviceInfoInternal()
+        if (state.authenticated && transport.hasConnection() && operation == null) requestDeviceInfoInternal()
     }
 
     override fun clearSettingsOp() {
-        clearPendingSettings()
+        clearOperation()
         updateState { it.copy(settingsOp = SettingsOp.NONE, settingsError = null, settingsNotice = null) }
     }
 
@@ -455,44 +354,43 @@ class DplsClient(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return settingsFailure("Введите имя устройства")
         if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
-        if (timeSyncPending) return settingsFailure("Подождите завершения синхронизации времени")
-
-        val nameBytes = utf8Truncate(trimmed, 31)
-        val commandId = session.nextCommandId()
-        val payload = ByteArray(17 + nameBytes.size)
-        putU32(payload, 0, session.sessionId)
-        session.sessionToken.copyInto(payload, 4)
-        putU32(payload, 12, commandId)
-        payload[16] = nameBytes.size.toByte()
-        nameBytes.copyInto(payload, 17)
-        armPendingSettings(PendingSettings.Name(commandId, trimmed))
+        if (operation != null) return settingsFailure("Дождитесь завершения текущей операции")
+        val bytes = utf8Truncate(trimmed, 31)
+        val id = wireSession.nextCommandId()
+        val payload = ByteArray(17 + bytes.size)
+        putU32(payload, 0, wireSession.sessionId)
+        wireSession.sessionToken.copyInto(payload, 4)
+        putU32(payload, 12, id)
+        payload[16] = bytes.size.toByte()
+        bytes.copyInto(payload, 17)
+        operation = Operation.Name(id, trimmed)
         updateState { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null, settingsNotice = null) }
         send(DplsProtocol.Type.NAME_SET, payload)
+        armSettingsTimeout()
     }
 
     override fun changePassword(current: String, newPassword: String) {
         if (newPassword.length < 8) return settingsFailure("Пароль должен содержать не менее 8 символов")
         if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
-        if (timeSyncPending) return settingsFailure("Подождите завершения синхронизации времени")
-
-        val currentVerifier = DplsCrypto.deriveVerifier(current, session.authSalt)
+        if (operation != null) return settingsFailure("Дождитесь завершения текущей операции")
+        val currentVerifier = DplsCrypto.deriveVerifier(current, wireSession.authSalt)
         val matches = cachedVerifier?.let { constantTimeEquals(it, currentVerifier) } == true
         currentVerifier.fill(0)
         if (!matches) return settingsFailure("Неверный текущий пароль")
-
         val salt = platform.secureRandomBytes(DplsAuth.SALT_SIZE)
         val verifier = DplsCrypto.deriveVerifier(newPassword, salt)
-        val commandId = session.nextCommandId()
+        val id = wireSession.nextCommandId()
         val payload = ByteArray(64)
-        putU32(payload, 0, session.sessionId)
-        session.sessionToken.copyInto(payload, 4)
-        putU32(payload, 12, commandId)
+        putU32(payload, 0, wireSession.sessionId)
+        wireSession.sessionToken.copyInto(payload, 4)
+        putU32(payload, 12, id)
         salt.copyInto(payload, 16)
         verifier.copyInto(payload, 32)
         salt.fill(0)
-        armPendingSettings(PendingSettings.Password(commandId, verifier))
+        operation = Operation.Password(id, verifier)
         updateState { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null, settingsNotice = null) }
         send(DplsProtocol.Type.PASSWORD_SET, payload)
+        armSettingsTimeout()
     }
 
     override fun setUiTheme(theme: UiTheme) {
@@ -513,14 +411,7 @@ class DplsClient(
     override fun forgetSavedPassword() {
         if (cachedVerifier == null && !state.savedCredentials) return
         forgetCachedVerifier()
-        updateState {
-            it.copy(
-                savedCredentials = false,
-                settingsOp = SettingsOp.DONE,
-                settingsError = null,
-                settingsNotice = "Сохранённый пароль удалён",
-            )
-        }
+        updateState { it.copy(savedCredentials = false, settingsOp = SettingsOp.DONE, settingsError = null, settingsNotice = "Сохранённый пароль удалён") }
     }
 
     override fun disconnect() {
@@ -529,17 +420,12 @@ class DplsClient(
         mutableState.value = retainedUiState()
     }
 
-    override fun openBluetoothSettings() {
-        platform.openBluetoothSettings()
-    }
-
+    override fun openBluetoothSettings() { platform.openBluetoothSettings() }
     override fun canOpenBluetoothSettings(): Boolean = platform.canOpenSystemBluetoothSettings()
 
     override fun eventLogCsv(): String = buildString {
         appendLine("sequence;timestamp_seconds;time_basis;event_type;parameter")
-        state.eventLog.forEach {
-            appendLine("${it.sequence};${it.timestampSeconds};${eventTimestampBasis(it.timestampSeconds)};${it.type};${it.parameter}")
-        }
+        state.eventLog.forEach { appendLine("${it.sequence};${it.timestampSeconds};${eventTimestampBasis(it.timestampSeconds)};${it.type};${it.parameter}") }
     }
 
     override fun eventLogTxt(): String = buildString {
@@ -550,17 +436,14 @@ class DplsClient(
         state.eventLog.forEach { appendLine("#${it.sequence}  ${eventTimestampText(it.timestampSeconds)}  событие ${it.type} · ${it.parameter}") }
     }
 
-    override fun formatEventTime(record: EventRecord): String {
-        val records = state.eventLog
-        return journalEventTimeCaption(
-            record = record,
-            records = records,
-            currentBootFirst = currentBootFirstSequence(records),
-            currentBootEpoch = state.deviceBootEpochSeconds,
-            anchors = timeAnchors,
-            formatWall = platform::formatLocalDateTime,
-        )
-    }
+    override fun formatEventTime(record: EventRecord): String = journalEventTimeCaption(
+        record = record,
+        records = state.eventLog,
+        currentBootFirst = currentBootFirstSequence(),
+        currentBootEpoch = state.deviceBootEpochSeconds,
+        anchors = timeAnchors,
+        formatWall = platform::formatLocalDateTime,
+    )
 
     override fun formatEventInstant(uptimeSeconds: Long): String {
         val boot = state.deviceBootEpochSeconds ?: return ""
@@ -575,40 +458,17 @@ class DplsClient(
 
     override fun onBluetoothAvailable() {
         reconnectAttempt = 0
-        if (selectedAddress != null && !transport.hasConnection()) {
-            scheduleReconnect()
-            return
-        }
-        if (state.phase == ConnectionPhase.SCANNING && transport.startScan()) {
-            armScanDeadline(keepSession = false)
-        }
-        if (state.browsingDevices && state.authenticated && transport.startScan()) {
-            armScanDeadline(keepSession = true)
-        }
+        if (target != null && !transport.hasConnection()) return scheduleReconnect()
+        if ((state.phase == ConnectionPhase.SCANNING || state.browsingDevices) && transport.startScan()) armScanDeadline(state.authenticated)
     }
 
     override fun onBluetoothUnavailable() {
-        cancelConnectionJobs()
-        pendingModeCommandId = null
-        awaitingDeviceInfo = false
-        awaitingLogHistogram = false
-        timeSyncPending = false
-        timeSyncAttempted = false
-        session.resetLink()
+        cancelLinkJobs()
+        clearOperation()
+        wireSession.resetLink()
+        runtimeSession = target?.let { DeviceSession.Recovering(nodeIdOrNull(), LinkEndpoint.Ble(it.address), reconnectAttempt) } ?: DeviceSession.Offline
         platform.keepConnectionAlive(false)
-        updateState {
-            it.copy(
-                phase = ConnectionPhase.RECONNECTING,
-                statusText = "Bluetooth выключен",
-                authenticated = false,
-                credentialsReady = cachedVerifier != null,
-                savedCredentials = cachedVerifier != null,
-                staleState = it.state != null,
-                commandInProgress = false,
-                logProgress = null,
-                error = null,
-            )
-        }
+        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Bluetooth выключен", authenticated = false, credentialsReady = cachedVerifier != null, savedCredentials = cachedVerifier != null, staleState = it.state != null, commandInProgress = false, logProgress = null, error = null) }
     }
 
     override fun onDiscovered(device: DplsTransportDevice) {
@@ -624,42 +484,35 @@ class DplsClient(
             reserveLow = DplsAdvertisement.reserveLow(device.advStatus),
         )
         updateState {
-            val merged = (it.devices.filterNot { old -> old.address == item.address } + item)
+            val merged = it.devices.filterNot { old -> old.address == item.address } + item
             val selected = it.selectedDevice
-            val devices = if (it.authenticated && selected != null && merged.none { row -> row.address == selected.address }) {
-                merged + selected
-            } else {
-                merged
-            }.sortedWith(
-                compareByDescending<DiscoveredDevice> { row -> row.realShort }
-                    .thenByDescending { row -> row.reserveLow }
-                    .thenByDescending { row -> row.fromReserve }
-                    .thenByDescending(DiscoveredDevice::rssi),
+            val all = if (it.authenticated && selected != null && merged.none { row -> row.address == selected.address }) merged + selected else merged
+            it.copy(
+                devices = all.sortedWith(
+                    compareByDescending<DiscoveredDevice> { row -> row.realShort }
+                        .thenByDescending { row -> row.reserveLow }
+                        .thenByDescending { row -> row.fromReserve }
+                        .thenByDescending(DiscoveredDevice::rssi),
+                ),
+                statusText = "Найдено: ${all.size}",
             )
-            it.copy(devices = devices, statusText = "Найдено: ${devices.size}")
         }
     }
 
     override fun onConnected() = updateState {
-        it.copy(
-            phase = ConnectionPhase.DISCOVERING,
-            statusText = if (it.identifyActive) "Подключение…" else "Поиск службы…",
-            error = null,
-        )
+        it.copy(phase = ConnectionPhase.DISCOVERING, statusText = if (it.identifyActive) "Подключение…" else "Поиск службы…", error = null)
     }
 
     override fun onSubscribed(writeLimit: Int) {
         if (writeLimit < DplsProtocol.OVERHEAD) return fail("BLE write limit слишком мал: $writeLimit")
-        session.clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
-        if (identifyAfterConnect) {
-            identifyAfterConnect = false
-            pendingIdentifyAck = true
-            identifySentAtMs = platform.nowMillis()
+        wireSession.clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
+        if (identify.afterConnect) {
+            identify = Identify(awaitingWriteAck = true, sentAtMillis = platform.nowMillis())
             updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Показать на объекте…") }
             send(DplsProtocol.Type.IDENTIFY_START)
         } else {
             updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…") }
-            send(DplsProtocol.Type.HELLO, session.clientNonce)
+            send(DplsProtocol.Type.HELLO, wireSession.clientNonce)
         }
     }
 
@@ -671,25 +524,13 @@ class DplsClient(
     }
 
     override fun onWriteComplete(errorCode: Long?) {
-        writeOutstanding = false
-        if (errorCode == null) {
-            if (pendingIdentifyAck) {
-                pendingIdentifyAck = false
-                val phase = DplsIdentifyLed.phaseAtAckMs(identifySentAtMs, platform.nowMillis())
-                updateState {
-                    it.copy(
-                        identifyLedLive = true,
-                        identifyLedPhaseOffsetMs = phase,
-                        linkRssi = it.linkRssi ?: it.selectedDevice?.rssi,
-                    )
-                }
-                scheduleRssiPoll()
-            }
-            trySendPendingLogAck()
-        } else if (reachedReady) {
-            scheduleReconnect()
-        } else {
-            fail("Ошибка передачи BLE: $errorCode")
+        if (errorCode == null && identify.awaitingWriteAck) {
+            val phase = DplsIdentifyLed.phaseAtAckMs(identify.sentAtMillis, platform.nowMillis())
+            identify = identify.copy(awaitingWriteAck = false)
+            updateState { it.copy(identifyLedLive = true, identifyLedPhaseOffsetMs = phase, linkRssi = it.linkRssi ?: it.selectedDevice?.rssi) }
+            scheduleRssiPoll()
+        } else if (errorCode != null) {
+            if (target?.reachedReady == true) scheduleReconnect() else fail("Ошибка передачи BLE: $errorCode")
         }
     }
 
@@ -699,72 +540,38 @@ class DplsClient(
             current.copy(
                 linkRssi = rssi,
                 selectedDevice = selected?.copy(rssi = rssi),
-                devices = current.devices.map { device ->
-                    if (device.address == selected?.address) device.copy(rssi = rssi) else device
-                },
+                devices = current.devices.map { if (it.address == selected?.address) it.copy(rssi = rssi) else it },
             )
         }
     }
 
     override fun onDisconnected(error: String?) {
         connectTimeoutJob?.cancel()
-        connectTimeoutJob = null
         if (state.staleBond) return
-        if (looksLikeStaleBondError(error)) {
-            onStaleBond()
-            return
+        if (looksLikeStaleBondError(error)) return onStaleBond()
+        val current = target
+        if (current?.expectSetupReconnect == true) {
+            target = current.copy(expectSetupReconnect = false)
+            return scheduleReconnect(immediate = true)
         }
-        if (setupReconnectExpected && selectedAddress != null && state.phase != ConnectionPhase.ERROR) {
-            setupReconnectExpected = false
-            scheduleReconnect(immediate = true)
-            return
-        }
-        if (reachedReady && selectedAddress != null && state.phase != ConnectionPhase.ERROR) {
-            scheduleReconnect()
-            return
-        }
-        identifyAfterConnect = false
-        pendingIdentifyAck = false
-        if (state.identifyActive) {
-            fail(error ?: "Связь с платой оборвалась до идентификации")
-            return
-        }
-        selectedAddress = null
+        if (current?.reachedReady == true && state.phase != ConnectionPhase.ERROR) return scheduleReconnect()
+        identify = Identify()
+        if (state.identifyActive) return fail(error ?: "Связь с платой оборвалась до идентификации")
+        target = null
+        runtimeSession = DeviceSession.Offline
         platform.keepConnectionAlive(false)
-        updateState {
-            it.copy(
-                phase = ConnectionPhase.IDLE,
-                selectedDevice = null,
-                statusText = error ?: "Отключено",
-                identifyActive = false,
-                identifyLedLive = false,
-                identifyLedPhaseOffsetMs = 0,
-                browsingDevices = false,
-            )
-        }
+        updateState { it.copy(phase = ConnectionPhase.IDLE, selectedDevice = null, statusText = error ?: "Отключено", identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, browsingDevices = false) }
     }
 
     override fun onTransportError(message: String) {
-        if (looksLikeStaleBondError(message)) {
-            onStaleBond()
-            return
-        }
-        fail(message)
+        if (looksLikeStaleBondError(message)) onStaleBond() else fail(message)
     }
 
     override fun onStaleBond() {
-        reachedReady = false
-        reconnectJob?.cancel()
-        identifyAfterConnect = false
-        pendingIdentifyAck = false
-        setupReconnectExpected = false
-        val name = state.selectedDevice?.userName
-            ?: state.selectedDevice?.advertisedName
-            ?: "Test-DPLS"
-        fail(
-            "Старое сопряжение с «$name». Настройки → Bluetooth → ⓘ у этого имени → Забыть. Затем «Повторить».",
-            staleBond = true,
-        )
+        target = target?.copy(reachedReady = false, expectSetupReconnect = false)
+        identify = Identify()
+        val name = state.selectedDevice?.userName ?: state.selectedDevice?.advertisedName ?: "Test-DPLS"
+        fail("Старое сопряжение с «$name». Настройки → Bluetooth → ⓘ у этого имени → Забыть. Затем «Повторить».", staleBond = true)
     }
 
     private fun handleMessage(frame: DplsProtocol.Frame) {
@@ -775,10 +582,10 @@ class DplsClient(
             DplsProtocol.Type.DEVICE_INFO_REPORT -> handleDeviceInfo(frame.payload)
             DplsProtocol.Type.SETTINGS_RESULT -> handleSettingsResult(frame.payload)
             DplsProtocol.Type.STATE_REPORT -> handleState(frame.payload)
-            DplsProtocol.Type.LOG_INFO -> handleLogInfo(frame.payload)
-            DplsProtocol.Type.LOG_CHUNK -> handleLogChunk(frame.payload)
-            DplsProtocol.Type.LOG_RESULT -> finishLog()
-            DplsProtocol.Type.LOG_HIST_REPORT -> handleLogHistogram(frame.payload)
+            DplsProtocol.Type.LOG_INFO -> applyJournalEffect(journal.info(frame.payload))
+            DplsProtocol.Type.LOG_CHUNK -> applyJournalEffect(journal.chunk(frame.payload))
+            DplsProtocol.Type.LOG_RESULT -> applyJournalEffect(journal.finish())
+            DplsProtocol.Type.LOG_HIST_REPORT -> handleHistogram(frame.payload)
             DplsProtocol.Type.ERROR -> handleDeviceError(frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0)
             else -> Unit
         }
@@ -786,7 +593,10 @@ class DplsClient(
 
     private fun handleAuthChallenge(payload: ByteArray) {
         val challenge = parseAuthChallenge(payload) ?: return fail("Повреждённый AUTH_CHALLENGE")
-        session.setChallenge(challenge.sessionId, challenge.deviceNonce, challenge.salt, challenge.initialized)
+        wireSession.setChallenge(challenge.sessionId, challenge.deviceNonce, challenge.salt, challenge.initialized)
+        val endpoint = LinkEndpoint.Ble(target?.address ?: return fail("Нет выбранного устройства"))
+        runtimeSession = if (challenge.initialized) DeviceSession.Authenticating(endpoint, challenge.sessionId)
+        else DeviceSession.Commissioning(endpoint, challenge.sessionId)
         val autoAuth = challenge.initialized && cachedVerifier != null
         updateState {
             it.copy(
@@ -799,91 +609,48 @@ class DplsClient(
                 setupRepeatPassword = "",
             )
         }
-        schedulePreAuthKeepAlive()
         if (autoAuth) cachedVerifier?.let(::sendAuthProof)
     }
 
     private fun handleAuthResult(payload: ByteArray) {
         if (state.authenticated) return
         val result = parseAuthResult(payload) ?: return fail("Повреждённый AUTH_RESULT")
-        preAuthKeepAliveJob?.cancel()
         if (result.status == 3) {
             persistCachedVerifier()
-            setupReconnectExpected = true
-            updateState {
-                it.copy(
-                    phase = ConnectionPhase.RECONNECTING,
-                    statusText = "Настройка сохранена. Повторное подключение…",
-                    credentialsReady = true,
-                    initialized = true,
-                    awaitingUserPassword = false,
-                    setupPassword = "",
-                    setupRepeatPassword = "",
-                    error = null,
-                )
-            }
+            target = target?.copy(expectSetupReconnect = true)
+            updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Настройка сохранена. Повторное подключение…", credentialsReady = true, initialized = true, awaitingUserPassword = false, setupPassword = "", setupRepeatPassword = "", error = null) }
             return
         }
         if (result.status != 0) {
             forgetCachedVerifier()
             updateState { it.copy(awaitingUserPassword = true) }
-            return fail(
-                if (result.retryAfterSeconds > 0) "Аутентификация заблокирована на ${result.retryAfterSeconds} с"
-                else "Неверный пароль",
-            )
+            return fail(if (result.retryAfterSeconds > 0) "Аутентификация заблокирована на ${result.retryAfterSeconds} с" else "Неверный пароль")
         }
-        setupReconnectExpected = false
         persistCachedVerifier()
         val token = result.sessionToken ?: return fail("AUTH_RESULT без session token")
-        session.authenticate(token)
-        updateState {
-            it.copy(
-                authenticated = true,
-                awaitingUserPassword = false,
-                identifyActive = false,
-                identifyLedLive = false,
-                identifyLedPhaseOffsetMs = 0,
-                phase = ConnectionPhase.SYNCHRONIZING,
-                statusText = "Чтение состояния…",
-                error = null,
-            )
-        }
-        send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
-        scheduleKeepAlive()
-        scheduleStateRefresh()
+        wireSession.authenticate(token)
+        updateState { it.copy(authenticated = true, awaitingUserPassword = false, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, phase = ConnectionPhase.SYNCHRONIZING, statusText = "Чтение состояния…", error = null) }
+        send(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
+        startSessionLoop()
     }
 
     private fun handleCommandResult(payload: ByteArray) {
         val result = parseCommandResult(payload) ?: return fail("Повреждённый COMMAND_RESULT")
-        if (pendingModeCommandId != result.commandId) return
-        if (result.status != 0) {
-            pendingModeCommandId = null
-            commandTimeoutJob?.cancel()
-            return fail(commandRejectReason(result.status))
-        }
-        pendingModeCommandId = null
-        commandTimeoutJob?.cancel()
-        updateState {
-            it.copy(
-                commandInProgress = false,
-                statusText = "Команда применена, чтение состояния…",
-                lastAckMillis = platform.nowMillis(),
-            )
-        }
-        if (state.logProgress == null && !logExporting) send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
+        val pending = operation as? Operation.Mode ?: return
+        if (pending.id != result.commandId) return
+        clearOperation()
+        if (result.status != 0) return fail(commandRejectReason(result.status))
+        updateState { it.copy(commandInProgress = false, statusText = "Команда применена, чтение состояния…", lastAckMillis = platform.nowMillis()) }
+        send(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
     }
 
     private fun handleDeviceInfo(payload: ByteArray) {
-        awaitingDeviceInfo = false
-        deviceInfoTimeoutJob?.cancel()
-        deviceInfoTimeoutJob = null
-        val info = parseDeviceInfoReport(payload) ?: return
-        updateState {
-            it.copy(
-                deviceInfo = info,
-                selectedDevice = it.selectedDevice?.copy(userName = info.userName.ifBlank { it.selectedDevice.userName }),
-            )
-        }
+        if (operation is Operation.DeviceInfo) clearOperation()
+        val info = parseDeviceInfoReport(payload) ?: return fail("Повреждённый DEVICE_INFO_REPORT")
+        updateState { it.copy(deviceInfo = info, selectedDevice = it.selectedDevice?.copy(userName = info.userName.ifBlank { it.selectedDevice.userName })) }
+        val id = nodeIdOrNull()
+        val endpoint = target?.address?.let { LinkEndpoint.Ble(it) }
+        if (id != null && endpoint != null) runtimeSession = DeviceSession.Online(id, endpoint, AuthSession(wireSession.sessionId, wireSession.sessionToken))
         loadTimeAnchors()
         persistTimeAnchors()
         attemptTimeSync()
@@ -891,503 +658,242 @@ class DplsClient(
 
     private fun handleSettingsResult(payload: ByteArray) {
         val result = parseSettingsResult(payload) ?: return
-        val pending = pendingSettings ?: return
-        if (pending.commandId != result.commandId) return
-        settingsTimeoutJob?.cancel()
-        pendingSettings = null
-        if (result.status == 0) {
-            when (pending) {
-                is PendingSettings.Password -> {
+        when (val pending = operation) {
+            is Operation.Name -> if (pending.id == result.commandId) {
+                clearOperation()
+                if (result.status == 0) {
+                    updateState { it.copy(settingsOp = SettingsOp.DONE, settingsError = null, settingsNotice = "Имя «${pending.value}» применено", selectedDevice = it.selectedDevice?.copy(userName = pending.value), deviceInfo = it.deviceInfo?.copy(userName = pending.value)) }
+                    requestDeviceInfoInternal()
+                } else settingsFailure("Устройство отклонило изменение (код ${result.status})")
+            }
+            is Operation.Password -> if (pending.id == result.commandId) {
+                operationJob?.cancel()
+                operation = null
+                if (result.status == 0) {
                     replaceCachedVerifier(pending.verifier)
                     persistCachedVerifier()
-                    updateState {
-                        it.copy(
-                            settingsOp = SettingsOp.DONE,
-                            settingsError = null,
-                            settingsNotice = "Пароль изменён",
-                        )
-                    }
-                }
-                is PendingSettings.Name -> {
-                    requestDeviceInfoInternal()
-                    updateState {
-                        it.copy(
-                            settingsOp = SettingsOp.DONE,
-                            settingsError = null,
-                            settingsNotice = "Имя «${pending.name}» применено",
-                            selectedDevice = it.selectedDevice?.copy(userName = pending.name),
-                            deviceInfo = it.deviceInfo?.copy(userName = pending.name),
-                        )
-                    }
+                    updateState { it.copy(settingsOp = SettingsOp.DONE, settingsError = null, settingsNotice = "Пароль изменён") }
+                } else {
+                    pending.verifier.fill(0)
+                    settingsFailure("Устройство отклонило изменение (код ${result.status})")
                 }
             }
-        } else {
-            if (pending is PendingSettings.Password) pending.verifier.fill(0)
-            settingsFailure("Устройство отклонило изменение (код ${result.status})")
+            else -> Unit
         }
     }
 
     private fun handleState(payload: ByteArray) {
         val now = platform.nowMillis()
-        val deviceState = parseStateReport(payload, now) ?: return fail("Повреждённый STATE_REPORT")
-        updateState {
-            it.copy(
-                phase = ConnectionPhase.READY,
-                statusText = "Состояние получено",
-                state = deviceState,
-                deviceBootEpochSeconds = now / 1000 - deviceState.uptimeSeconds,
-                authenticated = true,
-                identifyActive = false,
-                identifyLedLive = false,
-                identifyLedPhaseOffsetMs = 0,
-                staleState = false,
-                lastAckMillis = now,
-                error = null,
-            )
-        }
-        reachedReady = true
+        val device = parseStateReport(payload, now) ?: return fail("Повреждённый STATE_REPORT")
+        target = target?.copy(reachedReady = true)
         reconnectAttempt = 0
-        val previous = previousMode
-        previousMode = deviceState.mode
-        if (previous?.dangerous == true && deviceState.mode == DplsMode.NORMAL) {
-            platform.notifyOperator(DplsOperatorAlerts.NORMAL_TITLE, DplsOperatorAlerts.NORMAL_BODY)
-        }
-        if (!logExporting) {
-            scheduleStateRefresh()
-            if (state.deviceInfo == null && !legacyFirmware && !awaitingDeviceInfo) {
-                requestDeviceInfoInternal()
-            } else {
-                attemptTimeSync()
-            }
-        }
-        if (logLoadPending && !logExporting) loadEventLog()
+        updateState { it.copy(phase = ConnectionPhase.READY, statusText = "Состояние получено", state = device, deviceBootEpochSeconds = now / 1000 - device.uptimeSeconds, authenticated = true, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, staleState = false, lastAckMillis = now, error = null) }
+        val old = previousMode
+        previousMode = device.mode
+        if (old?.dangerous == true && device.mode == DplsMode.NORMAL) platform.notifyOperator(DplsOperatorAlerts.NORMAL_TITLE, DplsOperatorAlerts.NORMAL_BODY)
+        if (state.deviceInfo == null && !legacyFirmware && operation == null) requestDeviceInfoInternal()
+        else if (operation == null) attemptTimeSync()
+        if (logLoadPending && !journal.isActive && operation == null) loadEventLog()
     }
 
-    private fun handleLogInfo(payload: ByteArray) {
-        if (payload.size < 10) return failLog("Повреждённый LOG_INFO")
-        val totalBytes = readU32(payload, 4).toInt().coerceAtLeast(0)
-        val rawCount = readU16(payload, 8)
-        val newCount = minOf(rawCount, totalBytes / 10, MAX_LOG_EVENTS).coerceAtLeast(0)
-        if (logIncremental && logRecords.isNotEmpty()) {
-            handleIncrementalLogInfo(newCount)
-        } else {
-            applyFreshLogInfo(newCount)
-        }
-    }
-
-    private fun applyFreshLogInfo(newCount: Int) {
-        logIncremental = false
-        expectedLogEvents = newCount
-        logRecords.clear()
-        logPrefetchUntil = expectedLogEvents
-        logPrefetchFrom = maxOf(0, expectedLogEvents - LOG_PAGE_SIZE)
-        if (expectedLogEvents == 0) {
-            finishLog()
-        } else {
-            updateLogProgress()
-            sendLogAck(nextMissingLogIndex())
-        }
-    }
-
-    private fun handleIncrementalLogInfo(newCount: Int) {
-        if (newCount == 0 || newCount < logKnownCount || newCount < logRecords.size) {
-            applyFreshLogInfo(newCount)
-            return
-        }
-        expectedLogEvents = newCount
-        logPrefetchFrom = if (newCount > logKnownCount) {
-            (logKnownCount - 1).coerceAtLeast(0)
-        } else {
-            (newCount - 1).coerceAtLeast(0)
-        }
-        logPrefetchUntil = newCount
-        if (logPrefetchFrom >= logPrefetchUntil) {
-            finishLog()
-            return
-        }
-        updateLogProgress()
-        sendLogAck(logPrefetchFrom)
-    }
-
-    private fun handleLogChunk(payload: ByteArray) {
-        val batch = parseLogChunk(payload) ?: return failLog("Повреждённый LOG_CHUNK")
-        batch.records.forEachIndexed { offset, record ->
-            val index = batch.firstIndex + offset
-            if (index !in 0 until expectedLogEvents) return@forEachIndexed
-            val previous = logRecords[index]
-            if (logIncremental && previous != null && previous.sequence != record.sequence) {
-                applyFreshLogInfo(expectedLogEvents)
-                return
-            }
-            if (logIncremental && previous == null && index >= logKnownCount &&
-                logKnownMaxSequence > 0L && record.sequence <= logKnownMaxSequence
-            ) {
-                applyFreshLogInfo(expectedLogEvents)
-                return
-            }
-            if (previous == null) logRecords[index] = record
-        }
-        publishLogRecords(inFlight = true)
-        when {
-            logRecords.size >= expectedLogEvents -> finishLog()
-            nextMissingLogIndex() < logPrefetchUntil -> {
-                updateLogProgress()
-                sendLogAck(nextMissingLogIndex())
-            }
-            logIncremental -> pauseLogPaging()
-            0 !in logRecords -> {
-                logPrefetchFrom = 0
-                logPrefetchUntil = minOf(LOG_PAGE_SIZE, expectedLogEvents)
-                updateLogProgress()
-                sendLogAck(nextMissingLogIndex())
-            }
-            else -> pauseLogPaging()
-        }
-    }
-
-    private fun publishedLogRecords(): List<EventRecord> =
-        logRecords.values.sortedByDescending { it.sequence }
-
-    private fun currentBootFirstSequence(records: List<EventRecord> = publishedLogRecords()): Long? =
-        journalBootFirstSequences(records).lastOrNull()
-
-    private fun rememberCurrentBootAnchor(records: List<EventRecord>) {
-        val epoch = state.deviceBootEpochSeconds ?: return
-        val bootFirst = currentBootFirstSequence(records) ?: return
-        val lastSequence = records.maxOfOrNull { it.sequence } ?: return
-        timeAnchors = mergeJournalTimeAnchor(
-            timeAnchors,
-            JournalTimeAnchor(bootFirst, epoch, lastSequence),
-        )
-        persistTimeAnchors()
-    }
-
-    private fun loadTimeAnchors() {
-        var merged = timeAnchors
-        for (key in credentialKeys()) {
-            for (anchor in decodeJournalTimeAnchors(platform.readDeviceString(timeAnchorKey(key)))) {
-                merged = mergeJournalTimeAnchor(merged, anchor)
-            }
-        }
-        timeAnchors = merged
-        updateState { it.copy(journalTimeAnchors = timeAnchors) }
-    }
-
-    private fun persistTimeAnchors() {
-        val encoded = encodeJournalTimeAnchors(timeAnchors)
-        for (key in credentialKeys()) {
-            platform.writeDeviceString(timeAnchorKey(key), encoded)
-        }
-    }
-
-    private fun timeAnchorKey(deviceKey: String): String = "time.$deviceKey"
-
-    private fun publishLogRecords(inFlight: Boolean) {
-        val records = publishedLogRecords()
-        if (records.isNotEmpty()) rememberCurrentBootAnchor(records)
-        val hasMore = records.size < expectedLogEvents
-        val lastIndex = (expectedLogEvents - 1).coerceAtLeast(0)
-        val spanReady = expectedLogEvents > 0 && 0 in logRecords && lastIndex in logRecords
-        updateState {
-            it.copy(
-                eventLog = records,
-                journalTimeAnchors = timeAnchors,
-                logTotal = expectedLogEvents,
-                logHasMore = hasMore,
-                logFirstTimestampSeconds = if (spanReady) logRecords[0]?.timestampSeconds else it.logFirstTimestampSeconds,
-                logLastTimestampSeconds = if (spanReady) logRecords[lastIndex]?.timestampSeconds else it.logLastTimestampSeconds,
-                logProgress = if (inFlight && expectedLogEvents > 0) {
-                    (records.size.toFloat() / expectedLogEvents.toFloat()).coerceIn(0.05f, 1f)
-                } else {
-                    null
-                },
-                statusText = if (hasMore) {
-                    "Журнал: ${records.size} из $expectedLogEvents"
-                } else {
-                    "Журнал загружен: ${records.size} записей"
-                },
-                error = null,
-            )
-        }
-    }
-
-    private fun pauseLogPaging() {
-        logTimeoutJob?.cancel()
-        logLoadPending = false
-        logExporting = false
-        pendingLogAckIndex = null
-        publishLogRecords(inFlight = false)
-        if (drainLog && state.logHasMore) {
-            loadMoreEventLog()
-            return
-        }
-        drainLog = false
-        scheduleKeepAlive()
-        scheduleStateRefresh()
-    }
-
-    private fun finishLog() {
-        logTimeoutJob?.cancel()
-        logLoadPending = false
-        logExporting = false
-        drainLog = false
-        logIncremental = false
-        pendingLogAckIndex = null
-        expectedLogEvents = logRecords.size
-        publishLogRecords(inFlight = false)
-        scheduleKeepAlive()
-        scheduleStateRefresh()
-    }
-
-    private fun updateLogProgress() {
-        if (expectedLogEvents <= 0) return
-        val progress = (logRecords.size.toFloat() / expectedLogEvents.toFloat()).coerceIn(0.05f, 1f)
-        updateState { it.copy(logProgress = progress, logTotal = expectedLogEvents) }
-    }
-
-    private fun armLogTimeout() {
-        logTimeoutJob?.cancel()
-        logTimeoutJob = scope.launch {
-            delay(LOG_CHUNK_TIMEOUT_MS)
-            if (logExporting) failLog("Не удалось загрузить журнал")
-        }
-    }
-
-    private fun nextMissingLogIndex(): Int =
-        (logPrefetchFrom until logPrefetchUntil).firstOrNull { it !in logRecords } ?: logPrefetchUntil
-
-    private fun nextGlobalMissingLogIndex(): Int? =
-        (0 until expectedLogEvents).firstOrNull { it !in logRecords }
-
-    private fun sendLogAck(index: Int) {
-        pendingLogAckIndex = index
-        trySendPendingLogAck()
-    }
-
-    private fun trySendPendingLogAck() {
-        if (writeOutstanding || !logExporting) return
-        val index = pendingLogAckIndex ?: return
-        pendingLogAckIndex = null
-        val suffix = ByteArray(2)
-        putU16(suffix, 0, index)
-        send(DplsProtocol.Type.LOG_ACK, session.authenticatedPayload() + suffix)
-    }
-
-    private fun handleLogHistogram(payload: ByteArray) {
-        awaitingLogHistogram = false
-        logHistogramTimeoutJob?.cancel()
-        logHistogramTimeoutJob = null
+    private fun handleHistogram(payload: ByteArray) {
+        if (operation is Operation.Histogram) clearOperation()
         val report = parseLogHistogramReport(payload) ?: return
-        updateState {
-            it.copy(
-                logHistogram = report.takeIf { item -> item.eventCount > 0 && item.counts.isNotEmpty() },
-                logFirstTimestampSeconds = report.firstTimestampSeconds,
-                logLastTimestampSeconds = report.lastTimestampSeconds,
-                logTotal = if (it.logTotal == 0) report.eventCount else it.logTotal,
-            )
-        }
-        if (state.eventLog.isEmpty() && !state.logHasMore && !logExporting) loadEventLog()
+        updateState { it.copy(logHistogram = report.takeIf { item -> item.eventCount > 0 && item.counts.isNotEmpty() }, logFirstTimestampSeconds = report.firstTimestampSeconds, logLastTimestampSeconds = report.lastTimestampSeconds, logTotal = if (it.logTotal == 0) report.eventCount else it.logTotal) }
+        if (state.eventLog.isEmpty() && !state.logHasMore) loadEventLog()
     }
 
     private fun handleDeviceError(code: Int) {
-        if (awaitingLogHistogram) {
-            awaitingLogHistogram = false
-            logHistogramTimeoutJob?.cancel()
-            logHistogramTimeoutJob = null
-            if (code == 5) legacyFirmware = true
-            if (state.eventLog.isEmpty() && !logExporting) loadEventLog()
-            return
-        }
-        if (logExporting || state.logProgress != null) return failLog("Ошибка загрузки журнала: $code")
-        if (code == 5 && awaitingDeviceInfo) {
-            awaitingDeviceInfo = false
-            deviceInfoTimeoutJob?.cancel()
-            deviceInfoTimeoutJob = null
-            legacyFirmware = true
-            attemptTimeSync()
-            return
-        }
-        if (code == 5 && pendingSettings != null) {
-            clearPendingSettings()
-            legacyFirmware = true
-            return settingsFailure("Прошивка устройства не поддерживает изменение настроек")
-        }
-        if (code == 5 && timeSyncPending) {
-            /* Firmware before TIME_SYNC reports "unsupported message". The probe
-             * owns ERROR 5 only inside a bounded, non-overlapping request window. */
-            timeSyncPending = false
-            timeSyncTimeoutJob?.cancel()
-            timeSyncTimeoutJob = null
-            legacyFirmware = true
-            scheduleStateRefresh()
-            return
-        }
-        fail(
-            if (code == 7) "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку."
-            else "Ошибка устройства: $code",
-        )
-    }
-
-    private fun sendAuthProof(verifier: ByteArray) {
-        val signed = DplsAuth.proofMessage(session.deviceNonce, session.clientNonce, session.sessionId)
-        val mac = DplsCrypto.hmacSha256(verifier, signed)
-        signed.fill(0)
-        send(DplsProtocol.Type.AUTH_PROOF, session.clientNonce + mac)
-        mac.fill(0)
-    }
-
-    private fun send(
-        type: DplsProtocol.Type,
-        payload: ByteArray = byteArrayOf(),
-        priority: Boolean = false,
-        flush: Boolean = false,
-    ) {
-        val bytes = encodeFrame(DplsProtocol.Frame(type, session.nextSequence(), payload = payload))
-        writeOutstanding = true
-        if (!transport.send(bytes, priority, flush)) {
-            writeOutstanding = false
-            fail("Кадр ${bytes.size} байт не помещается в BLE write limit")
+        when (val pending = operation) {
+            Operation.Histogram -> {
+                clearOperation()
+                if (code == 5) legacyFirmware = true else return fail("Ошибка устройства: $code")
+                if (state.eventLog.isEmpty()) loadEventLog()
+            }
+            Operation.DeviceInfo -> {
+                if (code != 5) return fail("Ошибка устройства: $code")
+                clearOperation()
+                legacyFirmware = true
+                attemptTimeSync()
+            }
+            Operation.TimeSync -> {
+                if (code != 5) return fail("Ошибка устройства: $code")
+                clearOperation()
+                legacyFirmware = true
+            }
+            is Operation.Name, is Operation.Password -> {
+                if (code != 5) return fail("Ошибка устройства: $code")
+                clearOperation()
+                legacyFirmware = true
+                settingsFailure("Прошивка устройства не поддерживает изменение настроек")
+            }
+            is Operation.Mode -> fail("Ошибка устройства: $code")
+            null -> if (journal.isActive) failLog("Ошибка загрузки журнала: $code")
+            else -> fail(if (code == 7) "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку." else "Ошибка устройства: $code")
         }
     }
 
     private fun requestDeviceInfoInternal() {
-        if (awaitingDeviceInfo || !state.authenticated || !transport.hasConnection()) return
-        awaitingDeviceInfo = true
-        deviceInfoTimeoutJob?.cancel()
-        deviceInfoTimeoutJob = scope.launch {
-            delay(ONE_SHOT_REQUEST_TIMEOUT_MS)
-            if (awaitingDeviceInfo) {
-                awaitingDeviceInfo = false
-                if (state.authenticated && transport.hasConnection() && state.deviceInfo == null && !legacyFirmware) {
-                    requestDeviceInfoInternal()
-                }
+        if (operation != null || !state.authenticated || !transport.hasConnection()) return
+        operation = Operation.DeviceInfo
+        send(DplsProtocol.Type.DEVICE_INFO_GET, wireSession.authenticatedPayload())
+        armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS) {
+            if (operation is Operation.DeviceInfo) {
+                clearOperation()
+                if (state.deviceInfo == null && !legacyFirmware) requestDeviceInfoInternal()
             }
         }
-        send(DplsProtocol.Type.DEVICE_INFO_GET, session.authenticatedPayload())
     }
 
     private fun attemptTimeSync() {
-        if (timeSyncAttempted || timeSyncPending || legacyFirmware || !state.authenticated || !transport.hasConnection()) return
-        val unixSeconds = platform.nowMillis() / 1000L
-        val payload = buildTimeSyncPayload(session.sessionId, session.sessionToken, unixSeconds) ?: return
+        if (timeSyncAttempted || operation != null || legacyFirmware || !state.authenticated || !transport.hasConnection()) return
+        val payload = buildTimeSyncPayload(wireSession.sessionId, wireSession.sessionToken, platform.nowMillis() / 1000L) ?: return
         timeSyncAttempted = true
-        timeSyncPending = true
-        stateRefreshJob?.cancel()
-        timeSyncTimeoutJob?.cancel()
-        timeSyncTimeoutJob = scope.launch {
-            delay(TIME_SYNC_ERROR_WINDOW_MS)
-            if (timeSyncPending) {
-                timeSyncPending = false
-                scheduleStateRefresh()
-            }
-        }
+        operation = Operation.TimeSync
         send(DplsProtocol.Type.TIME_SYNC, payload)
+        armOperationTimeout(TIME_SYNC_ERROR_WINDOW_MS) { if (operation is Operation.TimeSync) clearOperation() }
     }
 
-    private fun schedulePreAuthKeepAlive() {
-        preAuthKeepAliveJob?.cancel()
-        preAuthKeepAliveJob = scope.launch {
-            while (!state.authenticated && transport.hasConnection()) {
-                delay(KEEP_ALIVE_MS)
-                if (state.credentialsReady && !state.identifyActive && !state.authenticated) {
-                    send(DplsProtocol.Type.KEEP_ALIVE)
-                }
+    private fun applyJournalEffect(effect: JournalMachine.Effect) {
+        when (effect) {
+            is JournalMachine.Effect.Ack -> {
+                val suffix = ByteArray(2)
+                putU16(suffix, 0, effect.index)
+                send(DplsProtocol.Type.LOG_ACK, wireSession.authenticatedPayload() + suffix)
+                armLogTimeout()
             }
+            JournalMachine.Effect.Pause, JournalMachine.Effect.Complete -> finishJournalPage()
+            is JournalMachine.Effect.Error -> failLog(effect.message)
+            JournalMachine.Effect.None -> Unit
+        }
+        publishJournal()
+    }
+
+    private fun finishJournalPage() {
+        logTimeoutJob?.cancel()
+        logLoadPending = false
+        if (drainLog && journal.snapshot(false).hasMore) applyJournalEffect(journal.more())
+        else {
+            drainLog = false
+            startSessionLoop()
         }
     }
 
-    private fun scheduleKeepAlive() {
-        keepAliveJob?.cancel()
-        keepAliveJob = scope.launch {
-            while (state.authenticated && transport.hasConnection()) {
-                delay(KEEP_ALIVE_MS)
-                if (state.authenticated && !logExporting && state.logProgress == null && !state.needsPeriodicStateRefresh) {
-                    send(DplsProtocol.Type.KEEP_ALIVE, session.authenticatedPayload())
-                }
-            }
+    private fun publishJournal() {
+        val snap = journal.snapshot()
+        if (snap.records.isNotEmpty()) rememberCurrentBootAnchor(snap.records)
+        updateState {
+            it.copy(
+                eventLog = snap.records,
+                journalTimeAnchors = timeAnchors,
+                logTotal = snap.total,
+                logHasMore = snap.hasMore,
+                logFirstTimestampSeconds = journal.firstTimestamp() ?: it.logFirstTimestampSeconds,
+                logLastTimestampSeconds = journal.lastTimestamp() ?: it.logLastTimestampSeconds,
+                logProgress = snap.progress,
+                statusText = if (snap.hasMore) "Журнал: ${snap.records.size} из ${snap.total}" else "Журнал загружен: ${snap.records.size} записей",
+                error = null,
+            )
         }
     }
 
-    private fun scheduleStateRefresh() {
-        stateRefreshJob?.cancel()
-        if (timeSyncPending || logExporting || !state.needsPeriodicStateRefresh || !transport.hasConnection()) return
-        stateRefreshJob = scope.launch {
-            while (!timeSyncPending && !logExporting && state.needsPeriodicStateRefresh && transport.hasConnection()) {
+    private fun failLog(message: String) {
+        journal.fail()
+        logLoadPending = false
+        drainLog = false
+        logTimeoutJob?.cancel()
+        updateState { it.copy(logProgress = null, logHasMore = false, error = message) }
+        startSessionLoop()
+    }
+
+    private fun sendAuthProof(verifier: ByteArray) {
+        val signed = DplsAuth.proofMessage(wireSession.deviceNonce, wireSession.clientNonce, wireSession.sessionId)
+        val mac = DplsCrypto.hmacSha256(verifier, signed)
+        signed.fill(0)
+        send(DplsProtocol.Type.AUTH_PROOF, wireSession.clientNonce + mac)
+        mac.fill(0)
+    }
+
+    private fun send(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf(), priority: Boolean = false, flush: Boolean = false) {
+        val bytes = encodeFrame(DplsProtocol.Frame(type, wireSession.nextSequence(), payload = payload))
+        if (!transport.send(bytes, priority, flush)) fail("Кадр ${bytes.size} байт не помещается в BLE write limit")
+    }
+
+    private fun startSessionLoop() {
+        sessionLoopJob?.cancel()
+        if (!state.authenticated || !transport.hasConnection() || journal.isActive) return
+        sessionLoopJob = scope.launch {
+            var ticks = 0
+            while (isActive && state.authenticated && transport.hasConnection()) {
                 delay(STATE_REFRESH_MS)
-                if (timeSyncPending || logExporting || !state.needsPeriodicStateRefresh) break
-                val receivedAt = state.state?.receivedAtMillis
-                if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) {
-                    updateState { it.copy(staleState = true) }
+                ++ticks
+                if (journal.isActive || operation is Operation.TimeSync) continue
+                if (state.needsPeriodicStateRefresh) {
+                    val receivedAt = state.state?.receivedAtMillis
+                    if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) updateState { it.copy(staleState = true) }
+                    send(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
+                } else if (ticks % KEEP_ALIVE_TICKS == 0) {
+                    send(DplsProtocol.Type.KEEP_ALIVE, wireSession.authenticatedPayload())
                 }
-                send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
             }
         }
     }
 
     private fun scheduleReconnect(immediate: Boolean = false) {
-        if (reconnectJob?.isActive == true || selectedAddress == null) return
-        cancelConnectionJobs()
-        pendingModeCommandId = null
-        awaitingDeviceInfo = false
-        awaitingLogHistogram = false
-        timeSyncPending = false
-        timeSyncAttempted = false
-        session.resetLink()
+        val current = target ?: return
+        if (reconnectJob?.isActive == true) return
+        cancelLinkJobs()
+        clearOperation()
+        wireSession.resetLink()
+        runtimeSession = DeviceSession.Recovering(nodeIdOrNull(), LinkEndpoint.Ble(current.address), reconnectAttempt)
         platform.keepConnectionAlive(true)
-        updateState {
-            it.copy(
-                phase = ConnectionPhase.RECONNECTING,
-                statusText = if (reachedReady || logLoadPending) "Восстановление связи…" else "Подключение…",
-                authenticated = false,
-                staleState = it.state != null,
-                credentialsReady = cachedVerifier != null,
-                savedCredentials = cachedVerifier != null,
-                commandInProgress = false,
-            )
-        }
+        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = if (current.reachedReady || logLoadPending) "Восстановление связи…" else "Подключение…", authenticated = false, staleState = it.state != null, credentialsReady = cachedVerifier != null, savedCredentials = cachedVerifier != null, commandInProgress = false) }
         val delays = longArrayOf(500, 1_000, 2_000, 4_000, 5_000)
-        val delayMs = if (immediate) 0L else delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
+        val wait = if (immediate) 0L else delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
         reconnectAttempt++
         reconnectJob = scope.launch {
-            if (delayMs > 0L) delay(delayMs)
-            if (selectedAddress != null && !transport.reconnect()) {
-                fail("Устройство недоступно. Запустите поиск снова.")
-            }
+            if (wait > 0) delay(wait)
+            if (target != null && !transport.reconnect()) fail("Устройство недоступно. Запустите поиск снова.")
         }
     }
 
-    private fun armPendingSettings(op: PendingSettings) {
-        clearPendingSettings()
-        pendingSettings = op
-        settingsTimeoutJob = scope.launch {
-            delay(SETTINGS_TIMEOUT_MS)
-            if (pendingSettings != null) {
-                clearPendingSettings()
-                settingsFailure("Устройство не ответило на изменение настроек")
-            }
+    private fun armOperationTimeout(delayMs: Long, action: () -> Unit) {
+        operationJob?.cancel()
+        operationJob = scope.launch { delay(delayMs); action() }
+    }
+
+    private fun armSettingsTimeout() = armOperationTimeout(SETTINGS_TIMEOUT_MS) {
+        if (operation is Operation.Name || operation is Operation.Password) {
+            clearOperation()
+            settingsFailure("Устройство не ответило на изменение настроек")
         }
     }
 
-    private fun clearPendingSettings() {
-        settingsTimeoutJob?.cancel()
-        (pendingSettings as? PendingSettings.Password)?.verifier?.fill(0)
-        pendingSettings = null
+    private fun clearOperation() {
+        operationJob?.cancel()
+        val old = operation
+        operation = null
+        if (old is Operation.Password && cachedVerifier !== old.verifier) old.verifier.fill(0)
+    }
+
+    private fun armLogTimeout() {
+        logTimeoutJob?.cancel()
+        logTimeoutJob = scope.launch { delay(LOG_CHUNK_TIMEOUT_MS); if (journal.isActive) failLog("Не удалось загрузить журнал") }
     }
 
     private fun armScanDeadline(keepSession: Boolean) {
         scanJob?.cancel()
         scanJob = scope.launch {
             delay(SCAN_DURATION_MS)
-            if (keepSession) {
-                transport.stopScan()
-                updateState {
+            transport.stopScan()
+            updateState {
+                if (keepSession || it.phase == ConnectionPhase.SCANNING) {
                     it.copy(
                         scanning = false,
-                        statusText = if (it.devices.isEmpty()) "Устройства не найдены" else "Выберите устройство",
+                        phase = if (keepSession) it.phase else ConnectionPhase.IDLE,
+                        statusText = deviceListCaption(it.devices.size),
                     )
-                }
-            } else if (state.phase == ConnectionPhase.SCANNING) {
-                stopScan()
+                } else it
             }
         }
     }
@@ -1397,29 +903,24 @@ class DplsClient(
         connectTimeoutJob = scope.launch {
             delay(CONNECT_TIMEOUT_MS)
             val now = state
-            if (now.identifyLedLive || now.identifyActive || now.authenticated || now.awaitingUserPassword || now.credentialsReady) {
-                return@launch
+            if (!now.identifyLedLive && !now.identifyActive && !now.authenticated && !now.awaitingUserPassword && !now.credentialsReady) {
+                transport.disconnect(clearSelection = false)
+                fail("Плата не отвечает по Bluetooth. Выберите устройство снова.")
             }
-            transport.disconnect(clearSelection = false)
-            fail("Плата не отвечает по Bluetooth. Выберите устройство снова.")
         }
     }
 
-    private fun cancelConnectionJobs() {
+    private fun cancelLinkJobs() {
         reconnectJob?.cancel()
-        preAuthKeepAliveJob?.cancel()
-        keepAliveJob?.cancel()
-        stateRefreshJob?.cancel()
-        commandTimeoutJob?.cancel()
+        sessionLoopJob?.cancel()
+        operationJob?.cancel()
         connectTimeoutJob?.cancel()
-        deviceInfoTimeoutJob?.cancel()
-        logHistogramTimeoutJob?.cancel()
-        timeSyncTimeoutJob?.cancel()
+        rssiJob?.cancel()
+        reconnectJob = null
+        sessionLoopJob = null
+        operationJob = null
         connectTimeoutJob = null
-        deviceInfoTimeoutJob = null
-        logHistogramTimeoutJob = null
-        timeSyncTimeoutJob = null
-        stopRssiPoll()
+        rssiJob = null
     }
 
     private fun scheduleRssiPoll() {
@@ -1439,51 +940,45 @@ class DplsClient(
 
     private fun disconnectInternal(clearSelection: Boolean, clearVerifier: Boolean) {
         scanJob?.cancel()
-        cancelConnectionJobs()
-        pendingModeCommandId = null
-        setupReconnectExpected = false
-        awaitingDeviceInfo = false
-        awaitingLogHistogram = false
-        timeSyncPending = false
-        timeSyncAttempted = false
+        cancelLinkJobs()
         logTimeoutJob?.cancel()
-        settingsTimeoutJob?.cancel()
-        clearPendingSettings()
+        clearOperation()
+        journal.fail()
         transport.disconnect(clearSelection)
         platform.keepConnectionAlive(false)
-        session.resetAll()
-        reachedReady = false
+        wireSession.resetAll()
+        runtimeSession = DeviceSession.Offline
+        identify = Identify()
         reconnectAttempt = 0
         previousMode = null
         lastOperatorAlert = null
         logLoadPending = false
-        logExporting = false
         drainLog = false
-        pendingLogAckIndex = null
-        logPrefetchUntil = 0
-        logPrefetchFrom = 0
-        writeOutstanding = false
-        if (clearSelection) selectedAddress = null
+        timeSyncAttempted = false
+        if (clearSelection) target = null
         if (clearVerifier) replaceCachedVerifier(null)
     }
 
-    private fun replaceCachedVerifier(verifier: ByteArray?) {
-        val old = cachedVerifier
-        if (old !== verifier) old?.fill(0)
-        cachedVerifier = verifier
+    private fun nodeIdOrNull(): NodeId? {
+        val raw = state.deviceInfo?.deviceId ?: state.selectedDevice?.deviceId ?: return null
+        return raw.takeIf { it > 0 }?.let(::NodeId)
     }
 
-    private fun credentialKeys(): List<String> {
-        val keys = ArrayList<String>(2)
-        selectedAddress?.takeIf { it.isNotBlank() }?.let { keys += "addr:$it" }
-        state.selectedDevice?.deviceId?.let { keys += "id:$it" }
-        state.deviceInfo?.deviceId?.let { keys += "id:$it" }
-        return keys
+    private fun credentialKeys(): List<String> = buildList {
+        val id = nodeIdOrNull()
+        if (id != null) {
+            add(credentialKey(id))
+            add("id:${id.value}")
+        }
+        target?.address?.takeIf { it.isNotBlank() }?.let {
+            add("legacy-addr:$it")
+            add("addr:$it")
+        }
     }
 
     private fun loadCachedVerifier() {
         val stored = credentialKeys().firstNotNullOfOrNull { key ->
-            platform.readDeviceVerifier(key)?.takeIf { it.size == DplsAuth.VERIFIER_SIZE }
+            platform.readDeviceVerifier(key)?.takeIf { bytes -> bytes.size == DplsAuth.VERIFIER_SIZE }
         }
         replaceCachedVerifier(stored)
         updateState { it.copy(savedCredentials = stored != null) }
@@ -1491,9 +986,7 @@ class DplsClient(
 
     private fun persistCachedVerifier() {
         val stored = cachedVerifier
-        for (key in credentialKeys()) {
-            platform.writeDeviceVerifier(key, stored)
-        }
+        credentialKeys().forEach { platform.writeDeviceVerifier(it, stored) }
         updateState { it.copy(savedCredentials = stored != null) }
     }
 
@@ -1502,75 +995,67 @@ class DplsClient(
         persistCachedVerifier()
     }
 
+    private fun replaceCachedVerifier(value: ByteArray?) {
+        if (cachedVerifier !== value) cachedVerifier?.fill(0)
+        cachedVerifier = value
+    }
+
+    private fun currentBootFirstSequence(): Long? = journalBootFirstSequences(state.eventLog).lastOrNull()
+
+    private fun rememberCurrentBootAnchor(records: List<EventRecord>) {
+        val epoch = state.deviceBootEpochSeconds ?: return
+        val first = journalBootFirstSequences(records).lastOrNull() ?: return
+        val last = records.maxOfOrNull(EventRecord::sequence) ?: return
+        timeAnchors = mergeJournalTimeAnchor(timeAnchors, JournalTimeAnchor(first, epoch, last))
+        persistTimeAnchors()
+    }
+
+    private fun loadTimeAnchors() {
+        var merged = timeAnchors
+        credentialKeys().forEach { key ->
+            decodeJournalTimeAnchors(platform.readDeviceString("time.$key")).forEach { anchor ->
+                merged = mergeJournalTimeAnchor(merged, anchor)
+            }
+        }
+        timeAnchors = merged
+        updateState { it.copy(journalTimeAnchors = timeAnchors) }
+    }
+
+    private fun persistTimeAnchors() {
+        val encoded = encodeJournalTimeAnchors(timeAnchors)
+        credentialKeys().forEach { platform.writeDeviceString("time.$it", encoded) }
+    }
+
     private fun retainedUiState(
         phase: ConnectionPhase = ConnectionPhase.IDLE,
-        statusText: String = "Готово к поиску",
+        status: String = "Готово к поиску",
         scanning: Boolean = false,
     ) = DplsUiState(
         phase = phase,
-        statusText = statusText,
+        statusText = status,
         scanning = scanning,
         uiTheme = state.uiTheme,
         keepScreenOn = state.keepScreenOn,
         hapticsEnabled = state.hapticsEnabled,
     )
 
-    private fun failLog(message: String) {
-        logLoadPending = false
-        logExporting = false
-        drainLog = false
-        logIncremental = false
-        pendingLogAckIndex = null
-        logTimeoutJob?.cancel()
-        updateState { it.copy(logProgress = null, logHasMore = false, error = message) }
-        scheduleKeepAlive()
-        scheduleStateRefresh()
-    }
-
     private fun fail(message: String, staleBond: Boolean = false) {
-        reconnectJob?.cancel()
-        preAuthKeepAliveJob?.cancel()
-        keepAliveJob?.cancel()
-        stateRefreshJob?.cancel()
-        pendingModeCommandId = null
-        commandTimeoutJob?.cancel()
-        connectTimeoutJob?.cancel()
-        connectTimeoutJob = null
-        deviceInfoTimeoutJob?.cancel()
-        logHistogramTimeoutJob?.cancel()
-        timeSyncTimeoutJob?.cancel()
-        awaitingDeviceInfo = false
-        awaitingLogHistogram = false
-        timeSyncPending = false
-        stopRssiPoll()
+        cancelLinkJobs()
+        clearOperation()
+        journal.fail()
         platform.keepConnectionAlive(false)
-        updateState {
-            it.copy(
-                phase = ConnectionPhase.ERROR,
-                statusText = message,
-                error = message,
-                commandInProgress = false,
-                logProgress = null,
-                identifyLedLive = false,
-                identifyLedPhaseOffsetMs = 0,
-                linkRssi = null,
-                staleBond = staleBond,
-            )
-        }
+        runtimeSession = DeviceSession.Failed(target?.address?.let { LinkEndpoint.Ble(it) }, LinkFailure.Platform(message))
+        updateState { it.copy(phase = ConnectionPhase.ERROR, statusText = message, error = message, commandInProgress = false, logProgress = null, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, linkRssi = null, staleBond = staleBond) }
         if (message != lastOperatorAlert) {
             lastOperatorAlert = message
             platform.notifyOperator(DplsOperatorAlerts.ERROR_TITLE, message)
         }
     }
 
-    private fun settingsFailure(message: String) =
-        updateState { it.copy(settingsOp = SettingsOp.FAILED, settingsError = message, settingsNotice = null) }
-
-    private inline fun updateState(block: (DplsUiState) -> DplsUiState) {
-        mutableState.value = block(mutableState.value)
-    }
-
+    private fun settingsFailure(message: String) = updateState { it.copy(settingsOp = SettingsOp.FAILED, settingsError = message, settingsNotice = null) }
+    private inline fun updateState(block: (DplsUiState) -> DplsUiState) { mutableState.value = block(mutableState.value) }
     private val state: DplsUiState get() = mutableState.value
+    private fun deviceListCaption(count: Int): String = if (count == 0) "Устройства не найдены" else "Выберите устройство"
 
     private fun utf8Truncate(value: String, maxBytes: Int): ByteArray {
         var end = 0
@@ -1590,7 +1075,7 @@ class DplsClient(
     private fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
         if (a.size != b.size) return false
         var diff = 0
-        for (index in a.indices) diff = diff or (a[index].toInt() xor b[index].toInt())
+        for (i in a.indices) diff = diff or (a[i].toInt() xor b[i].toInt())
         return diff == 0
     }
 
@@ -1598,15 +1083,13 @@ class DplsClient(
         private const val SCAN_DURATION_MS = 20_000L
         private const val CONNECT_TIMEOUT_MS = 45_000L
         private const val COMMAND_TIMEOUT_MS = 3_000L
-        private const val KEEP_ALIVE_MS = 3_000L
         private const val STATE_REFRESH_MS = 1_000L
         private const val TELEMETRY_STALE_MS = 3_000L
+        private const val KEEP_ALIVE_TICKS = 3
         private const val LOG_CHUNK_TIMEOUT_MS = 15_000L
         private const val SETTINGS_TIMEOUT_MS = 10_000L
         private const val ONE_SHOT_REQUEST_TIMEOUT_MS = 2_000L
         private const val TIME_SYNC_ERROR_WINDOW_MS = 1_500L
-        private const val MAX_LOG_EVENTS = 200
-        private const val LOG_PAGE_SIZE = 15
         private const val RSSI_POLL_MS = 350L
     }
 }
