@@ -96,13 +96,14 @@ internal object IosPlatformServices : DplsPlatformServices {
     override fun readDeviceVerifier(deviceKey: String): ByteArray? {
         IosVerifierKeychain.read(deviceKey)?.let { return it }
 
-        // One-time migration from the pre-Keychain build.
+        // One-time migration from the pre-Keychain build. The legacy value is
+        // removed even if Keychain storage fails; keeping plaintext is worse
+        // than losing persistence for a future launch.
         val defaults = NSUserDefaults.standardUserDefaults
         val legacyKey = DplsPlatformPrefs.verifierKey(deviceKey)
         val legacy = defaults.dataForKey(legacyKey)?.toByteArrayCopy()?.takeIf { it.size == 32 } ?: return null
-        if (IosVerifierKeychain.write(deviceKey, legacy)) {
-            defaults.removeObjectForKey(legacyKey)
-        }
+        IosVerifierKeychain.write(deviceKey, legacy)
+        defaults.removeObjectForKey(legacyKey)
         return legacy
     }
 

@@ -192,6 +192,10 @@ private class AndroidVerifierStore(
             return null
         }
         write(deviceKey, legacy)
+        // Never retain the old unprotected form if Keystore migration failed.
+        if (prefs.getString(prefKey, null)?.startsWith(FORMAT_PREFIX) != true) {
+            prefs.edit { remove(prefKey) }
+        }
         return legacy
     }
 
