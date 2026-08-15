@@ -28,6 +28,8 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            implementation(project(":wire"))
+            implementation(project(":runtime"))
             implementation(compose.runtime)
             implementation(compose.foundation)
             implementation(compose.animation)

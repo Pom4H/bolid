@@ -7,6 +7,7 @@ option(ENABLE_COVERAGE "Instrument firmware/src for line coverage" OFF)
 add_library(test_dpls_server
     src/dpls_protocol.c
     src/dpls_server.c
+    src/dpls_safety.c
     src/dpls_led.c
     src/dpls_calib.c
 )
@@ -33,6 +34,7 @@ dpls_add_test(test_led tests/test_led.c)
 dpls_add_test(test_calib tests/test_calib.c)
 dpls_add_test(test_protocol tests/test_protocol.c)
 dpls_add_test(test_server_edges tests/test_server_edges.c)
+dpls_add_test(test_safety tests/test_safety.c)
 
 add_executable(test_adc_irq_model tests/test_adc_irq_model.c)
 target_compile_options(test_adc_irq_model PRIVATE -Wall -Wextra -Werror)

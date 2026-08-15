@@ -18,5 +18,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "test-dpls-mobile"
-include(":android")
+include(":wire")
+include(":runtime")
 include(":core")
+include(":android")

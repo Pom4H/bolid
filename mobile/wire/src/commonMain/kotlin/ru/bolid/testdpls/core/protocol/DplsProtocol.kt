@@ -8,6 +8,18 @@ object DplsProtocol {
     const val TIME_MIN_UNIX_SECONDS = 1_577_836_800L // 2020-01-01T00:00:00Z
     const val TIME_MAX_UNIX_SECONDS = 4_102_444_799L // 2099-12-31T23:59:59Z
 
+    /**
+     * Correlation semantics are deliberately orthogonal to message type.
+     * Sequence is the transaction id for request/response pairs; EVENT frames
+     * are unsolicited. Legacy firmware that emits flags=0 remains decodable.
+     */
+    object Flags {
+        const val REQUEST = 1 shl 0
+        const val RESPONSE = 1 shl 1
+        const val EVENT = 1 shl 2
+        const val ERROR = 1 shl 3
+    }
+
     enum class Type(val wire: Int) {
         HELLO(0x01), AUTH_CHALLENGE(0x02), AUTH_PROOF(0x03), AUTH_RESULT(0x04),
         SETUP(0x05), DEVICE_INFO_GET(0x06), DEVICE_INFO_REPORT(0x07),
@@ -28,7 +40,12 @@ object DplsProtocol {
         val sequence: Int,
         val flags: Int = 0,
         val payload: ByteArray = byteArrayOf(),
-    )
+    ) {
+        val isRequest: Boolean get() = flags and Flags.REQUEST != 0
+        val isResponse: Boolean get() = flags and Flags.RESPONSE != 0
+        val isEvent: Boolean get() = flags and Flags.EVENT != 0
+        val isError: Boolean get() = flags and Flags.ERROR != 0 || type == Type.ERROR
+    }
 
     sealed interface DecodeResult {
         data class Success(val frame: Frame) : DecodeResult
