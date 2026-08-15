@@ -19,9 +19,16 @@ data class CommandResult(
     val status: Int,
     val mode: DplsMode?,
     val automaticReturnSeconds: Int,
+    /** Read-only v1 decode aid. V2 runtime never generates or correlates by it. */
+    @Deprecated("Protocol v2 correlates by Frame.sequence")
+    val commandId: Long? = null,
 )
 
-data class SettingsResult(val status: Int)
+data class SettingsResult(
+    val status: Int,
+    @Deprecated("Protocol v2 correlates by Frame.sequence")
+    val commandId: Long? = null,
+)
 
 fun parseAuthChallenge(raw: ByteArray): AuthChallenge? {
     if (raw.size < 37) return null
@@ -40,17 +47,26 @@ fun parseAuthResult(raw: ByteArray): AuthResult? {
     return AuthResult(status, readU16(raw, 1), token)
 }
 
-fun parseCommandResult(raw: ByteArray): CommandResult? {
-    if (raw.size != 4) return null
-    return CommandResult(
+fun parseCommandResult(raw: ByteArray): CommandResult? = when (raw.size) {
+    4 -> CommandResult(
         status = raw[0].toInt() and 0xff,
         mode = DplsMode.fromWire(raw[1].toInt() and 0xff),
         automaticReturnSeconds = readU16(raw, 2),
     )
+    8 -> CommandResult(
+        status = raw[4].toInt() and 0xff,
+        mode = DplsMode.fromWire(raw[5].toInt() and 0xff),
+        automaticReturnSeconds = readU16(raw, 6),
+        commandId = readU32(raw, 0),
+    )
+    else -> null
 }
 
-fun parseSettingsResult(raw: ByteArray): SettingsResult? =
-    raw.singleOrNull()?.let { SettingsResult(it.toInt() and 0xff) }
+fun parseSettingsResult(raw: ByteArray): SettingsResult? = when (raw.size) {
+    1 -> SettingsResult(raw[0].toInt() and 0xff)
+    5 -> SettingsResult(raw[4].toInt() and 0xff, readU32(raw, 0))
+    else -> null
+}
 
 fun buildTimeSyncPayload(sessionId: Long, sessionToken: ByteArray, unixSeconds: Long): ByteArray? {
     if (sessionToken.size != 8 || unixSeconds !in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS) return null
