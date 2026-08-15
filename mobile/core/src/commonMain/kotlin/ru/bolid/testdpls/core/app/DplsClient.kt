@@ -108,7 +108,7 @@ class DplsClient(
     override fun startScan() {
         if (state.authenticated && transport.hasConnection()) return browseDevices()
         disconnectInternal(clearSelection = true, clearVerifier = true)
-        mutableState.value = retainedUiState(ConnectionPhase.SCANNING, "Поиск Test-DPLС…", scanning = true)
+        mutableState.value = retainedUiState(ConnectionPhase.SCANNING, "Поиск Test-DPLS…", scanning = true)
         if (transport.startScan()) armScanDeadline(keepSession = false)
     }
 
@@ -704,7 +704,7 @@ class DplsClient(
     }
 
     private fun handleDeviceError(code: Int) {
-        when (val pending = operation) {
+        when (operation) {
             Operation.Histogram -> {
                 clearOperation()
                 if (code == 5) legacyFirmware = true else return fail("Ошибка устройства: $code")
@@ -728,8 +728,13 @@ class DplsClient(
                 settingsFailure("Прошивка устройства не поддерживает изменение настроек")
             }
             is Operation.Mode -> fail("Ошибка устройства: $code")
-            null -> if (journal.isActive) failLog("Ошибка загрузки журнала: $code")
-            else -> fail(if (code == 7) "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку." else "Ошибка устройства: $code")
+            null -> {
+                if (journal.isActive) failLog("Ошибка загрузки журнала: $code")
+                else fail(
+                    if (code == 7) "Окно первичной настройки закрыто. Выключите и включите устройство, затем повторите настройку."
+                    else "Ошибка устройства: $code",
+                )
+            }
         }
     }
 
