@@ -27,5 +27,7 @@ firmware/targets/phy6252/*.cbuild-pack.yml
 mobile/**/build/
 mobile/.gradle/
 mobile/local.properties
+mobile/keystore.properties
+**/*.keystore
 
 **/__pycache__/

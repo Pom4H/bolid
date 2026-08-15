@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -144,7 +145,7 @@ fun DplsApp(
     val showIdentify = !state.authenticated && identifyDevice != null &&
         (identify != null || state.identifyActive || state.identifyLedLive)
     val browsing = state.browsingDevices && state.authenticated
-    val inWorkspace = state.authenticated && !browsing
+    val inWorkspace = state.authenticated && !browsing && state.phase == ConnectionPhase.READY
     val journalHead = state.eventLog.maxOfOrNull { it.sequence } ?: 0L
     LaunchedEffect(state.authenticated) {
         if (state.authenticated) return@LaunchedEffect
@@ -250,7 +251,7 @@ fun DplsApp(
                         }
                     !state.authenticated && (state.credentialsReady || state.awaitingUserPassword) ->
                         Login(state, controller)
-                    !state.authenticated && state.phase.showsConnecting -> Connecting(state, controller)
+                    state.phase.showsConnecting -> Connecting(state, controller)
                     !state.authenticated -> Devices(state, controller) { identify = it; controller.identify(it.address) }
                     else -> AnimatedContent(
                         targetState = page,
@@ -413,9 +414,7 @@ private fun BrandHeader(
             }
         } else {
             Spacer(Modifier.weight(1f))
-            Box(Modifier.width(108.dp), contentAlignment = Alignment.CenterEnd) {
-                if (rssi != null) HeaderRssi(rssi)
-            }
+            if (rssi != null) HeaderRssi(rssi)
         }
     }
 }
@@ -543,7 +542,7 @@ private fun Devices(state: DplsUiState, c: DplsController, open: (DiscoveredDevi
                             }
                         }
                     }
-                    HeaderRssi(d.rssi)
+                    HeaderRssi(d.rssi, modifier = Modifier.wrapContentWidth())
                 }
             }
         }
@@ -692,7 +691,7 @@ private fun IdentifyActionButton(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun HeaderRssi(rssi: Int) {
+private fun HeaderRssi(rssi: Int, modifier: Modifier = Modifier) {
     val colors = LocalBolidColors.current
     val compact = LocalBolidLayout.current.compact
     val shown by animateIntAsState(rssi, tween(180), label = "headerRssi")
@@ -700,9 +699,10 @@ private fun HeaderRssi(rssi: Int) {
     val bars = rssiBars(rssi)
     val barWidth = if (compact) 4.dp else 5.dp
     val gap = if (compact) 1.dp else 2.dp
-    Column(
-        horizontalAlignment = Alignment.End,
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+    Row(
+        modifier.wrapContentWidth(),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(gap),
@@ -724,6 +724,8 @@ private fun HeaderRssi(rssi: Int) {
             fontSize = if (compact) 12.sp else 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
         )
     }
 }
@@ -1852,6 +1854,8 @@ private fun SettingsPage(state: DplsUiState, c: DplsController) {
     val colors = LocalBolidColors.current
     val layout = LocalBolidLayout.current
     var name by remember { mutableStateOf(state.deviceInfo?.userName ?: "") }
+    var nameOpen by remember { mutableStateOf(false) }
+    var passwordOpen by remember { mutableStateOf(false) }
     var current by remember { mutableStateOf("") }
     var next by remember { mutableStateOf("") }
     var repeat by remember { mutableStateOf("") }
@@ -1859,7 +1863,6 @@ private fun SettingsPage(state: DplsUiState, c: DplsController) {
     val nameNotice = state.settingsNotice?.takeIf { it.startsWith("Имя") }
     val passwordNotice = state.settingsNotice?.takeIf { it.startsWith("Пароль") }
     val storedName = state.deviceInfo?.userName.orEmpty()
-    val nameDirty = name.trim().isNotEmpty() && name.trim() != storedName.trim()
     val passwordReady = current.length >= 8 && next.length >= 8 && next == repeat
     val passwordHint = when {
         next.isNotEmpty() && repeat.isNotEmpty() && next != repeat -> "Новый пароль и повтор не совпадают" to colors.warn
@@ -1867,8 +1870,21 @@ private fun SettingsPage(state: DplsUiState, c: DplsController) {
             "Не менее 8 символов" to colors.muted
         else -> null
     }
+    LaunchedEffect(passwordNotice) {
+        if (passwordNotice == null) return@LaunchedEffect
+        passwordOpen = false
+        current = ""
+        next = ""
+        repeat = ""
+    }
     LaunchedEffect(state.deviceInfo?.userName, nameNotice) {
-        if (nameNotice != null) state.deviceInfo?.userName?.let { name = it }
+        val stored = state.deviceInfo?.userName ?: return@LaunchedEffect
+        if (nameNotice != null) {
+            name = stored
+            nameOpen = false
+        } else if (!nameOpen) {
+            name = stored
+        }
     }
     Column(
         Modifier
@@ -1883,53 +1899,23 @@ private fun SettingsPage(state: DplsUiState, c: DplsController) {
             SettingsCard("О приборе") {
                 DeviceAbout(state)
             }
-            SettingsCard("Имя устройства") {
-                BolidField(name, { name = it; if (nameNotice != null) c.clearSettingsOp() }, "Имя")
-                if (nameDirty) {
-                    Button(
-                        { c.setDeviceName(name) },
-                        Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 44.dp),
-                        enabled = !saving,
-                        shape = Bolid.ControlShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
-                    ) { Text("Сохранить") }
-                }
-                nameNotice?.let {
-                    Text(
-                        it,
-                        color = colors.ok,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-            }
-            SettingsCard("Пароль") {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    BolidField(current, { current = it }, "Текущий", password = true)
-                    BolidField(next, { next = it }, "Новый", password = true)
-                    BolidField(repeat, { repeat = it }, "Повтор", password = true)
-                    Button(
-                        { c.changePassword(current, next) },
-                        Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                        enabled = !saving && passwordReady,
-                        shape = Bolid.ControlShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
-                    ) { Text("Сменить") }
-                    passwordHint?.let { (text, color) ->
-                        Text(text, color = color, fontSize = 12.sp)
-                    }
-                    passwordNotice?.let {
-                        Text(it, color = colors.ok, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                        LaunchedEffect(it) {
-                            current = ""
-                            next = ""
-                            repeat = ""
-                        }
-                    }
-                    state.settingsError?.let { Text(it, color = colors.warn, fontSize = 12.sp) }
-                }
-            }
+            Button(
+                {
+                    name = storedName
+                    nameOpen = true
+                },
+                Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                enabled = !saving,
+                shape = Bolid.ControlShape,
+                colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
+            ) { Text("Изменить имя") }
+            Button(
+                { passwordOpen = true },
+                Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                enabled = !saving,
+                shape = Bolid.ControlShape,
+                colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
+            ) { Text("Сменить пароль") }
             SettingsCard("Приложение") {
                 SettingsToggle(
                     title = "Не гасить экран",
@@ -1964,16 +1950,102 @@ private fun SettingsPage(state: DplsUiState, c: DplsController) {
                     }
                 }
             }
-            SettingsCard("Оформление") {
-                Text(
-                    "Тема",
-                    color = colors.muted,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
+            SettingsCard("Тема") {
                 ThemePicker(state.uiTheme, c::setUiTheme)
             }
         }
+    }
+    if (nameOpen) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!saving) {
+                    nameOpen = false
+                    name = storedName
+                    c.clearSettingsOp()
+                }
+            },
+            containerColor = colors.surfaceRaised,
+            titleContentColor = colors.text,
+            textContentColor = colors.muted,
+            title = { Text("Изменить имя") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BolidField(
+                        name,
+                        {
+                            name = it
+                            if (nameNotice != null || state.settingsError != null) c.clearSettingsOp()
+                        },
+                        "Имя",
+                    )
+                    state.settingsError?.takeIf { nameOpen }?.let { Text(it, color = colors.warn, fontSize = 12.sp) }
+                }
+            },
+            confirmButton = {
+                Button(
+                    { c.setDeviceName(name) },
+                    enabled = !saving && name.trim().isNotEmpty() && name.trim() != storedName.trim(),
+                    shape = Bolid.ControlShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
+                ) { Text(if (saving) "…" else "Сохранить") }
+            },
+            dismissButton = {
+                TextButton(
+                    {
+                        if (!saving) {
+                            nameOpen = false
+                            name = storedName
+                            c.clearSettingsOp()
+                        }
+                    },
+                ) { Text("Отмена", color = colors.muted) }
+            },
+        )
+    }
+    if (passwordOpen) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!saving) {
+                    passwordOpen = false
+                    c.clearSettingsOp()
+                }
+            },
+            containerColor = colors.surfaceRaised,
+            titleContentColor = colors.text,
+            textContentColor = colors.muted,
+            title = { Text("Сменить пароль") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BolidField(current, { current = it; if (state.settingsError != null) c.clearSettingsOp() }, "Текущий", password = true)
+                    BolidField(next, { next = it }, "Новый", password = true)
+                    BolidField(repeat, { repeat = it }, "Повтор", password = true)
+                    passwordHint?.let { (text, color) ->
+                        Text(text, color = color, fontSize = 12.sp)
+                    }
+                    if (passwordOpen) {
+                        state.settingsError?.let { Text(it, color = colors.warn, fontSize = 12.sp) }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    { c.changePassword(current, next) },
+                    enabled = !saving && passwordReady,
+                    shape = Bolid.ControlShape,
+                    colors = ButtonDefaults.buttonColors(containerColor = Bolid.Blue),
+                ) { Text(if (saving) "…" else "Сменить") }
+            },
+            dismissButton = {
+                TextButton(
+                    {
+                        if (!saving) {
+                            passwordOpen = false
+                            c.clearSettingsOp()
+                        }
+                    },
+                ) { Text("Отмена", color = colors.muted) }
+            },
+        )
     }
 }
 
@@ -2056,7 +2128,15 @@ private fun DeviceAbout(state: DplsUiState) {
         )
     }
     val rssi = state.linkRssi ?: state.selectedDevice?.rssi
-    if (rssi != null) SettingsFact("Сигнал", "$rssi дБм", valueColor = rssiColor(rssi, colors))
+    if (rssi != null) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Сигнал", color = colors.muted, fontSize = 13.sp, modifier = Modifier.width(88.dp), maxLines = 1, softWrap = false)
+            HeaderRssi(rssi)
+        }
+    }
     state.selectedDevice?.address?.let { address ->
         SettingsFact("Адрес", address)
     }
@@ -2069,13 +2149,14 @@ private fun SettingsFact(label: String, value: String, valueColor: Color? = null
         Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = colors.muted, fontSize = 13.sp, modifier = Modifier.width(88.dp))
+        Text(label, color = colors.muted, fontSize = 13.sp, modifier = Modifier.width(88.dp), maxLines = 1, softWrap = false)
         Text(
             value,
             color = valueColor ?: colors.text,
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
+            softWrap = false,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )

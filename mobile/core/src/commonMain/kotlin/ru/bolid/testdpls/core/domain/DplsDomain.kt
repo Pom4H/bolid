@@ -187,7 +187,8 @@ data class DplsUiState(
         get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
 
     val needsPeriodicStateRefresh: Boolean
-        get() = authenticated && !commandInProgress && state != null && logProgress == null
+        get() = authenticated && !commandInProgress && logProgress == null &&
+            (state != null || phase == ConnectionPhase.SYNCHRONIZING)
 
     val setupFormReady: Boolean
         get() = credentialsReady &&

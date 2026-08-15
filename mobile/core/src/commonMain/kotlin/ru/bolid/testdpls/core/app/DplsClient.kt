@@ -74,6 +74,7 @@ class DplsClient(
     private var legacyFirmware = false
     private var awaitingDeviceInfo = false
     private var timeSyncPending = false
+    private var timeSyncAttempted = false
 
     private sealed interface PendingSettings {
         val commandId: Long
@@ -202,6 +203,7 @@ class DplsClient(
         legacyFirmware = false
         awaitingDeviceInfo = false
         timeSyncPending = false
+        timeSyncAttempted = false
         pendingModeCommandId = null
         updateState {
             it.copy(
@@ -569,6 +571,7 @@ class DplsClient(
         cancelConnectionJobs()
         pendingModeCommandId = null
         timeSyncPending = false
+        timeSyncAttempted = false
         session.resetLink()
         updateState {
             it.copy(
@@ -809,17 +812,13 @@ class DplsClient(
                 identifyLedLive = false,
                 identifyLedPhaseOffsetMs = 0,
                 phase = ConnectionPhase.SYNCHRONIZING,
-                statusText = "Синхронизация времени…",
+                statusText = "Чтение состояния…",
                 error = null,
             )
         }
-        val unixSeconds = platform.nowMillis() / 1000L
-        buildTimeSyncPayload(session.sessionId, session.sessionToken, unixSeconds)?.let { timePayload ->
-            timeSyncPending = true
-            send(DplsProtocol.Type.TIME_SYNC, timePayload)
-        }
         send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
         scheduleKeepAlive()
+        scheduleStateRefresh()
     }
 
     private fun handleCommandResult(payload: ByteArray) {
@@ -853,6 +852,7 @@ class DplsClient(
         }
         loadTimeAnchors()
         persistTimeAnchors()
+        attemptTimeSync()
     }
 
     private fun handleSettingsResult(payload: ByteArray) {
@@ -896,7 +896,6 @@ class DplsClient(
     private fun handleState(payload: ByteArray) {
         val now = platform.nowMillis()
         val deviceState = parseStateReport(payload, now) ?: return fail("Повреждённый STATE_REPORT")
-        timeSyncPending = false
         updateState {
             it.copy(
                 phase = ConnectionPhase.READY,
@@ -923,6 +922,8 @@ class DplsClient(
             scheduleStateRefresh()
             if (state.deviceInfo == null && !legacyFirmware && !awaitingDeviceInfo) {
                 requestDeviceInfoInternal()
+            } else {
+                attemptTimeSync()
             }
         }
         if (logLoadPending && !logExporting) loadEventLog()
@@ -1158,6 +1159,7 @@ class DplsClient(
              * connection usable and fall back to the legacy uptime journal. */
             timeSyncPending = false
             legacyFirmware = true
+            if (state.state == null) send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
             return
         }
         if (awaitingLogHistogram) {
@@ -1170,6 +1172,7 @@ class DplsClient(
         if (code == 5 && awaitingDeviceInfo) {
             awaitingDeviceInfo = false
             legacyFirmware = true
+            attemptTimeSync()
             return
         }
         if (code == 5 && pendingSettings != null) {
@@ -1210,6 +1213,15 @@ class DplsClient(
         send(DplsProtocol.Type.DEVICE_INFO_GET, session.authenticatedPayload())
     }
 
+    private fun attemptTimeSync() {
+        if (timeSyncAttempted || legacyFirmware) return
+        val unixSeconds = platform.nowMillis() / 1000L
+        val payload = buildTimeSyncPayload(session.sessionId, session.sessionToken, unixSeconds) ?: return
+        timeSyncAttempted = true
+        timeSyncPending = true
+        send(DplsProtocol.Type.TIME_SYNC, payload)
+    }
+
     private fun schedulePreAuthKeepAlive() {
         preAuthKeepAliveJob?.cancel()
         preAuthKeepAliveJob = scope.launch {
@@ -1241,8 +1253,8 @@ class DplsClient(
             while (!logExporting && state.needsPeriodicStateRefresh && transport.hasConnection()) {
                 delay(STATE_REFRESH_MS)
                 if (logExporting || !state.needsPeriodicStateRefresh) break
-                val receivedAt = state.state?.receivedAtMillis ?: 0L
-                if (platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) {
+                val receivedAt = state.state?.receivedAtMillis
+                if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) {
                     updateState { it.copy(staleState = true) }
                 }
                 send(DplsProtocol.Type.STATE_GET, session.authenticatedPayload())
@@ -1255,6 +1267,7 @@ class DplsClient(
         cancelConnectionJobs()
         pendingModeCommandId = null
         timeSyncPending = false
+        timeSyncAttempted = false
         session.resetLink()
         updateState {
             it.copy(
@@ -1358,6 +1371,7 @@ class DplsClient(
         cancelConnectionJobs()
         pendingModeCommandId = null
         timeSyncPending = false
+        timeSyncAttempted = false
         logTimeoutJob?.cancel()
         settingsTimeoutJob?.cancel()
         clearPendingSettings()

@@ -57,17 +57,35 @@ class DplsClientTest {
         assertEquals(DplsProtocol.Type.AUTH_PROOF, transport.lastFrame().type)
 
         val token = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
-        transport.receive(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(0, 0, 0) + token)
+        transport.receive(
+            DplsProtocol.Type.AUTH_RESULT,
+            byteArrayOf(0, 0, 0) + token,
+        )
+        assertEquals(DplsProtocol.Type.STATE_GET, transport.lastFrame().type)
+        assertTrue(transport.frames().none { it.type == DplsProtocol.Type.TIME_SYNC })
+
+        transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL, revision = 1))
+        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
+        assertTrue(client.uiState.value.controlsEnabled)
+        assertEquals(DplsProtocol.Type.DEVICE_INFO_GET, transport.lastFrame().type)
+
+        val name = "Test-DPLS".encodeToByteArray()
+        val deviceInfo = ByteArray(12 + name.size)
+        putU32(deviceInfo, 0, 0x3B31)
+        deviceInfo[4] = 1
+        deviceInfo[5] = 1
+        deviceInfo[6] = 2
+        deviceInfo[7] = 1
+        deviceInfo[8] = 1
+        deviceInfo[9] = 1
+        deviceInfo[11] = name.size.toByte()
+        name.copyInto(deviceInfo, 12)
+        transport.receive(DplsProtocol.Type.DEVICE_INFO_REPORT, deviceInfo)
         val timeSync = transport.frames().last { it.type == DplsProtocol.Type.TIME_SYNC }
         assertEquals(16, timeSync.payload.size)
         assertEquals(0x78563412, readU32(timeSync.payload, 0))
         assertContentEquals(token, timeSync.payload.copyOfRange(4, 12))
         assertEquals(platform.nowMillis() / 1000L, readU32(timeSync.payload, 12))
-        assertEquals(DplsProtocol.Type.STATE_GET, transport.lastFrame().type)
-
-        transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL, revision = 1))
-        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
-        assertTrue(client.uiState.value.controlsEnabled)
 
         client.requestMode(DplsMode.SHORT_1)
         client.confirmMode()
@@ -122,12 +140,17 @@ class DplsClientTest {
             DplsProtocol.Type.AUTH_RESULT,
             byteArrayOf(0, 0, 0) + byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8),
         )
-        assertTrue(transport.frames().any { it.type == DplsProtocol.Type.TIME_SYNC })
-        transport.receive(DplsProtocol.Type.ERROR, byteArrayOf(5))
-        assertEquals(ConnectionPhase.SYNCHRONIZING, client.uiState.value.phase)
-        assertEquals(null, client.uiState.value.error)
+        assertTrue(transport.frames().any { it.type == DplsProtocol.Type.STATE_GET })
+        assertTrue(transport.frames().none { it.type == DplsProtocol.Type.TIME_SYNC })
         transport.receive(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL, revision = 1))
         assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
+        assertEquals(null, client.uiState.value.error)
+        transport.receive(DplsProtocol.Type.DEVICE_INFO_REPORT, ByteArray(12))
+        assertTrue(transport.frames().any { it.type == DplsProtocol.Type.TIME_SYNC })
+        transport.receive(DplsProtocol.Type.ERROR, byteArrayOf(5))
+        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
+        assertEquals(null, client.uiState.value.error)
+        assertEquals(DplsMode.NORMAL, client.uiState.value.state?.mode)
         client.close()
     }
 
