@@ -2,7 +2,7 @@ package ru.bolid.testdpls.core.session
 
 import ru.bolid.testdpls.core.protocol.putU32
 
-/** Secret-bearing wire session state. Frame sequence is the only transaction id. */
+/** Secret-bearing wire session state. Frame sequence is the only stored transaction id. */
 class DplsSessionRuntime {
     var sequence: Int = 1
     var sessionId: Long = 0
@@ -18,6 +18,10 @@ class DplsSessionRuntime {
     var initialized: Boolean = false
 
     fun nextSequence(): Int = sequence.also { sequence = (sequence + 1) and 0xffff }
+
+    /** Transitional source-compatibility only; it aliases sequence and has no second counter/state. */
+    @Deprecated("Protocol v2 uses nextSequence() as the transaction id")
+    fun nextCommandId(): Long = nextSequence().toLong()
 
     fun setChallenge(sessionId: Long, deviceNonce: ByteArray, authSalt: ByteArray, initialized: Boolean) {
         require(deviceNonce.size == 16)
