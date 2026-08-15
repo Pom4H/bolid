@@ -1,11 +1,13 @@
 package ru.bolid.testdpls.core.protocol
 
+import ru.bolid.testdpls.core.domain.DeviceCapabilities
 import ru.bolid.testdpls.core.domain.DeviceInfo
 import ru.bolid.testdpls.core.domain.DeviceState
 import ru.bolid.testdpls.core.domain.DplsMode
 import ru.bolid.testdpls.core.domain.EventRecord
 import ru.bolid.testdpls.core.domain.LogHistogram
 import ru.bolid.testdpls.core.domain.PowerSource
+import ru.bolid.testdpls.core.domain.Voltages
 
 object StateValidity {
     const val LINE = 1 shl 0
@@ -17,20 +19,12 @@ object StateValidity {
     const val PORT_T = 1 shl 6
 }
 
-object DeviceCaps {
-    const val ADC_PRESENT = 1 shl 0
-    const val HW_READBACK = 1 shl 1
-    const val ADC_CALIBRATED = 1 shl 2
-    const val MULTI_VOLTAGE = 1 shl 3
-}
-
 data class LogChunkBatch(val firstIndex: Int, val records: List<EventRecord>)
 
 fun parseLogHistogramReport(raw: ByteArray): LogHistogram? {
     if (raw.size < 23) return null
     val bucketCount = raw[22].toInt() and 0xff
     if (bucketCount > 48 || raw.size != 23 + bucketCount) return null
-    val counts = IntArray(bucketCount) { raw[23 + it].toInt() and 0xff }
     return LogHistogram(
         firstTimestampSeconds = readU32(raw, 0),
         lastTimestampSeconds = readU32(raw, 4),
@@ -38,31 +32,21 @@ fun parseLogHistogramReport(raw: ByteArray): LogHistogram? {
         lastSequence = readU32(raw, 12),
         eventCount = readU16(raw, 16),
         bucketSeconds = readU32(raw, 18),
-        counts = counts.toList(),
+        counts = List(bucketCount) { raw[23 + it].toInt() and 0xff },
     )
 }
 
 fun parseDeviceInfoReport(raw: ByteArray): DeviceInfo? {
     if (raw.size < 12) return null
-    val deviceId = readU32(raw, 0)
-    val proto = raw[4].toInt() and 0xff
-    val major = raw[5].toInt() and 0xff
-    val minor = raw[6].toInt() and 0xff
-    val patch = raw[7].toInt() and 0xff
-    val hwRev = raw[8].toInt() and 0xff
-    val caps = raw[9].toInt() and 0xff
     val nameLen = raw[11].toInt() and 0xff
     if (nameLen > raw.size - 12) return null
     val name = if (nameLen == 0) "" else raw.copyOfRange(12, 12 + nameLen).decodeToString()
     return DeviceInfo(
-        deviceId = deviceId,
-        protocolVersion = proto,
-        firmwareVersion = "$major.$minor.$patch",
-        hardwareRevision = hwRev,
-        adcPresent = caps and DeviceCaps.ADC_PRESENT != 0,
-        hardwareReadback = caps and DeviceCaps.HW_READBACK != 0,
-        adcCalibrated = caps and DeviceCaps.ADC_CALIBRATED != 0,
-        multiVoltageReport = caps and DeviceCaps.MULTI_VOLTAGE != 0,
+        deviceId = readU32(raw, 0),
+        protocolVersion = raw[4].toInt() and 0xff,
+        firmwareVersion = "${raw[5].toInt() and 0xff}.${raw[6].toInt() and 0xff}.${raw[7].toInt() and 0xff}",
+        hardwareRevision = raw[8].toInt() and 0xff,
+        capabilities = DeviceCapabilities(raw[9].toInt() and 0xff),
         userName = name,
     )
 }
@@ -71,41 +55,31 @@ fun parseStateReport(raw: ByteArray, nowMillis: Long): DeviceState? {
     if (raw.size < 16) return null
     val mode = DplsMode.fromWire(raw[0].toInt() and 0xff) ?: return null
     val power = if ((raw[1].toInt() and 0xff) == 0) PowerSource.DPLS else PowerSource.RESERVE
-    val voltage = readU16(raw, 2)
-    val automaticReturn = readU16(raw, 4)
-    val reserveLow = raw[6].toInt() != 0
-    val flags = raw[7].toInt() and 0xff
-    val uptimeSeconds = readU32(raw, 8)
-    val revision = readU32(raw, 12)
     val validity = raw.getOrNull(16)?.toInt()?.and(0xff) ?: 0
     val extended = raw.size >= 25
-    val port1 = if (extended) readU16(raw, 17) else voltage
-    val port2 = if (extended) readU16(raw, 19) else 0
-    val portT = if (extended) readU16(raw, 21) else 0
-    val reserve = if (extended) readU16(raw, 23) else 0
+    val legacyLine = readU16(raw, 2)
+    fun measured(mask: Int, value: Int): Int? = value.takeIf { validity and mask != 0 }
+
+    val port1 = if (extended) readU16(raw, 17) else legacyLine
     return DeviceState(
         mode = mode,
-        voltageMv = voltage,
         powerSource = power,
-        reserveLow = reserveLow,
-        realShort = flags and 0x02 != 0,
-        automaticReturnSeconds = automaticReturn,
-        uptimeSeconds = uptimeSeconds,
-        revision = revision,
+        reserveLow = raw[6].toInt() != 0,
+        realShort = raw[7].toInt() and 0x02 != 0,
+        automaticReturnSeconds = readU16(raw, 4),
+        uptimeSeconds = readU32(raw, 8),
+        revision = readU32(raw, 12),
         receivedAtMillis = nowMillis,
-        lineVoltageValid = validity and StateValidity.LINE != 0,
-        reserveValid = validity and StateValidity.RESERVE != 0,
-        powerValid = validity and StateValidity.POWER != 0,
-        autoIsoValid = validity and StateValidity.AUTO_ISO != 0,
+        voltages = Voltages(
+            lineMv = measured(StateValidity.LINE, legacyLine),
+            port1Mv = measured(StateValidity.LINE, port1),
+            port2Mv = if (extended) measured(StateValidity.PORT_2, readU16(raw, 19)) else null,
+            branchMv = if (extended) measured(StateValidity.PORT_T, readU16(raw, 21)) else null,
+            reserveMv = if (extended) measured(StateValidity.RESERVE, readU16(raw, 23)) else null,
+        ),
+        powerKnown = validity and StateValidity.POWER != 0,
+        autoIsolationKnown = validity and StateValidity.AUTO_ISO != 0,
         adcCalibrated = validity and StateValidity.ADC_CALIBRATED != 0,
-        port1VoltageMv = port1,
-        port2VoltageMv = port2,
-        portTVoltageMv = portT,
-        reserveVoltageMv = reserve,
-        port1VoltageValid = validity and StateValidity.LINE != 0,
-        port2VoltageValid = extended && validity and StateValidity.PORT_2 != 0,
-        portTVoltageValid = extended && validity and StateValidity.PORT_T != 0,
-        reserveVoltageValid = extended && validity and StateValidity.RESERVE != 0,
     )
 }
 
