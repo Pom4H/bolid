@@ -10,8 +10,8 @@
 #define DPLS_SESSION_TOKEN_SIZE 8u
 #define DPLS_COMMAND_CACHE_SIZE 8u
 #define DPLS_NAME_MAX 31u
-#define DPLS_FW_VERSION_MAJOR 1u
-#define DPLS_FW_VERSION_MINOR 3u
+#define DPLS_FW_VERSION_MAJOR 2u
+#define DPLS_FW_VERSION_MINOR 0u
 #define DPLS_FW_VERSION_PATCH 0u
 #define DPLS_TIME_MIN_UNIX_SECONDS 1577836800u
 #define DPLS_TIME_MAX_UNIX_SECONDS 4102444799u
@@ -129,7 +129,7 @@ typedef struct {
 typedef struct {
     bool valid;
     uint32_t session_id;
-    uint32_t command_id;
+    uint16_t request_sequence;
     uint8_t status;
     dpls_mode_t resulting_mode;
     uint16_t remaining_seconds;
@@ -162,7 +162,6 @@ typedef struct {
     uint32_t identify_deadline_ms;
     uint32_t identify_blink_last_ms;
     uint32_t setup_disconnect_deadline_ms;
-    uint16_t tx_sequence;
     uint8_t device_nonce[16];
     uint8_t client_nonce[16];
     uint8_t session_token[8];

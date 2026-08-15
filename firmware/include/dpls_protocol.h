@@ -5,10 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DPLS_PROTOCOL_VERSION 1u
+#define DPLS_PROTOCOL_VERSION 2u
 #define DPLS_PROTOCOL_OVERHEAD 9u
 #define DPLS_MAX_PAYLOAD 235u
 #define DPLS_MAX_FRAME (DPLS_PROTOCOL_OVERHEAD + DPLS_MAX_PAYLOAD)
+
+#define DPLS_FLAG_REQUEST  (1u << 0)
+#define DPLS_FLAG_RESPONSE (1u << 1)
+#define DPLS_FLAG_EVENT    (1u << 2)
+#define DPLS_FLAG_ERROR    (1u << 3)
 
 typedef enum {
     DPLS_MSG_HELLO = 0x01,
@@ -34,6 +39,8 @@ typedef enum {
     DPLS_MSG_LOG_ACK = 0x23,
     DPLS_MSG_LOG_FINISH = 0x24,
     DPLS_MSG_LOG_RESULT = 0x25,
+    DPLS_MSG_LOG_HIST_GET = 0x26,
+    DPLS_MSG_LOG_HIST_REPORT = 0x27,
     DPLS_MSG_KEEP_ALIVE = 0x30,
     DPLS_MSG_ERROR = 0x7f
 } dpls_message_type_t;

@@ -16,13 +16,12 @@ data class AuthResult(
 )
 
 data class CommandResult(
-    val commandId: Long,
     val status: Int,
     val mode: DplsMode?,
     val automaticReturnSeconds: Int,
 )
 
-data class SettingsResult(val commandId: Long, val status: Int)
+data class SettingsResult(val status: Int)
 
 fun parseAuthChallenge(raw: ByteArray): AuthChallenge? {
     if (raw.size < 37) return null
@@ -38,36 +37,23 @@ fun parseAuthResult(raw: ByteArray): AuthResult? {
     if (raw.size < 3) return null
     val status = raw[0].toInt() and 0xff
     val token = if (status == 0 && raw.size >= 11) raw.copyOfRange(3, 11) else null
-    return AuthResult(
-        status = status,
-        retryAfterSeconds = readU16(raw, 1),
-        sessionToken = token,
-    )
+    return AuthResult(status, readU16(raw, 1), token)
 }
 
 fun parseCommandResult(raw: ByteArray): CommandResult? {
-    if (raw.size < 8) return null
+    if (raw.size != 4) return null
     return CommandResult(
-        commandId = readU32(raw, 0),
-        status = raw[4].toInt() and 0xff,
-        mode = DplsMode.fromWire(raw[5].toInt() and 0xff),
-        automaticReturnSeconds = readU16(raw, 6),
+        status = raw[0].toInt() and 0xff,
+        mode = DplsMode.fromWire(raw[1].toInt() and 0xff),
+        automaticReturnSeconds = readU16(raw, 2),
     )
 }
 
-fun parseSettingsResult(raw: ByteArray): SettingsResult? {
-    if (raw.size < 5) return null
-    return SettingsResult(readU32(raw, 0), raw[4].toInt() and 0xff)
-}
+fun parseSettingsResult(raw: ByteArray): SettingsResult? =
+    raw.singleOrNull()?.let { SettingsResult(it.toInt() and 0xff) }
 
-/**
- * TIME_SYNC payload: session_id (u32 LE) + session_token (8 B) + Unix UTC seconds (u32 LE).
- * Returns null instead of emitting a bogus clock value if the phone clock is clearly unset.
- */
 fun buildTimeSyncPayload(sessionId: Long, sessionToken: ByteArray, unixSeconds: Long): ByteArray? {
-    if (sessionToken.size != 8 || unixSeconds !in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS) {
-        return null
-    }
+    if (sessionToken.size != 8 || unixSeconds !in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS) return null
     return ByteArray(16).also { payload ->
         putU32(payload, 0, sessionId)
         sessionToken.copyInto(payload, 4)

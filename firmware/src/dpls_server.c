@@ -14,7 +14,8 @@ static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v
 static void wr32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static bool elapsed(uint32_t now, uint32_t deadline) { return (int32_t)(now - deadline) >= 0; }
 
-static bool send_frame(dpls_server_t *s, uint8_t type, const uint8_t *payload, uint16_t length, bool stream);
+static bool send_frame(dpls_server_t *s, uint8_t type, uint8_t flags, uint16_t sequence,
+                       const uint8_t *payload, uint16_t length, bool stream);
 static uint16_t log_event_count(const dpls_server_t *s);
 static bool event_type_valid(uint8_t type) { return type >= EVT_BOOT && type <= EVT_LAST; }
 
@@ -64,21 +65,32 @@ static void start_identify(dpls_server_t *s, uint32_t now_ms) {
     dpls_server_log(s, EVT_IDENTIFY_START, 0);
 }
 
-static bool send_frame(dpls_server_t *s, uint8_t type, const uint8_t *payload, uint16_t length, bool stream) {
+static bool send_frame(dpls_server_t *s, uint8_t type, uint8_t flags, uint16_t sequence,
+                       const uint8_t *payload, uint16_t length, bool stream) {
     size_t encoded_length;
     uint16_t crc;
     if (length > DPLS_MAX_PAYLOAD) return false;
     encoded_length = DPLS_PROTOCOL_OVERHEAD + length;
     s->tx_encoded[0] = DPLS_PROTOCOL_VERSION;
     s->tx_encoded[1] = type;
-    s->tx_encoded[2] = 0;
-    wr16(s->tx_encoded + 3, ++s->tx_sequence);
+    s->tx_encoded[2] = flags;
+    wr16(s->tx_encoded + 3, sequence);
     wr16(s->tx_encoded + 5, length);
     if (length) memcpy(s->tx_encoded + 7, payload, length);
     crc = dpls_crc16(s->tx_encoded, encoded_length - 2u);
     wr16(s->tx_encoded + encoded_length - 2u, crc);
     return stream ? s->hal.tx_notify(s->hal.context, s->tx_encoded, encoded_length)
                   : s->hal.tx_indicate(s->hal.context, s->tx_encoded, encoded_length);
+}
+
+static bool send_response(dpls_server_t *s, uint16_t sequence, uint8_t type,
+                          const uint8_t *payload, uint16_t length, bool stream) {
+    return send_frame(s, type, DPLS_FLAG_RESPONSE, sequence, payload, length, stream);
+}
+
+static void send_error(dpls_server_t *s, uint16_t sequence, uint8_t code) {
+    (void)send_frame(s, DPLS_MSG_ERROR, DPLS_FLAG_RESPONSE | DPLS_FLAG_ERROR,
+                     sequence, &code, 1u, false);
 }
 
 void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter) {
@@ -122,8 +134,7 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
     s->now_ms = now_ms;
     s->boot_ms = now_ms;
     dpls_safety_init(&s->safety);
-    s->next_event_sequence = 1;
-    s->event_count = 0;
+    s->next_event_sequence = 1u;
     if (s->hal.event_storage_init) {
         uint16_t stored_count = 0;
         uint32_t next_sequence = 1;
@@ -131,9 +142,7 @@ void dpls_server_init(dpls_server_t *s, const dpls_hal_t *hal, uint32_t now_ms) 
             s->event_count = stored_count > DPLS_EVENT_CAPACITY ? DPLS_EVENT_CAPACITY : stored_count;
             s->next_event_sequence = next_sequence == 0 ? 1 : next_sequence;
             if (s->event_count >= s->next_event_sequence) s->event_count = (uint16_t)(s->next_event_sequence - 1u);
-        } else if (s->hal.diagnostic_error) {
-            s->hal.diagnostic_error(s->hal.context, false);
-        }
+        } else if (s->hal.diagnostic_error) s->hal.diagnostic_error(s->hal.context, false);
     }
     if (s->hal.auth_lock_read && s->hal.auth_lock_read(s->hal.context)) {
         s->failed_auth_attempts = DPLS_AUTH_MAX_ATTEMPTS;
@@ -220,8 +229,6 @@ static bool session_matches(dpls_server_t *s, const dpls_frame_t *f, uint16_t mi
     return true;
 }
 
-static void send_error(dpls_server_t *s, uint8_t code) { send_frame(s, DPLS_MSG_ERROR, &code, 1, false); }
-
 static bool random_or_fail(dpls_server_t *s, uint8_t *out, size_t length) {
     if (s->hal.random_bytes && s->hal.random_bytes(s->hal.context, out, length)) return true;
     memset(out, 0, length);
@@ -232,21 +239,21 @@ static bool random_or_fail(dpls_server_t *s, uint8_t *out, size_t length) {
     return false;
 }
 
-static void send_challenge(dpls_server_t *s) {
+static void send_challenge(dpls_server_t *s, uint16_t sequence) {
     uint8_t payload[37];
     if (!random_or_fail(s, (uint8_t *)&s->session_id, sizeof(s->session_id)) ||
         !random_or_fail(s, s->device_nonce, sizeof(s->device_nonce))) {
-        send_error(s, 5);
+        send_error(s, sequence, 5);
         return;
     }
     wr32(payload, s->session_id);
     memcpy(payload + 4, s->device_nonce, 16);
     s->hal.settings_salt(s->hal.context, payload + 20);
     payload[36] = s->hal.settings_state(s->hal.context) == DPLS_SETTINGS_VALID ? 1u : 0u;
-    send_frame(s, DPLS_MSG_AUTH_CHALLENGE, payload, sizeof(payload), false);
+    (void)send_response(s, sequence, DPLS_MSG_AUTH_CHALLENGE, payload, sizeof(payload), false);
 }
 
-static void send_auth_result(dpls_server_t *s, uint8_t status, uint16_t retry_seconds) {
+static void send_auth_result(dpls_server_t *s, uint16_t sequence, uint8_t status, uint16_t retry_seconds) {
     uint8_t payload[11];
     payload[0] = status;
     wr16(payload + 1, retry_seconds);
@@ -254,15 +261,15 @@ static void send_auth_result(dpls_server_t *s, uint8_t status, uint16_t retry_se
         if (!random_or_fail(s, s->session_token, sizeof(s->session_token))) {
             payload[0] = 4;
             memset(payload + 3, 0, 8);
-            send_frame(s, DPLS_MSG_AUTH_RESULT, payload, sizeof(payload), false);
+            (void)send_response(s, sequence, DPLS_MSG_AUTH_RESULT, payload, sizeof(payload), false);
             return;
         }
         memcpy(payload + 3, s->session_token, 8);
     } else memset(payload + 3, 0, 8);
-    send_frame(s, DPLS_MSG_AUTH_RESULT, payload, sizeof(payload), false);
+    (void)send_response(s, sequence, DPLS_MSG_AUTH_RESULT, payload, sizeof(payload), false);
 }
 
-static void send_state(dpls_server_t *s) {
+static void send_state(dpls_server_t *s, uint16_t sequence) {
     uint8_t p[25];
     uint16_t legacy_voltage;
     uint16_t port1_voltage;
@@ -282,10 +289,10 @@ static void send_state(dpls_server_t *s) {
     wr16(p + 19, s->hal.port2_voltage_mv ? s->hal.port2_voltage_mv(s->hal.context) : 0u);
     wr16(p + 21, s->hal.port_t_voltage_mv ? s->hal.port_t_voltage_mv(s->hal.context) : 0u);
     wr16(p + 23, s->hal.reserve_voltage_mv ? s->hal.reserve_voltage_mv(s->hal.context) : 0u);
-    send_frame(s, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
+    (void)send_response(s, sequence, DPLS_MSG_STATE_REPORT, p, sizeof(p), false);
 }
 
-static void send_device_info(dpls_server_t *s) {
+static void send_device_info(dpls_server_t *s, uint16_t sequence) {
     uint8_t p[12u + DPLS_NAME_MAX + 1u];
     dpls_device_info_t info;
     char name[DPLS_NAME_MAX + 1u];
@@ -305,45 +312,40 @@ static void send_device_info(dpls_server_t *s) {
     p[10] = (uint8_t)s->hal.settings_state(s->hal.context);
     p[11] = name_len;
     if (name_len) memcpy(p + 12, name, name_len);
-    send_frame(s, DPLS_MSG_DEVICE_INFO_REPORT, p, (uint16_t)(12u + name_len), false);
+    (void)send_response(s, sequence, DPLS_MSG_DEVICE_INFO_REPORT, p, (uint16_t)(12u + name_len), false);
 }
 
-static void send_settings_result(dpls_server_t *s, uint32_t command_id, uint8_t status) {
-    uint8_t p[5];
-    wr32(p, command_id);
-    p[4] = status;
-    send_frame(s, DPLS_MSG_SETTINGS_RESULT, p, sizeof(p), false);
+static void send_settings_result(dpls_server_t *s, uint16_t sequence, uint8_t status) {
+    (void)send_response(s, sequence, DPLS_MSG_SETTINGS_RESULT, &status, 1u, false);
 }
 
-static dpls_cached_command_t *cached(dpls_server_t *s, uint32_t id) {
+static dpls_cached_command_t *cached(dpls_server_t *s, uint16_t sequence) {
     uint8_t i;
     for (i = 0; i < DPLS_COMMAND_CACHE_SIZE; ++i)
-        if (s->command_cache[i].valid && s->command_cache[i].session_id == s->session_id && s->command_cache[i].command_id == id) return &s->command_cache[i];
+        if (s->command_cache[i].valid && s->command_cache[i].session_id == s->session_id &&
+            s->command_cache[i].request_sequence == sequence) return &s->command_cache[i];
     return 0;
 }
 
-static void send_command_result(dpls_server_t *s, const dpls_cached_command_t *c) {
-    uint8_t p[8];
-    wr32(p, c->command_id);
-    p[4] = c->status;
-    p[5] = (uint8_t)c->resulting_mode;
-    wr16(p + 6, c->remaining_seconds);
-    send_frame(s, DPLS_MSG_COMMAND_RESULT, p, sizeof(p), false);
+static void send_command_result(dpls_server_t *s, uint16_t sequence, const dpls_cached_command_t *c) {
+    uint8_t p[4];
+    p[0] = c->status;
+    p[1] = (uint8_t)c->resulting_mode;
+    wr16(p + 2, c->remaining_seconds);
+    (void)send_response(s, sequence, DPLS_MSG_COMMAND_RESULT, p, sizeof(p), false);
 }
 
 static void handle_mode(dpls_server_t *s, const dpls_frame_t *f) {
     dpls_cached_command_t result, *old;
-    uint32_t id;
     dpls_mode_t requested, prev_mode;
-    if (!session_matches(s, f, 17)) return send_error(s, 2);
-    id = rd32(f->payload + 12);
-    requested = (dpls_mode_t)f->payload[16];
+    if (!session_matches(s, f, 13) || f->payload_length != 13u) return send_error(s, f->sequence, 2);
+    requested = (dpls_mode_t)f->payload[12];
     prev_mode = s->safety.mode;
-    if ((old = cached(s, id)) != 0) return send_command_result(s, old);
+    if ((old = cached(s, f->sequence)) != 0) return send_command_result(s, f->sequence, old);
     memset(&result, 0, sizeof(result));
     result.valid = true;
     result.session_id = s->session_id;
-    result.command_id = id;
+    result.request_sequence = f->sequence;
     if (requested > DPLS_MODE_SHORT_T) result.status = 3;
     else if (!dpls_safety_can_enter(requested, s->real_short)) result.status = 5;
     else {
@@ -361,7 +363,7 @@ static void handle_mode(dpls_server_t *s, const dpls_frame_t *f) {
     result.remaining_seconds = dpls_safety_remaining_seconds(&s->safety, s->now_ms);
     s->command_cache[s->command_cache_cursor] = result;
     s->command_cache_cursor = (uint8_t)((s->command_cache_cursor + 1u) % DPLS_COMMAND_CACHE_SIZE);
-    send_command_result(s, &result);
+    send_command_result(s, f->sequence, &result);
 }
 
 static void encode_event(const dpls_event_t *e, uint8_t *p) {
@@ -379,7 +381,7 @@ static void clamp_event_count(dpls_server_t *s) {
     if (s->event_count > DPLS_EVENT_CAPACITY) s->event_count = DPLS_EVENT_CAPACITY;
 }
 
-static void send_log_chunk_at(dpls_server_t *s, uint16_t first_index) {
+static void send_log_chunk_at(dpls_server_t *s, uint16_t sequence, uint16_t first_index) {
     uint8_t p[3u + DPLS_LOG_CHUNK_EVENTS * 10u];
     dpls_event_t event;
     uint8_t n = 0;
@@ -392,22 +394,22 @@ static void send_log_chunk_at(dpls_server_t *s, uint16_t first_index) {
     if (n != 0u) {
         wr16(p, first_index);
         p[2] = n;
-        send_frame(s, DPLS_MSG_LOG_CHUNK, p, (uint16_t)(3u + (uint16_t)n * 10u), false);
+        (void)send_response(s, sequence, DPLS_MSG_LOG_CHUNK, p, (uint16_t)(3u + (uint16_t)n * 10u), false);
     } else {
         s->log_export_active = false;
-        send_error(s, 6);
+        send_error(s, sequence, 6);
     }
 }
 
-static void send_log_result(dpls_server_t *s) {
+static void send_log_result(dpls_server_t *s, uint16_t sequence) {
     uint8_t ok = 0;
     s->log_export_active = false;
-    send_frame(s, DPLS_MSG_LOG_RESULT, &ok, 1, false);
+    (void)send_response(s, sequence, DPLS_MSG_LOG_RESULT, &ok, 1u, false);
 }
 
-static void send_log_from(dpls_server_t *s, uint16_t first) {
-    if (first < s->log_export_count) send_log_chunk_at(s, first);
-    else send_log_result(s);
+static void send_log_from(dpls_server_t *s, uint16_t sequence, uint16_t first) {
+    if (first < s->log_export_count) send_log_chunk_at(s, sequence, first);
+    else send_log_result(s, sequence);
 }
 
 static bool auth_block_active(dpls_server_t *s, uint32_t now) {
@@ -422,39 +424,43 @@ static bool auth_block_active(dpls_server_t *s, uint32_t now) {
 bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, uint32_t now_ms) {
     dpls_frame_t f;
     update_now(s, now_ms);
-    if (!dpls_frame_decode(bytes, length, &f)) { send_error(s, 1); return false; }
+    if (!dpls_frame_decode(bytes, length, &f)) return false;
+    if (f.type != DPLS_MSG_KEEP_ALIVE && (f.flags & DPLS_FLAG_REQUEST) == 0u) {
+        send_error(s, f.sequence, 2);
+        return false;
+    }
     if (s->identify_active && f.type != DPLS_MSG_IDENTIFY_START && f.type != DPLS_MSG_IDENTIFY_STOP) stop_identify(s);
     switch (f.type) {
     case DPLS_MSG_HELLO:
-        if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) || f.payload_length != 16) { send_error(s, 2); break; }
+        if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) || f.payload_length != 16u) { send_error(s, f.sequence, 2); break; }
         memcpy(s->client_nonce, f.payload, 16);
         s->hello_received = true;
-        send_challenge(s);
+        send_challenge(s, f.sequence);
         break;
     case DPLS_MSG_SETUP: {
         uint8_t name_len;
         char name[32];
         if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) ||
             s->hal.settings_state(s->hal.context) != DPLS_SETTINGS_EMPTY || !s->hello_received ||
-            f.payload_length < 54 || rd32(f.payload) != s->session_id) { send_error(s, 2); break; }
-        if (elapsed(now_ms, s->boot_ms + DPLS_SETUP_WINDOW_MS)) { send_error(s, 7); break; }
+            f.payload_length < 54u || rd32(f.payload) != s->session_id) { send_error(s, f.sequence, 2); break; }
+        if (elapsed(now_ms, s->boot_ms + DPLS_SETUP_WINDOW_MS)) { send_error(s, f.sequence, 7); break; }
         name_len = f.payload[4];
-        if (!name_len || name_len > 31 || f.payload_length != (uint16_t)(5u + name_len + 16u + 32u)) { send_error(s, 3); break; }
+        if (!name_len || name_len > 31u || f.payload_length != (uint16_t)(5u + name_len + 16u + 32u)) { send_error(s, f.sequence, 3); break; }
         memcpy(name, f.payload + 5, name_len);
         name[name_len] = '\0';
         if (!s->hal.settings_write(s->hal.context, name, f.payload + 5 + name_len, f.payload + 21 + name_len) ||
-            s->hal.settings_state(s->hal.context) != DPLS_SETTINGS_VALID) { send_error(s, 4); break; }
+            s->hal.settings_state(s->hal.context) != DPLS_SETTINGS_VALID) { send_error(s, f.sequence, 4); break; }
         s->hello_received = false;
         dpls_server_log(s, EVT_PASSWORD_SET, 0);
-        send_auth_result(s, 3, 0);
+        send_auth_result(s, f.sequence, 3, 0);
         s->setup_disconnect_deadline_ms = now_ms + 500u;
         break;
     }
     case DPLS_MSG_AUTH_PROOF:
-        if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) || !s->hello_received || f.payload_length != 48) { send_error(s, 2); break; }
-        if (auth_block_active(s, now_ms)) { send_auth_result(s, 2, (uint16_t)((s->blocked_until_ms - now_ms + 999u) / 1000u)); break; }
+        if (s->critical_fault || !s->connected || !s->hal.link_encrypted(s->hal.context) || !s->hello_received || f.payload_length != 48u) { send_error(s, f.sequence, 2); break; }
+        if (auth_block_active(s, now_ms)) { send_auth_result(s, f.sequence, 2, (uint16_t)((s->blocked_until_ms - now_ms + 999u) / 1000u)); break; }
         if (s->last_auth_proof_ms && (uint32_t)(now_ms - s->last_auth_proof_ms) < DPLS_AUTH_MIN_INTERVAL_MS) {
-            send_auth_result(s, 1, 0);
+            send_auth_result(s, f.sequence, 1, 0);
             break;
         }
         s->last_auth_proof_ms = now_ms;
@@ -465,7 +471,7 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
             s->failed_auth_attempts = 0;
             s->last_authenticated_activity_ms = now_ms;
             if (s->hal.auth_lock_write) (void)s->hal.auth_lock_write(s->hal.context, false);
-            send_auth_result(s, 0, 0);
+            send_auth_result(s, f.sequence, 0, 0);
         } else {
             ++s->failed_auth_attempts;
             dpls_server_log(s, EVT_AUTH_FAILURE, s->failed_auth_attempts);
@@ -474,75 +480,76 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
                 if (s->hal.auth_lock_write && !s->hal.auth_lock_write(s->hal.context, true) && s->hal.diagnostic_error)
                     s->hal.diagnostic_error(s->hal.context, false);
                 dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
-                send_auth_result(s, 2, (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
-            } else send_auth_result(s, 1, 0);
+                send_auth_result(s, f.sequence, 2, (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
+            } else send_auth_result(s, f.sequence, 1, 0);
         }
         break;
     case DPLS_MSG_DEVICE_INFO_GET:
-        if (session_matches(s, &f, 12)) send_device_info(s); else send_error(s, 2);
+        if (session_matches(s, &f, 12u) && f.payload_length == 12u) send_device_info(s, f.sequence);
+        else send_error(s, f.sequence, 2);
         break;
     case DPLS_MSG_NAME_SET: {
         uint8_t name_len;
         char name[DPLS_NAME_MAX + 1u];
-        uint32_t cmd_id;
-        if (!session_matches(s, &f, 17)) { send_error(s, 2); break; }
-        cmd_id = rd32(f.payload + 12);
-        name_len = f.payload[16];
-        if (!name_len || name_len > DPLS_NAME_MAX || f.payload_length != (uint16_t)(17u + name_len)) { send_settings_result(s, cmd_id, 1); break; }
-        memcpy(name, f.payload + 17, name_len);
+        if (!session_matches(s, &f, 13u)) { send_error(s, f.sequence, 2); break; }
+        name_len = f.payload[12];
+        if (!name_len || name_len > DPLS_NAME_MAX || f.payload_length != (uint16_t)(13u + name_len)) { send_settings_result(s, f.sequence, 1); break; }
+        memcpy(name, f.payload + 13, name_len);
         name[name_len] = '\0';
-        if (!s->hal.settings_set_name || !s->hal.settings_set_name(s->hal.context, name)) { send_settings_result(s, cmd_id, 2); break; }
-        send_settings_result(s, cmd_id, 0);
+        if (!s->hal.settings_set_name || !s->hal.settings_set_name(s->hal.context, name)) { send_settings_result(s, f.sequence, 2); break; }
+        send_settings_result(s, f.sequence, 0);
         break;
     }
-    case DPLS_MSG_PASSWORD_SET: {
-        uint32_t cmd_id;
-        if (!session_matches(s, &f, 64)) { send_error(s, 2); break; }
-        cmd_id = rd32(f.payload + 12);
-        if (!s->hal.settings_set_password || !s->hal.settings_set_password(s->hal.context, f.payload + 16, f.payload + 32)) {
-            send_settings_result(s, cmd_id, 2);
+    case DPLS_MSG_PASSWORD_SET:
+        if (!session_matches(s, &f, 60u) || f.payload_length != 60u) { send_error(s, f.sequence, 2); break; }
+        if (!s->hal.settings_set_password || !s->hal.settings_set_password(s->hal.context, f.payload + 12, f.payload + 28)) {
+            send_settings_result(s, f.sequence, 2);
             break;
         }
         dpls_server_log(s, EVT_PASSWORD_SET, 0);
-        send_settings_result(s, cmd_id, 0);
+        send_settings_result(s, f.sequence, 0);
         s->authenticated = false;
         memset(s->session_token, 0, sizeof(s->session_token));
         s->setup_disconnect_deadline_ms = now_ms + 500u;
         break;
-    }
     case DPLS_MSG_TIME_SYNC: {
         uint32_t unix_seconds;
-        if (!session_matches(s, &f, 16) || f.payload_length != 16u) { send_error(s, 2); break; }
+        if (!session_matches(s, &f, 16u) || f.payload_length != 16u) { send_error(s, f.sequence, 2); break; }
         unix_seconds = rd32(f.payload + 12);
-        if (unix_seconds < DPLS_TIME_MIN_UNIX_SECONDS || unix_seconds > DPLS_TIME_MAX_UNIX_SECONDS) { send_error(s, 3); break; }
+        if (unix_seconds < DPLS_TIME_MIN_UNIX_SECONDS || unix_seconds > DPLS_TIME_MAX_UNIX_SECONDS) { send_error(s, f.sequence, 3); break; }
         s->wall_clock_valid = true;
         s->wall_clock_unix_seconds = unix_seconds;
         s->wall_clock_last_ms = now_ms;
         s->wall_clock_fraction_ms = 0u;
+        (void)send_response(s, f.sequence, DPLS_MSG_TIME_SYNC, 0, 0u, false);
         break;
     }
     case DPLS_MSG_STATE_GET:
-        if (session_matches(s, &f, 12)) send_state(s); else send_error(s, 2);
+        if (session_matches(s, &f, 12u) && f.payload_length == 12u) send_state(s, f.sequence);
+        else send_error(s, f.sequence, 2);
         break;
     case DPLS_MSG_MODE_SET:
         handle_mode(s, &f);
         break;
     case DPLS_MSG_KEEP_ALIVE:
-        if (f.payload_length == 0) {
-            if (!s->connected || !s->hal.link_encrypted(s->hal.context)) send_error(s, 2);
-        } else if (!session_matches(s, &f, 12)) send_error(s, 2);
+        if (f.payload_length == 0u) {
+            if (!s->connected || !s->hal.link_encrypted(s->hal.context)) send_error(s, f.sequence, 2);
+        } else if (!session_matches(s, &f, 12u) || f.payload_length != 12u) send_error(s, f.sequence, 2);
+        else if (f.flags & DPLS_FLAG_REQUEST) (void)send_response(s, f.sequence, DPLS_MSG_KEEP_ALIVE, 0, 0u, false);
         break;
     case DPLS_MSG_IDENTIFY_START:
-        if (!s->connected || !s->hal.link_encrypted(s->hal.context)) { send_error(s, 2); break; }
+        if (!s->connected || !s->hal.link_encrypted(s->hal.context) || f.payload_length != 0u) { send_error(s, f.sequence, 2); break; }
         start_identify(s, now_ms);
+        (void)send_response(s, f.sequence, DPLS_MSG_IDENTIFY_START, 0, 0u, false);
         break;
     case DPLS_MSG_IDENTIFY_STOP:
         stop_identify_logged(s);
+        (void)send_response(s, f.sequence, DPLS_MSG_IDENTIFY_STOP, 0, 0u, false);
         break;
     case DPLS_MSG_LOG_START: {
         uint8_t p[10];
         uint16_t count;
-        if (!session_matches(s, &f, 14)) { send_error(s, 2); break; }
+        if (!session_matches(s, &f, 12u) || f.payload_length != 12u) { send_error(s, f.sequence, 2); break; }
         clamp_event_count(s);
         count = log_event_count(s);
         s->log_export_count = count;
@@ -551,14 +558,15 @@ bool dpls_server_receive(dpls_server_t *s, const uint8_t *bytes, size_t length, 
         wr32(p, s->session_id);
         wr32(p + 4, (uint32_t)count * 10u);
         wr16(p + 8, count);
-        send_frame(s, DPLS_MSG_LOG_INFO, p, sizeof(p), false);
+        (void)send_response(s, f.sequence, DPLS_MSG_LOG_INFO, p, sizeof(p), false);
         break;
     }
     case DPLS_MSG_LOG_ACK:
-        if (session_matches(s, &f, 14)) send_log_from(s, rd16(f.payload + 12)); else send_error(s, 2);
+        if (session_matches(s, &f, 14u) && f.payload_length == 14u) send_log_from(s, f.sequence, rd16(f.payload + 12));
+        else send_error(s, f.sequence, 2);
         break;
     default:
-        send_error(s, 5);
+        send_error(s, f.sequence, 5);
         break;
     }
     return true;

@@ -1,13 +1,13 @@
 # Runtime architecture: complexity tree-shaking
 
-This branch treats an abstraction as useful only when it removes mutable state or makes an invalid state unrepresentable.
+An abstraction is useful here only when it removes mutable state or makes an invalid state unrepresentable.
 
 ## Dependency zones
 
 ```text
 :wire      frame/CRC/crypto/advertisement; no coroutines, UI or OS APIs
    ↓
-:runtime   NodeId, endpoint/link, request correlation, session/routing primitives
+:runtime   NodeId, endpoint/link, session and routing primitives
    ↓
 :core      product domain, controller, journal reducer, Compose and platform adapters
 ```
@@ -26,21 +26,25 @@ Legacy BLE-address credential keys are read only for migration. New code keys se
 
 ## Link invariant
 
-Runtime sees a `ByteLink`, not Bluetooth callbacks. GATT write queues, bonding, MTU negotiation, UART framing and radio-specific errors belong below that boundary. Discovery is a separate capability from an established link.
+Runtime sees a `ByteLink`, not Bluetooth callbacks. GATT write queues, bonding, MTU negotiation, UART framing and radio-specific errors belong below that boundary. Discovery is independent from an established link.
 
-## Request invariant
+The current Android/iOS BLE adapter is intentionally migrated last: product code already targets the runtime vocabulary, while platform adapters may temporarily retain `DplsTransport` during the branch transition.
 
-`DplsProtocol.Frame.sequence` is the transaction id. `REQUEST/RESPONSE/EVENT/ERROR` flags describe correlation semantics independently from message type. `RequestBroker` is the only request correlation table; new features must not add `awaitingFoo`, `fooPending` or a second command id.
+## Request invariant — protocol v2
 
-The deployed v1 command payload remains readable while firmware/app migrate together. New protocol work must converge on sequence correlation rather than adding another id.
+`DplsProtocol.Frame.sequence` is the **only** transaction id. `REQUEST/RESPONSE/EVENT/ERROR` flags describe correlation semantics independently from message type. A response or error echoes the request sequence.
+
+The controller intentionally allows one transactional `Operation` at a time. Do not add `commandId`, `awaitingFoo`, `fooPending`, or a generic request broker until the product actually needs independent concurrent transactions.
+
+Journal paging is separately serialized by `JournalMachine`; it does not require a request map.
 
 ## Session invariant
 
-`DeviceSession` is a sum type. Runtime code must not represent states such as `READY && !authenticated`. Link-scoped work must be cancelled with the link scope instead of maintaining a list of resettable timeout flags.
+`DeviceSession` is a sum type. Runtime code must not represent states such as `READY && !authenticated`. Link-scoped work is cancelled as a group instead of maintaining a list of resettable feature flags.
 
 ## Journal invariant
 
-`JournalMachine` is a pure reducer. It owns paging/index state and returns effects (`Ack`, `Pause`, `Complete`, `Error`). It does not know BLE, Compose, clocks, notifications or coroutine jobs.
+`JournalMachine` is a reducer. It owns paging/index state and returns effects (`Ack`, `Pause`, `Complete`, `Error`). It does not know BLE, Compose, clocks, notifications or coroutine jobs.
 
 ## Measurement invariant
 
@@ -53,7 +57,7 @@ Do not add `fooValue + fooValid` pairs. Capability bits stay packed in `DeviceCa
 
 ## Mesh
 
-Mesh is a network layer, not another `DplsTransport`. A `RoutedPacket` wraps an unchanged end-device payload and identifies source/destination nodes. The same device session can therefore be reached directly or through a gateway without changing auth/control/journal code.
+Mesh is a network layer, not another `DplsTransport`. A `RoutedPacket` wraps an unchanged end-device DPLS frame and identifies source/destination nodes. The same node session can therefore be reached directly or through a gateway without changing auth/control/journal code.
 
 Neighbor RSSI samples are observations. Topology estimation consumes them outside the control session.
 
@@ -63,7 +67,7 @@ A writable serial connection may implement `ByteLink`. A passive tap implements 
 
 ## Firmware safety
 
-`dpls_safety` is a pure state machine for dangerous-mode invariants. It owns mode deadline math and the precedence of disconnect/session timeout/reserve/real-short returns. BLE, journal export, authentication proof and wall-clock time must not be added to it.
+`dpls_safety` is the single owner of dangerous-mode state, deadline math, revision and forced-return precedence. BLE, journal export, authentication proof and wall-clock time must not be added to it.
 
 ## Delete rules
 

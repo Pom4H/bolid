@@ -2,47 +2,24 @@ package ru.bolid.testdpls.core.session
 
 import ru.bolid.testdpls.core.protocol.putU32
 
-/** Secret-bearing wire session state shared by the single mobile controller. */
+/** Secret-bearing wire session state. Frame sequence is the only transaction id. */
 class DplsSessionRuntime {
     var sequence: Int = 1
-    var commandId: Long = 1
     var sessionId: Long = 0
 
     var sessionToken: ByteArray = ByteArray(8)
-        set(value) {
-            field.fill(0)
-            field = value.copyOf()
-        }
-
+        set(value) { field.fill(0); field = value.copyOf() }
     var clientNonce: ByteArray = ByteArray(16)
-        set(value) {
-            field.fill(0)
-            field = value.copyOf()
-        }
-
+        set(value) { field.fill(0); field = value.copyOf() }
     var deviceNonce: ByteArray = ByteArray(16)
-        set(value) {
-            field.fill(0)
-            field = value.copyOf()
-        }
-
+        set(value) { field.fill(0); field = value.copyOf() }
     var authSalt: ByteArray = ByteArray(16)
-        set(value) {
-            field.fill(0)
-            field = value.copyOf()
-        }
-
+        set(value) { field.fill(0); field = value.copyOf() }
     var initialized: Boolean = false
 
     fun nextSequence(): Int = sequence.also { sequence = (sequence + 1) and 0xffff }
-    fun nextCommandId(): Long = commandId++
 
-    fun setChallenge(
-        sessionId: Long,
-        deviceNonce: ByteArray,
-        authSalt: ByteArray,
-        initialized: Boolean,
-    ) {
+    fun setChallenge(sessionId: Long, deviceNonce: ByteArray, authSalt: ByteArray, initialized: Boolean) {
         require(deviceNonce.size == 16)
         require(authSalt.size == 16)
         this.sessionId = sessionId
@@ -56,11 +33,9 @@ class DplsSessionRuntime {
         sessionToken = token
     }
 
-    fun authenticatedPayload(): ByteArray {
-        val payload = ByteArray(12)
-        putU32(payload, 0, sessionId)
-        sessionToken.copyInto(payload, destinationOffset = 4)
-        return payload
+    fun authenticatedPayload(): ByteArray = ByteArray(12).also {
+        putU32(it, 0, sessionId)
+        sessionToken.copyInto(it, 4)
     }
 
     fun resetLink() {
@@ -74,7 +49,6 @@ class DplsSessionRuntime {
         resetLink()
         clientNonce = ByteArray(16)
         sequence = 1
-        commandId = 1
         initialized = false
     }
 }
