@@ -1,16 +1,15 @@
 plugins {
-    alias(libs.plugins.kotlin.jvm)
-    application
-}
-
-dependencies {
-    implementation(project(":wire"))
+    alias(libs.plugins.kotlin.multiplatform)
 }
 
 kotlin {
-    jvmToolchain(17)
-}
-
-application {
-    mainClass.set("ru.bolid.testdpls.interop.ZmuInteropKt")
+    jvm()
+    sourceSets {
+        jvmTest.dependencies {
+            implementation(project(":core"))
+            implementation(project(":wire"))
+            implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.core)
+        }
+    }
 }
