@@ -250,7 +250,8 @@ static bool events_append(void *context, const dpls_event_t *event)
 {
     simulator_t *sim = context;
     uint16_t slot = (uint16_t)((event->sequence - 1u) % SIM_EVENT_COUNT);
-    sim->events[slot] = *event;
+    /* memcpy: jjkt/zmu mishandles some Thumb LDM/STM struct copies under -O1+. */
+    memcpy(&sim->events[slot], event, sizeof(*event));
     if (sim->event_count < SIM_EVENT_COUNT) ++sim->event_count;
     sim->next_event_sequence = event->sequence + 1u;
     return true;
@@ -337,6 +338,14 @@ int main(void)
 {
     simulator_t sim;
     uint16_t i;
+    /* Request layout from ZmuInteropTest: 0..7 preamble, 8..22 five modes*3, 23..26 settings. */
+    static const dpls_mode_t mode_matrix[5] = {
+        DPLS_MODE_SHORT_1,
+        DPLS_MODE_SHORT_2,
+        DPLS_MODE_SHORT_T,
+        DPLS_MODE_OPEN_T,
+        DPLS_MODE_OPEN_MAIN
+    };
 
     simulator_init(&sim);
 
@@ -365,12 +374,27 @@ int main(void)
             CHECK(!sim.led_level);
         }
         if (i == 3u) CHECK(dpls_server_authenticated(&sim.server));
-        if (i == 7u) CHECK(sim.hardware_mode == DPLS_MODE_SHORT_1);
+        if (i >= 8u && i <= 22u) {
+            uint16_t step = (uint16_t)(i - 8u);
+            uint16_t mode_index = (uint16_t)(step / 3u);
+            uint16_t phase = (uint16_t)(step % 3u);
+            if (phase == 0u) CHECK(sim.hardware_mode == mode_matrix[mode_index]);
+            if (phase == 2u) CHECK(sim.hardware_mode == DPLS_MODE_NORMAL);
+        }
+        if (i == 22u) {
+            puts("SCENARIO_MODES_OK");
+            fflush(stdout);
+        }
+        if (i == 26u) {
+            CHECK(!dpls_server_authenticated(&sim.server));
+            puts("SCENARIO_SETTINGS_OK");
+            fflush(stdout);
+        }
     }
 
     CHECK(sim.response_count == ZMU_REQUEST_COUNT);
     CHECK(sim.diagnostic_errors == 0u);
-    CHECK(sim.hardware_mode == DPLS_MODE_SHORT_1);
+    CHECK(sim.hardware_mode == DPLS_MODE_NORMAL);
 
     dpls_server_disconnected(&sim.server, sim.now_ms + 10u);
     CHECK(sim.hardware_mode == DPLS_MODE_NORMAL);

@@ -63,8 +63,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build zmu-cortex-m0
         run: bash tools/fetch_zmu.sh tmp/zmu
-      - name: Run zmu E2E
-        run: bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+      - name: Run all zmu scenarios
+        run: bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
       - name: Upload zmu E2E artifacts
         if: always()
         uses: actions/upload-artifact@v6
@@ -74,6 +74,7 @@ jobs:
             tmp/zmu-e2e/zmu-output.txt
             tmp/zmu-e2e/zmu_vectors.h
             tmp/zmu-e2e/test-dpls-zmu.elf
+            tmp/zmu-firmware-tests/*.log
           if-no-files-found: warn
 
   firmware-pinout-contract:

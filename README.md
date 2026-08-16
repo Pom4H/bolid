@@ -94,7 +94,8 @@ Run the portable firmware core on a Cortex-M0 emulator and verify the responses 
 ```sh
 # needs: rustc/cargo, arm-none-eabi-gcc, JDK 17+
 bash tools/fetch_zmu.sh          # clones https://github.com/jjkt/zmu and builds zmu-cortex-m0
-bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
+# covers: all firmware/tests/* on Cortex-M0 + phone-E2E protocol matrix (modes/settings/journal)
 ```
 
 ### Firmware

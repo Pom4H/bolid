@@ -42,9 +42,9 @@ if [[ ! -f "$STARTUP" ]]; then
 fi
 
 arm-none-eabi-gcc \
-    -Os -g3 -mthumb -mcpu=cortex-m0 \
+    -O0 -g3 -mthumb -mcpu=cortex-m0 \
     --specs=rdimon.specs -nostartfiles \
-    -D__STARTUP_CLEAR_BSS \
+    -D__STARTUP_CLEAR_BSS -D__STACK_SIZE=0x8000 \
     -ffunction-sections -fdata-sections \
     -Wall -Wextra -Werror \
     -I"$ROOT/firmware/include" \

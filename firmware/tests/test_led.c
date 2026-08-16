@@ -32,8 +32,8 @@ static void expect_segments(dpls_led_scene_t scene, bool reserve,
     for (i = 0u; i < want_count; ++i) {
         if (led.segments[i].on != want[i].on || led.segments[i].duration_ms != want[i].duration_ms) {
             printf("FAIL %s: seg[%u]={%d,%u} want={%d,%u}\n", label, i,
-                   led.segments[i].on, led.segments[i].duration_ms,
-                   want[i].on, want[i].duration_ms);
+                   led.segments[i].on, (unsigned)led.segments[i].duration_ms,
+                   want[i].on, (unsigned)want[i].duration_ms);
             assert(0);
         }
         total += want[i].duration_ms;

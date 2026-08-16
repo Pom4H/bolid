@@ -43,8 +43,11 @@ Device-free Cortex-M0 E2E against the Kotlin wire codec (via [zmu](https://githu
 
 ```sh
 bash tools/fetch_zmu.sh
-bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
 ```
+
+This runs every `firmware/tests/*` binary on the emulator plus the phone-E2E protocol
+matrix (identify/auth, all five modes, keep-alive, name/password, journal chunk).
 
 Project-owned C code is compiled with warnings treated as errors. `cppcheck` covers `src/`, `include/` and `tests/`. Host line coverage has an 80% floor; safety behavior is additionally exercised by explicit edge-case tests rather than relying on the percentage alone.
 

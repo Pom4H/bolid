@@ -11,13 +11,26 @@ import ru.bolid.testdpls.core.protocol.readU32
 
 private const val SESSION_ID = 0x13121110L
 private const val MODE_NORMAL = 0
+private const val MODE_OPEN_T = 1
+private const val MODE_OPEN_MAIN = 2
 private const val MODE_SHORT_1 = 3
+private const val MODE_SHORT_2 = 4
+private const val MODE_SHORT_T = 5
 private const val DEVICE_ID = 0x12345678L
 private val sessionToken = ByteArray(8) { (0x24 + it).toByte() }
 private val clientNonce = ByteArray(16) { (0xA0 + it).toByte() }
 
+/** Phone-E2E mode list (wire values), device-free on zmu. */
+private val TEST_MODES = listOf(
+    "short_1" to MODE_SHORT_1,
+    "short_2" to MODE_SHORT_2,
+    "short_t" to MODE_SHORT_T,
+    "open_t" to MODE_OPEN_T,
+    "open_main" to MODE_OPEN_MAIN,
+)
+
 private data class Request(val name: String, val frame: DplsProtocol.Frame)
-private data class ExpectedResponse(val type: DplsProtocol.Type, val sequence: Int)
+private data class ExpectedResponse(val name: String, val type: DplsProtocol.Type, val sequence: Int)
 
 private fun sessionPrefix(): ByteArray = ByteArray(12).also { payload ->
     putU32(payload, 0, SESSION_ID)
@@ -49,9 +62,23 @@ private fun requests(): List<Request> {
         repeat(32) { index -> payload[16 + index] = 0x55 }
     }
     val timeSync = sessionPayload(4).also { putU32(it, 12, 1_786_732_800L) }
-    val mode = sessionPayload(1).also { it[12] = MODE_SHORT_1.toByte() }
+    val deviceName = "ZmuLab01".encodeToByteArray()
+    check(deviceName.size in 1..16)
+    val nameSet = sessionPayload(1 + deviceName.size).also { payload ->
+        payload[12] = deviceName.size.toByte()
+        deviceName.copyInto(payload, 13)
+    }
+    val keepAlive = sessionPrefix()
+    val logAck = sessionPayload(2).also { payload ->
+        payload[12] = 0
+        payload[13] = 0
+    }
+    val passwordSet = sessionPayload(48).also { payload ->
+        repeat(16) { index -> payload[12 + index] = (0x60 + index).toByte() }
+        repeat(32) { index -> payload[28 + index] = (0x80 + index).toByte() }
+    }
 
-    return listOf(
+    val out = mutableListOf(
         request("identify_start", DplsProtocol.Type.IDENTIFY_START, 0x1001),
         request("identify_stop", DplsProtocol.Type.IDENTIFY_STOP, 0x1002),
         request("hello", DplsProtocol.Type.HELLO, 0x1003, clientNonce),
@@ -59,24 +86,52 @@ private fun requests(): List<Request> {
         request("state_normal", DplsProtocol.Type.STATE_GET, 0x1005, sessionPrefix()),
         request("device_info", DplsProtocol.Type.DEVICE_INFO_GET, 0x1006, sessionPrefix()),
         request("time_sync", DplsProtocol.Type.TIME_SYNC, 0x1007, timeSync),
-        request("short_1", DplsProtocol.Type.MODE_SET, 0x1008, mode),
-        request("state_short_1", DplsProtocol.Type.STATE_GET, 0x1009, sessionPrefix()),
-        request("log_start", DplsProtocol.Type.LOG_START, 0x100A, sessionPrefix()),
+        request("keep_alive", DplsProtocol.Type.KEEP_ALIVE, 0x1008, keepAlive),
     )
+
+    var sequence = 0x1100
+    for ((name, mode) in TEST_MODES) {
+        val modePayload = sessionPayload(1).also { it[12] = mode.toByte() }
+        val normalPayload = sessionPayload(1).also { it[12] = MODE_NORMAL.toByte() }
+        out += request("mode_$name", DplsProtocol.Type.MODE_SET, sequence++, modePayload)
+        out += request("state_$name", DplsProtocol.Type.STATE_GET, sequence++, sessionPrefix())
+        out += request("mode_${name}_off", DplsProtocol.Type.MODE_SET, sequence++, normalPayload)
+    }
+
+    out += listOf(
+        request("name_set", DplsProtocol.Type.NAME_SET, 0x1201, nameSet),
+        request("log_start", DplsProtocol.Type.LOG_START, 0x1202, sessionPrefix()),
+        request("log_ack", DplsProtocol.Type.LOG_ACK, 0x1203, logAck),
+        request("password_set", DplsProtocol.Type.PASSWORD_SET, 0x1204, passwordSet),
+    )
+    return out
 }
 
-private fun expectedResponses(): List<ExpectedResponse> = listOf(
-    ExpectedResponse(DplsProtocol.Type.IDENTIFY_START, 0x1001),
-    ExpectedResponse(DplsProtocol.Type.IDENTIFY_STOP, 0x1002),
-    ExpectedResponse(DplsProtocol.Type.AUTH_CHALLENGE, 0x1003),
-    ExpectedResponse(DplsProtocol.Type.AUTH_RESULT, 0x1004),
-    ExpectedResponse(DplsProtocol.Type.STATE_REPORT, 0x1005),
-    ExpectedResponse(DplsProtocol.Type.DEVICE_INFO_REPORT, 0x1006),
-    ExpectedResponse(DplsProtocol.Type.TIME_SYNC, 0x1007),
-    ExpectedResponse(DplsProtocol.Type.COMMAND_RESULT, 0x1008),
-    ExpectedResponse(DplsProtocol.Type.STATE_REPORT, 0x1009),
-    ExpectedResponse(DplsProtocol.Type.LOG_INFO, 0x100A),
-)
+private fun expectedResponses(): List<ExpectedResponse> {
+    val out = mutableListOf(
+        ExpectedResponse("identify_start", DplsProtocol.Type.IDENTIFY_START, 0x1001),
+        ExpectedResponse("identify_stop", DplsProtocol.Type.IDENTIFY_STOP, 0x1002),
+        ExpectedResponse("hello", DplsProtocol.Type.AUTH_CHALLENGE, 0x1003),
+        ExpectedResponse("auth_proof", DplsProtocol.Type.AUTH_RESULT, 0x1004),
+        ExpectedResponse("state_normal", DplsProtocol.Type.STATE_REPORT, 0x1005),
+        ExpectedResponse("device_info", DplsProtocol.Type.DEVICE_INFO_REPORT, 0x1006),
+        ExpectedResponse("time_sync", DplsProtocol.Type.TIME_SYNC, 0x1007),
+        ExpectedResponse("keep_alive", DplsProtocol.Type.KEEP_ALIVE, 0x1008),
+    )
+    var sequence = 0x1100
+    for ((name, _) in TEST_MODES) {
+        out += ExpectedResponse("mode_$name", DplsProtocol.Type.COMMAND_RESULT, sequence++)
+        out += ExpectedResponse("state_$name", DplsProtocol.Type.STATE_REPORT, sequence++)
+        out += ExpectedResponse("mode_${name}_off", DplsProtocol.Type.COMMAND_RESULT, sequence++)
+    }
+    out += listOf(
+        ExpectedResponse("name_set", DplsProtocol.Type.SETTINGS_RESULT, 0x1201),
+        ExpectedResponse("log_start", DplsProtocol.Type.LOG_INFO, 0x1202),
+        ExpectedResponse("log_ack", DplsProtocol.Type.LOG_CHUNK, 0x1203),
+        ExpectedResponse("password_set", DplsProtocol.Type.SETTINGS_RESULT, 0x1204),
+    )
+    return out
+}
 
 private fun writeHeader(output: File) {
     output.parentFile?.mkdirs()
@@ -130,11 +185,15 @@ private fun verifyOutput(input: File) {
     }
 
     frames.zip(expected).forEachIndexed { index, (frame, want) ->
-        check(frame.type == want.type) { "frame $index type=${frame.type}, expected=${want.type}" }
-        check(frame.sequence == want.sequence) {
-            "frame $index sequence=${frame.sequence}, expected=${want.sequence}"
+        check(frame.type == want.type) {
+            "frame $index (${want.name}) type=${frame.type}, expected=${want.type}"
         }
-        check(frame.isResponse && !frame.isError) { "frame $index is not a successful response" }
+        check(frame.sequence == want.sequence) {
+            "frame $index (${want.name}) sequence=${frame.sequence}, expected=${want.sequence}"
+        }
+        check(frame.isResponse && !frame.isError) {
+            "frame $index (${want.name}) is not a successful response"
+        }
     }
 
     val challenge = frames[2]
@@ -157,18 +216,37 @@ private fun verifyOutput(input: File) {
     val info = frames[5]
     check(readU32(info.payload, 0) == DEVICE_ID)
     check(info.payload[4] == DplsProtocol.VERSION)
-    val nameLength = info.payload[11].toInt() and 0xff
-    check(info.payload.copyOfRange(12, 12 + nameLength).decodeToString() == "Test-DPLS-ZMU")
 
-    val command = frames[7]
-    check(command.payload.size == 4)
-    check((command.payload[0].toInt() and 0xff) == 0)
-    check((command.payload[1].toInt() and 0xff) == MODE_SHORT_1)
-    check(readU16(command.payload, 2) == 300)
+    var index = 8
+    for ((_, mode) in TEST_MODES) {
+        val command = frames[index++]
+        check(command.payload.size == 4)
+        check((command.payload[0].toInt() and 0xff) == 0)
+        check((command.payload[1].toInt() and 0xff) == mode)
+        check(readU16(command.payload, 2) == 300)
+        val state = frames[index++]
+        check((state.payload[0].toInt() and 0xff) == mode)
+        val off = frames[index++]
+        check((off.payload[0].toInt() and 0xff) == 0)
+        check((off.payload[1].toInt() and 0xff) == MODE_NORMAL)
+    }
 
-    val shortState = frames[8]
-    check((shortState.payload[0].toInt() and 0xff) == MODE_SHORT_1)
+    val nameResult = frames[index++]
+    check((nameResult.payload[0].toInt() and 0xff) == 0)
+
+    val logInfo = frames[index++]
+    check(logInfo.type == DplsProtocol.Type.LOG_INFO)
+
+    val logChunk = frames[index++]
+    check(logChunk.type == DplsProtocol.Type.LOG_CHUNK)
+    check(logChunk.payload.size >= 3)
+
+    val passwordResult = frames[index]
+    check((passwordResult.payload[0].toInt() and 0xff) == 0)
+
     check(text.contains("ZMU_E2E_OK")) { "ARM harness did not reach completion" }
+    check(text.contains("SCENARIO_MODES_OK")) { "mode matrix did not complete" }
+    check(text.contains("SCENARIO_SETTINGS_OK")) { "settings/journal scenario did not complete" }
 }
 
 class ZmuInteropTest {

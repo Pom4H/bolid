@@ -128,7 +128,8 @@ static bool storage_append(void *c, const dpls_event_t *event) {
         memmove(f->events, f->events + 1, (DPLS_EVENT_CAPACITY - 1u) * sizeof(*f->events));
         --f->event_count;
     }
-    f->events[f->event_count++] = *event;
+    memcpy(&f->events[f->event_count], event, sizeof(*event));
+    ++f->event_count;
     f->next_sequence = event->sequence + 1u;
     return true;
 }
