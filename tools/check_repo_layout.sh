@@ -7,6 +7,8 @@ cd "$ROOT"
 required=(
   firmware
   mobile/android
+  mobile/wire
+  mobile/runtime
   mobile/core
   mobile/ios
   docs
@@ -46,19 +48,32 @@ for path in "${legacy[@]}"; do
 done
 
 # Gradle module names are part of the public repository architecture.
-grep -q 'include(":android")' mobile/settings.gradle.kts
+grep -q 'include(":wire")' mobile/settings.gradle.kts
+grep -q 'include(":runtime")' mobile/settings.gradle.kts
 grep -q 'include(":core")' mobile/settings.gradle.kts
+grep -q 'include(":android")' mobile/settings.gradle.kts
 ! grep -q 'include(":app")' mobile/settings.gradle.kts
 ! grep -q 'include(":shared")' mobile/settings.gradle.kts
 
-# One shared application/controller owns cross-platform behavior.
+# Dependency zones are represented by physical modules.
+test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
+test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsEncode.kt
+test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsDecode.kt
+test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/Link.kt
+test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt
+test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
+
+# One shared application/controller owns cross-platform product behavior.
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsApp.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTransport.kt
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
 
-# Platform adapters live next to each other in the KMP module.
+# Old monolithic owners must not silently reappear.
+test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
+test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
+
+# Platform adapters live next to each other in the product KMP module until the
+# ByteLink adapter migration is complete.
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsPlatformEffects.kt
 test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt
@@ -89,7 +104,7 @@ done
 
 # Production iOS host is intentionally one Swift bootstrap file.
 test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" = "1"
-# Each OS has one BLE transport in the KMP module.
+# Each OS has one BLE transport in the KMP product module.
 test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
