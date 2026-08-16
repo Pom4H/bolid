@@ -25,6 +25,13 @@ data class DiscoveredDevice(
     val hasLineFault: Boolean get() = realShort || reserveLow || fromReserve
 }
 
+/**
+ * Read-only presentation snapshot consumed by Compose.
+ *
+ * Lifecycle/auth flags, command progress and saved-credential availability are
+ * projections of their authoritative owners in DplsClient; UI code may display
+ * them but product logic must never use them as authority.
+ */
 data class DplsUiState(
     val phase: ConnectionPhase = ConnectionPhase.IDLE,
     val statusText: String = "Готово к поиску",
