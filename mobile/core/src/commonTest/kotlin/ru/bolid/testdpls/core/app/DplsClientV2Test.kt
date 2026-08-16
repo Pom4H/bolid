@@ -19,6 +19,68 @@ import ru.bolid.testdpls.core.protocol.readU32
 
 class DplsClientV2Test {
     @Test
+    fun scanPhaseIsAProjectionNotASeparateLifecycleWrite() {
+        val client = newClient(FakeTransport(), FakePlatform())
+
+        client.startScan()
+
+        assertEquals(ConnectionPhase.SCANNING, client.uiState.value.phase)
+        client.stopScan()
+        assertEquals(ConnectionPhase.IDLE, client.uiState.value.phase)
+        client.close()
+    }
+
+    @Test
+    fun authenticationStaysSynchronizingUntilIdentityIsProven() {
+        val transport = FakeTransport()
+        val client = authenticatedClient(transport, FakePlatform())
+        assertEquals(ConnectionPhase.SYNCHRONIZING, client.uiState.value.phase)
+
+        val stateRequest = transport.lastFrame()
+        transport.reply(
+            DplsProtocol.Type.STATE_REPORT,
+            statePayload(DplsMode.NORMAL),
+            stateRequest.sequence,
+        )
+
+        assertEquals(ConnectionPhase.SYNCHRONIZING, client.uiState.value.phase)
+        assertEquals(DplsProtocol.Type.DEVICE_INFO_GET, transport.lastFrame().type)
+
+        val infoRequest = transport.lastFrame()
+        transport.reply(
+            DplsProtocol.Type.DEVICE_INFO_REPORT,
+            deviceInfo(),
+            infoRequest.sequence,
+        )
+
+        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
+        client.close()
+    }
+
+    @Test
+    fun advertisedIdentityMismatchFailsClosed() {
+        val transport = FakeTransport()
+        val client = authenticatedClient(transport, FakePlatform())
+        val stateRequest = transport.lastFrame()
+        transport.reply(
+            DplsProtocol.Type.STATE_REPORT,
+            statePayload(DplsMode.NORMAL),
+            stateRequest.sequence,
+        )
+
+        val infoRequest = transport.lastFrame()
+        transport.reply(
+            DplsProtocol.Type.DEVICE_INFO_REPORT,
+            deviceInfo(deviceId = 0x9999),
+            infoRequest.sequence,
+        )
+
+        assertEquals(ConnectionPhase.ERROR, client.uiState.value.phase)
+        assertFalse(client.uiState.value.authenticated)
+        client.close()
+    }
+
+    @Test
     fun authStateAndModeUseFrameSequenceAsOnlyTransactionId() {
         val transport = FakeTransport()
         val client = readyClient(transport, FakePlatform())
@@ -27,9 +89,17 @@ class DplsClientV2Test {
         val request = transport.lastFrame()
         assertEquals(13, request.payload.size)
         assertTrue(request.isRequest)
-        transport.reply(DplsProtocol.Type.COMMAND_RESULT, commandResult(DplsMode.SHORT_1), (request.sequence + 1) and 0xffff)
+        transport.reply(
+            DplsProtocol.Type.COMMAND_RESULT,
+            commandResult(DplsMode.SHORT_1),
+            (request.sequence + 1) and 0xffff,
+        )
         assertTrue(client.uiState.value.commandInProgress)
-        transport.reply(DplsProtocol.Type.COMMAND_RESULT, commandResult(DplsMode.SHORT_1), request.sequence)
+        transport.reply(
+            DplsProtocol.Type.COMMAND_RESULT,
+            commandResult(DplsMode.SHORT_1),
+            request.sequence,
+        )
         assertFalse(client.uiState.value.commandInProgress)
         client.close()
     }
@@ -144,7 +214,10 @@ class DplsClientV2Test {
         return client
     }
 
-    private fun authenticatedThroughState(transport: FakeTransport, platform: FakePlatform): DplsClient {
+    private fun authenticatedThroughState(
+        transport: FakeTransport,
+        platform: FakePlatform,
+    ): DplsClient {
         val client = authenticatedClient(transport, platform)
         val request = transport.lastFrame()
         transport.reply(DplsProtocol.Type.STATE_REPORT, statePayload(DplsMode.NORMAL), request.sequence)
@@ -162,12 +235,20 @@ class DplsClientV2Test {
         transport.reply(DplsProtocol.Type.AUTH_CHALLENGE, challenge(true), hello.sequence)
         client.authenticate("12345678")
         val proof = transport.lastFrame()
-        transport.reply(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(0, 0, 0) + byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8), proof.sequence)
+        transport.reply(
+            DplsProtocol.Type.AUTH_RESULT,
+            byteArrayOf(0, 0, 0) + byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8),
+            proof.sequence,
+        )
         return client
     }
 
     private fun newClient(transport: FakeTransport, platform: FakePlatform) =
-        DplsClient(transport, platform, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined))
+        DplsClient(
+            transport,
+            platform,
+            CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+        )
 
     private fun challenge(initialized: Boolean): ByteArray = ByteArray(37).also {
         putU32(it, 0, 0x78563412)
@@ -176,10 +257,10 @@ class DplsClientV2Test {
         it[36] = if (initialized) 1 else 0
     }
 
-    private fun deviceInfo(): ByteArray {
+    private fun deviceInfo(deviceId: Long = 0x1234): ByteArray {
         val name = "Test-DPLS".encodeToByteArray()
         return ByteArray(12 + name.size).also {
-            putU32(it, 0, 0x1234)
+            putU32(it, 0, deviceId)
             it[4] = DplsProtocol.VERSION
             it[5] = 2
             it[8] = 2
@@ -202,19 +283,34 @@ class DplsClientV2Test {
         putU16(raw, 23, 5_000)
     }
 
-    private fun commandResult(mode: DplsMode) = byteArrayOf(0, mode.wire.toByte(), 30, 0)
+    private fun commandResult(mode: DplsMode) =
+        byteArrayOf(0, mode.wire.toByte(), 30, 0)
 
     private class FakePlatform : DplsPlatformServices {
         private val verifiers = mutableMapOf<String, ByteArray>()
         var keepAlive = false
         var now = 1_786_732_800_000L
+
         override fun nowMillis(): Long = now
-        override fun secureRandomBytes(count: Int): ByteArray = ByteArray(count) { it.toByte() }
-        override fun readDeviceVerifier(deviceKey: String): ByteArray? = verifiers[deviceKey]?.copyOf()
+
+        override fun secureRandomBytes(count: Int): ByteArray =
+            ByteArray(count) { it.toByte() }
+
+        override fun readDeviceVerifier(deviceKey: String): ByteArray? =
+            verifiers[deviceKey]?.copyOf()
+
         override fun writeDeviceVerifier(deviceKey: String, verifier: ByteArray?) {
-            if (verifier == null) verifiers.remove(deviceKey) else verifiers[deviceKey] = verifier.copyOf()
+            if (verifier == null) {
+                verifiers.remove(deviceKey)
+            } else {
+                verifiers[deviceKey] = verifier.copyOf()
+            }
         }
-        override fun keepConnectionAlive(active: Boolean) { keepAlive = active }
+
+        override fun keepConnectionAlive(active: Boolean) {
+            keepAlive = active
+        }
+
         fun hasVerifier(key: String) = key in verifiers
     }
 
@@ -225,30 +321,72 @@ class DplsClientV2Test {
         var reconnectCalls = 0
             private set
 
-        override fun setListener(listener: DplsTransportListener) { this.listener = listener }
+        override fun setListener(listener: DplsTransportListener) {
+            this.listener = listener
+        }
+
         override fun startScan() = true
+
         override fun stopScan() = Unit
+
         override fun connect(address: String) = true
-        override fun reconnect(): Boolean { reconnectCalls++; return true }
+
+        override fun reconnect(): Boolean {
+            reconnectCalls++
+            return true
+        }
+
         override fun send(bytes: ByteArray, priority: Boolean, flush: Boolean): Boolean {
             if (flush) writes.clear()
             writes += bytes.copyOf()
             listener.onWriteComplete(null)
             return true
         }
+
         override fun readRssi() = true
-        override fun disconnect(clearSelection: Boolean) { connected = false }
+
+        override fun disconnect(clearSelection: Boolean) {
+            connected = false
+        }
+
         override fun hasConnection() = connected
+
         override fun close() = Unit
 
         fun discover(device: DplsTransportDevice) = listener.onDiscovered(device)
-        fun connected() = listener.onConnected()
-        fun subscribed() { connected = true; listener.onSubscribed(244) }
-        fun dropped() { connected = false; listener.onDisconnected(null) }
-        fun bluetoothUnavailable() { connected = false; listener.onBluetoothUnavailable() }
 
-        fun reply(type: DplsProtocol.Type, payload: ByteArray, sequence: Int = lastFrame().sequence) {
-            listener.onBytes(encodeFrame(DplsProtocol.Frame(type, sequence, DplsProtocol.Flags.RESPONSE, payload)))
+        fun connected() = listener.onConnected()
+
+        fun subscribed() {
+            connected = true
+            listener.onSubscribed(244)
+        }
+
+        fun dropped() {
+            connected = false
+            listener.onDisconnected(null)
+        }
+
+        fun bluetoothUnavailable() {
+            connected = false
+            listener.onBluetoothUnavailable()
+        }
+
+        fun reply(
+            type: DplsProtocol.Type,
+            payload: ByteArray,
+            sequence: Int = lastFrame().sequence,
+        ) {
+            listener.onBytes(
+                encodeFrame(
+                    DplsProtocol.Frame(
+                        type,
+                        sequence,
+                        DplsProtocol.Flags.RESPONSE,
+                        payload,
+                    ),
+                ),
+            )
         }
 
         fun error(code: Int, sequence: Int = lastFrame().sequence) {
