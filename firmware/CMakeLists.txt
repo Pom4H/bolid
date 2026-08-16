@@ -14,6 +14,10 @@ add_library(test_dpls_server
 target_include_directories(test_dpls_server PUBLIC include)
 target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
 
+add_executable(dpls_simulator sim/dpls_simulator.c)
+target_link_libraries(dpls_simulator PRIVATE test_dpls_server)
+target_compile_options(dpls_simulator PRIVATE -Wall -Wextra -Werror)
+
 enable_testing()
 
 function(dpls_add_test name)
