@@ -44,6 +44,38 @@ jobs:
           path: tmp/cppcheck.txt
           if-no-files-found: warn
 
+  firmware-zmu-e2e:
+    name: Firmware ↔ mobile zmu E2E (no device)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+      - name: Install ARM GCC + Rust
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build zmu-cortex-m0
+        run: bash tools/fetch_zmu.sh tmp/zmu
+      - name: Run zmu E2E
+        run: bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+      - name: Upload zmu E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: zmu-e2e
+          path: |
+            tmp/zmu-e2e/zmu-output.txt
+            tmp/zmu-e2e/zmu_vectors.h
+            tmp/zmu-e2e/test-dpls-zmu.elf
+          if-no-files-found: warn
+
   firmware-pinout-contract:
     name: Revision 2 pinout contract
     runs-on: ubuntu-latest

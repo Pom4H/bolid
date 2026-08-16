@@ -11,7 +11,9 @@ void dpls_safety_init(dpls_safety_t *s) {
 }
 
 bool dpls_safety_can_enter(dpls_safety_mode_t mode, bool real_short) {
-    if (mode < DPLS_SAFE_NORMAL || mode > DPLS_SAFE_SHORT_T) return false;
+    /* Cast through unsigned: ARM GCC treats this enum as unsigned, so
+     * `mode < DPLS_SAFE_NORMAL` is a type-limits false positive. */
+    if ((unsigned)mode > (unsigned)DPLS_SAFE_SHORT_T) return false;
     return mode == DPLS_SAFE_NORMAL || !real_short;
 }
 

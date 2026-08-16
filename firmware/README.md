@@ -39,6 +39,13 @@ bash tools/lint_firmware.sh
 bash tools/coverage_firmware.sh
 ```
 
+Device-free Cortex-M0 E2E against the Kotlin wire codec (via [zmu](https://github.com/jjkt/zmu)):
+
+```sh
+bash tools/fetch_zmu.sh
+bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+```
+
 Project-owned C code is compiled with warnings treated as errors. `cppcheck` covers `src/`, `include/` and `tests/`. Host line coverage has an 80% floor; safety behavior is additionally exercised by explicit edge-case tests rather than relying on the percentage alone.
 
 ## PHY6252 target builds

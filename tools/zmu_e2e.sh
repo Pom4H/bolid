@@ -2,11 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ZMU_BIN="${1:-}"
+ZMU_BIN="${1:-${ZMU_BIN:-}}"
 OUT="$ROOT/tmp/zmu-e2e"
 
 if [[ -z "$ZMU_BIN" || ! -x "$ZMU_BIN" ]]; then
     echo "usage: $0 /path/to/zmu-cortex-m0" >&2
+    echo "  or:  ZMU_BIN=/path/to/zmu-cortex-m0 $0" >&2
     exit 2
 fi
 
@@ -19,20 +20,24 @@ mkdir -p "$OUT"
         --tests ru.bolid.testdpls.interop.ZmuInteropTest.generateVectorsWhenRequested
 )
 
-STARTUP=""
-for candidate in \
-    /usr/share/gcc-arm-none-eabi/samples/startup/startup_ARMCM0.S \
-    /usr/share/doc/gcc-arm-none-eabi/examples/startup/startup_ARMCM0.S \
-    /usr/share/gcc-arm-embedded/samples/startup/startup_ARMCM0.S
- do
-    if [[ -f "$candidate" ]]; then
-        STARTUP="$candidate"
-        break
-    fi
- done
+STARTUP="$ROOT/firmware/zmu/startup_ARMCM0.S"
+if [[ ! -f "$STARTUP" ]]; then
+    for candidate in \
+        /usr/share/gcc-arm-none-eabi/samples/startup/startup_ARMCM0.S \
+        /usr/share/doc/gcc-arm-none-eabi/examples/startup/startup_ARMCM0.S \
+        /usr/share/gcc-arm-embedded/samples/startup/startup_ARMCM0.S \
+        "${GCC_HOME:-}/share/gcc-arm-none-eabi/samples/startup/startup_ARMCM0.S" \
+        "${GCC_HOME:-}/share/gcc-arm-embedded/samples/startup/startup_ARMCM0.S"
+    do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            STARTUP="$candidate"
+            break
+        fi
+    done
+fi
 
-if [[ -z "$STARTUP" ]]; then
-    echo "startup_ARMCM0.S not found in gcc-arm-none-eabi package" >&2
+if [[ ! -f "$STARTUP" ]]; then
+    echo "startup_ARMCM0.S not found (expected under firmware/zmu/ or gcc-arm-none-eabi samples)" >&2
     exit 3
 fi
 

@@ -86,6 +86,16 @@ bash tools/check_all.sh
 
 On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `DplsCore` and executes the Xcode integration smoke test. Physical BLE behavior still requires a real phone/device pair.
 
+### Device-free firmware ↔ mobile E2E (zmu)
+
+Run the portable firmware core on a Cortex-M0 emulator and verify the responses with Kotlin wire encoders — no PB-03F or phone required:
+
+```sh
+# needs: rustc/cargo, arm-none-eabi-gcc, JDK 17+
+bash tools/fetch_zmu.sh          # clones https://github.com/jjkt/zmu and builds zmu-cortex-m0
+bash tools/zmu_e2e.sh tmp/zmu/target/release/zmu-cortex-m0
+```
+
 ### Firmware
 
 ```sh
@@ -136,6 +146,7 @@ An ordinary product feature should normally require **one shared Kotlin change**
 Behavior-heavy checks live at the lowest reusable layer:
 
 - firmware host tests + coverage + cppcheck;
+- zmu Cortex-M0 E2E (Kotlin request vectors → ARM firmware server → Kotlin response checks);
 - CRC known-answer and all-message frame round trips;
 - 10,000 randomized malformed decoder inputs;
 - 2,000 randomized valid frame round trips;
