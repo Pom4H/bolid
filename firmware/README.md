@@ -1,12 +1,15 @@
 # Test-DPLS firmware
 
-PHY6252 firmware for the Test-DPLS device. The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
+PHY6252 firmware for the Test-DPLS device, version **1.4.0** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
 
 ## Layout
 
 | Path | Responsibility |
 |---|---|
-| `src/` + `include/` | Portable protocol, server state machine, LED and calibration logic |
+| `src/` + `include/` | Portable protocol, server, LED, HMAC and calibration |
+| `phy6252_emu/` | Reusable PHY6252 ATT/OSAL/SNV host model (no DPLS types). Copy into other PHY6252 projects |
+| `sim/` | DPLS board on top of `phy6252_emu`: HMAC verify, LED scenes, lab voltages |
+| `zmu/` | Cortex-M0 image that runs that board model under [zmu](https://github.com/jjkt/zmu) |
 | `tests/` | Host-side behavioral and edge-case tests |
 | `phy6252/` | HAL/GATT adapter, ADC, persistence and board mapping |
 | `targets/phy6252/` | Keil CMSIS solution and GNU Arm target build |
@@ -25,7 +28,8 @@ Firmware is the safety boundary; the mobile client cannot bypass these rules.
 - Output switching is break-before-make and only one test mode may be energized.
 - Authentication attempt limits survive reconnects; persistent lock data is stored in SNV.
 - Session tokens/nonces are cleared when a link is reset.
-- TX indications are queued and serialized; the queue advances only after ATT confirmation, with a confirmation timeout fail-safe.
+- TX is one PDU in flight. Indicate-only waits for ATT confirmation (2 s fail-safe). Samsung CCCD 0x03 uses `GATT_Notification` and advances on the 80 ms notify-pace tick. That chip behaviour lives in `phy6252_emu/`; the DPLS host/zmu board calls it instead of duplicating queues.
+- Proof verification is HMAC-SHA256 of the session transcript against the stored verifier (factory E2E password `TestDpls01` on the simulator).
 
 ## Host build, tests and static analysis
 
@@ -55,7 +59,7 @@ Soft-BLE against the same host `dpls_simulator` (real `DplsClient`, no radio):
 bash tools/soft_ble_e2e.sh
 ```
 
-Project-owned C code is compiled with warnings treated as errors. `cppcheck` covers `src/`, `include/` and `tests/`. Host line coverage has an 80% floor; safety behavior is additionally exercised by explicit edge-case tests rather than relying on the percentage alone.
+Project-owned C code is compiled with warnings treated as errors. `cppcheck` covers `src/`, `include/`, `sim/`, `phy6252_emu/` and `tests/`. Host line coverage has an 80% floor; safety behavior is additionally exercised by explicit edge-case tests rather than relying on the percentage alone.
 
 ## PHY6252 target builds
 

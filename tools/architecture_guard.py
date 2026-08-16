@@ -127,6 +127,68 @@ require_text(
     "connectGatt must deliver callbacks on the main Handler",
 )
 
+GATT = ROOT / "firmware/phy6252/dpls_gatt_service.c"
+require_text(
+    GATT,
+    "GATT_Notification",
+    "TX must use GATT_Notification when CCCD has notify; Samsung never confirms indications",
+)
+require_text(
+    ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt",
+    "byteArrayOf(0x03, 0x00)",
+    "Android CCCD must be 0x03 so Samsung actually subscribes",
+)
+require_text(
+    ROOT / "firmware/phy6252/dpls_phy6252_app.c",
+    "Journal flash must not share an OSAL turn with GATT_Notification",
+    "journal SNV must run on the tick, not in the same turn as AUTH_RESULT notify",
+)
+require_text(
+    ROOT / "firmware/phy6252/dpls_phy6252_app.c",
+    "tx.in_flight = true;\n        tx.in_flight_since_ms = now_ms();",
+    "notify must keep one PDU in flight like rc1; immediate complete_head floods ATT (rc=19) and drops AUTH_RESULT",
+)
+require_text(
+    ROOT / "firmware/phy6252/dpls_phy6252_app.c",
+    "static struct tc_hmac_state_struct hmac;",
+    "HMAC must not live on the 1 KiB OSAL stack: receive (496) + hmac (344) overflows and corrupts TX",
+)
+require_text(
+    ROOT / "firmware/phy6252_emu/phy6252_emu.c",
+    "TX is a separate OSAL turn",
+    "PHY6252 emu tick must not nested-pump TX; notify pace is a timer, TX is its own turn",
+)
+require_text(
+    ROOT / "firmware/sim/dpls_sim_board.c",
+    "phy6252_emu_tick(&board->radio, board->now_ms);\n    dpls_sim_board_process_tx(board);",
+    "DPLS board must use phy6252_emu for ATT pacing, then TX as a separate turn",
+)
+require_text(
+    ROOT / "firmware/src/dpls_server.c",
+    "send_auth_result(s, f->sequence, DPLS_AUTH_DENIED, 0);\n        dpls_server_log(s, EVT_AUTH_FAILURE",
+    "AUTH_RESULT must be queued before the AUTH_FAILURE journal write",
+)
+require_text(
+    ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c",
+    "return events ^ SBP_DPLS_LED_EVT",
+    "LED must return without process_tx: rc1 never pumped TX from the LED tick",
+)
+require_text(
+    ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c",
+    "dpls_phy6252_process_rx();\n        schedule_led_if_needed();\n        return events ^ DPLS_PHY6252_RX_EVT;",
+    "RX must not pump TX or clear TX_EVT: rc1 sent GATT_Notification from the TX turn",
+)
+forbid_text(
+    ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c",
+    "~DPLS_PHY6252_TX_EVT",
+    "clearing TX_EVT from the RX handler drops AUTH_RESULT before it is sent",
+)
+require_text(
+    ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c",
+    "uint8 update_enabled = FALSE",
+    "slave conn-param update must stay off: Samsung drops the link ~20s after connect",
+)
+
 # Every direct StateFlow replacement must visibly re-apply the lifecycle
 # projection. Ordinary mutations go through updateState().
 for number, line in enumerate(text(CLIENT).splitlines(), start=1):

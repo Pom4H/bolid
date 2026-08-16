@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ru.bolid.dpls-ble</string>
+  <key>CFBundleName</key>
+  <string>dpls-ble</string>
+  <key>CFBundleExecutable</key>
+  <string>dpls-ble</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Лаборатория Test-DPLS сканирует и рекламирует приборы по Bluetooth.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>Лаборатория Test-DPLS рекламирует симулятор как BLE-устройство.</string>
+</dict>
+</plist>

@@ -92,6 +92,7 @@ class DplsClient(
     private val wire = DplsWire(transport) { message -> fail(message) }
     private val credentials = DplsCredentials(platform)
     private val journal = JournalMachine()
+    private var pendingVerifier: ByteArray? = null
 
     private var session: DeviceSession = DeviceSession.Offline
     private var identify = Identify()
@@ -286,7 +287,7 @@ class DplsClient(
         val challenge = session.challengeOrNull
             ?: return fail("Устройство не прислало параметры аутентификации")
         val verifier = DplsCrypto.deriveVerifier(password, challenge.authSalt)
-        credentials.replace(verifier)
+        holdPendingVerifier(verifier)
         sendAuthProof(verifier)
     }
 
@@ -304,7 +305,7 @@ class DplsClient(
             ?: return fail("Устройство не готово к первичной настройке")
         val salt = platform.secureRandomBytes(DplsAuth.SALT_SIZE)
         val verifier = DplsCrypto.deriveVerifier(password, salt)
-        credentials.replace(verifier)
+        holdPendingVerifier(verifier)
         val nameBytes = utf8Truncate(trimmed, 31)
         val payload = ByteArray(5 + nameBytes.size + salt.size + verifier.size)
         putU32(payload, 0, challenge.sessionId)
@@ -627,6 +628,7 @@ class DplsClient(
             it.copy(
                 statusText = "Bluetooth выключен",
                 savedCredentials = credentials.available,
+                awaitingUserPassword = false,
                 staleState = it.state != null,
                 commandInProgress = false,
                 logProgress = null,
@@ -646,6 +648,8 @@ class DplsClient(
             realShort = DplsAdvertisement.realShort(device.advStatus),
             fromReserve = DplsAdvertisement.fromReserve(device.advStatus),
             reserveLow = DplsAdvertisement.reserveLow(device.advStatus),
+            firmwareVersion = device.firmwareVersion ?: previous?.firmwareVersion,
+            kind = device.kind ?: previous?.kind,
         )
         updateState {
             val merged = it.devices.filterNot { old -> old.address == item.address } + item
@@ -694,6 +698,15 @@ class DplsClient(
             fail("BLE write limit слишком мал: $writeLimit")
             return
         }
+        when (session) {
+            is DeviceSession.Linked,
+            is DeviceSession.Commissioning,
+            is DeviceSession.Authenticating,
+            is DeviceSession.Synchronizing,
+            is DeviceSession.Online,
+            -> return
+            else -> Unit
+        }
         val current = session
         val endpoint = current.endpointOrNull ?: return fail("Нет активного BLE endpoint")
         val candidateNodeId = current.candidateNodeIdOrNull
@@ -705,9 +718,9 @@ class DplsClient(
                 responseSequence = sequence,
                 sentAtMillis = platform.nowMillis(),
             )
-            updateState { it.copy(statusText = "Показать на объекте…") }
+            updateState { it.copy(statusText = "Показать на объекте…", awaitingUserPassword = false) }
         } else {
-            updateState { it.copy(statusText = "Подключение…") }
+            updateState { it.copy(statusText = "Подключение…", awaitingUserPassword = false) }
             request(DplsProtocol.Type.HELLO, clientNonce)
         }
     }
@@ -835,11 +848,18 @@ class DplsClient(
     private fun handleAuthChallenge(payload: ByteArray) {
         val wireChallenge = parseAuthChallenge(payload)
             ?: return fail("Повреждённый AUTH_CHALLENGE")
-        val linked = session as? DeviceSession.Linked
+        val current = session
+        val endpoint = current.endpointOrNull
             ?: return fail("AUTH_CHALLENGE получен вне ожидаемого состояния")
+        val clientNonce = when (current) {
+            is DeviceSession.Linked -> current.clientNonce
+            is DeviceSession.Authenticating -> current.challenge.clientNonce
+            is DeviceSession.Commissioning -> current.challenge.clientNonce
+            else -> return fail("AUTH_CHALLENGE получен вне ожидаемого состояния")
+        }
         val challenge = SessionChallenge(
             sessionId = wireChallenge.sessionId,
-            clientNonce = linked.clientNonce,
+            clientNonce = clientNonce,
             deviceNonce = wireChallenge.deviceNonce,
             authSalt = wireChallenge.salt,
             initialized = wireChallenge.initialized,
@@ -847,15 +867,15 @@ class DplsClient(
         setSession(
             if (wireChallenge.initialized) {
                 DeviceSession.Authenticating(
-                    linked.endpoint,
+                    endpoint,
                     challenge,
-                    linked.candidateNodeId,
+                    current.candidateNodeIdOrNull,
                 )
             } else {
                 DeviceSession.Commissioning(
-                    linked.endpoint,
+                    endpoint,
                     challenge,
-                    linked.candidateNodeId,
+                    current.candidateNodeIdOrNull,
                 )
             },
         )
@@ -889,6 +909,7 @@ class DplsClient(
         if (result.status == 3) {
             // The device reboots before DEVICE_INFO can prove NodeId. Persist only
             // against the physical BLE address; stable node keys are written later.
+            commitPendingVerifier()
             persistCachedVerifier()
             val endpoint = session.endpointOrNull
                 ?: return fail("Потерян endpoint после первичной настройки")
@@ -906,24 +927,34 @@ class DplsClient(
         }
 
         if (result.status != 0) {
+            clearPendingVerifier()
             forgetSavedCredentials()
-            updateState { it.copy(awaitingUserPassword = true) }
+            val message = if (result.retryAfterSeconds > 0) {
+                "Аутентификация заблокирована на ${result.retryAfterSeconds} с"
+            } else {
+                "Неверный пароль"
+            }
             if (result.retryAfterSeconds > 0) {
                 platform.sessionTrace("E2E auth blocked retry_after=${result.retryAfterSeconds}")
             } else {
                 platform.sessionTrace("E2E auth wrong")
             }
-            fail(
-                if (result.retryAfterSeconds > 0) {
-                    "Аутентификация заблокирована на ${result.retryAfterSeconds} с"
-                } else {
-                    "Неверный пароль"
-                },
-            )
+            updateState {
+                it.copy(
+                    awaitingUserPassword = true,
+                    statusText = message,
+                    error = message,
+                    commandInProgress = false,
+                    setupPassword = "",
+                    setupRepeatPassword = "",
+                )
+            }
+            platform.notifyOperator(DplsOperatorAlerts.ERROR_TITLE, message)
             return
         }
 
         val token = result.sessionToken ?: return fail("AUTH_RESULT без session token")
+        commitPendingVerifier()
         val endpoint = session.endpointOrNull
             ?: return fail("Потерян endpoint после аутентификации")
         val candidateNodeId = session.candidateNodeIdOrNull
@@ -1399,7 +1430,13 @@ class DplsClient(
 
     private fun canRecoverLink(): Boolean =
         session.endpointOrNull != null &&
-            (credentials.available || state.state != null || logLoadPending)
+            (session is DeviceSession.Online ||
+                session is DeviceSession.Synchronizing ||
+                session is DeviceSession.Recovering ||
+                session is DeviceSession.Authenticating ||
+                session is DeviceSession.Commissioning ||
+                state.state != null ||
+                logLoadPending)
 
     private fun scheduleReconnect() {
         val current = session
@@ -1591,6 +1628,7 @@ class DplsClient(
         drainLog = false
         timeSyncAttempted = false
         if (clearVerifier) credentials.replace(null)
+        clearPendingVerifier()
     }
 
     private fun authenticatedSession(): AuthSession =
@@ -1605,6 +1643,22 @@ class DplsClient(
     private fun loadCachedVerifier() {
         val loaded = credentials.load(session.nodeIdOrNull, currentBleAddress())
         updateState { it.copy(savedCredentials = loaded) }
+    }
+
+    private fun holdPendingVerifier(value: ByteArray) {
+        if (pendingVerifier !== value) pendingVerifier?.fill(0)
+        pendingVerifier = value
+    }
+
+    private fun commitPendingVerifier() {
+        val stored = pendingVerifier ?: return
+        pendingVerifier = null
+        credentials.replace(stored)
+    }
+
+    private fun clearPendingVerifier() {
+        pendingVerifier?.fill(0)
+        pendingVerifier = null
     }
 
     private fun persistCachedVerifier() {
@@ -1672,6 +1726,7 @@ class DplsClient(
         drainLog = false
         platform.keepConnectionAlive(false)
         setSession(DeviceSession.Failed(endpoint, LinkFailure.Platform(message)))
+        clearPendingVerifier()
         updateState {
             it.copy(
                 statusText = message,
@@ -1705,11 +1760,9 @@ class DplsClient(
             is DeviceSession.Synchronizing,
             is DeviceSession.Online,
             -> true
-            is DeviceSession.Recovering -> credentials.available
             else -> false
         }
-        val credentialsReady = session.credentialsReady ||
-            (session is DeviceSession.Recovering && credentials.available)
+        val credentialsReady = session.credentialsReady
         return ui.copy(
             phase = connectionPhase(ui),
             authenticated = session.isAuthenticated,

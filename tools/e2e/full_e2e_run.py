@@ -21,6 +21,7 @@ from phone_e2e_test import (  # noqa: E402
     step,
     tap_back,
     tap_bottom_nav,
+    tap_node,
     tap_text,
     timer,
     visible_texts,
@@ -35,10 +36,8 @@ def save_device_name(name: str) -> None:
     tap_text("Имя устройства", clickable=None)
     wait_text("Изменение имени")
     fill_field("Имя устройства", name)
-    tap_node = wait_button_enabled("Сохранить")
-    from phone_e2e_test import tap_node
-
-    tap_node(tap_node)
+    node = wait_button_enabled("Сохранить")
+    tap_node(node)
     wait_any("Настройки сохранены", "Сохранение имени", timeout=15)
     deadline = time.time() + 20
     while time.time() < deadline:
@@ -59,10 +58,8 @@ def save_password(new_password: str) -> None:
     fill_field("Текущий пароль", PASSWORD)
     fill_field("Новый пароль", new_password)
     fill_field("Повторите пароль", new_password)
-    tap_node = wait_button_enabled("Сохранить")
-    from phone_e2e_test import tap_node
-
-    tap_node(tap_node)
+    node = wait_button_enabled("Сохранить")
+    tap_node(node)
     wait_any("Настройки сохранены", "Сохранение пароля", timeout=15)
     deadline = time.time() + 20
     while time.time() < deadline:

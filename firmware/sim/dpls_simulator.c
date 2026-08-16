@@ -1,6 +1,7 @@
-#include "dpls_server.h"
+#include "dpls_sim_board.h"
 
 #include <ctype.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,30 +9,10 @@
 #define SIM_LINE_MAX 2048u
 
 typedef struct {
-    dpls_server_t server;
-    uint32_t now_ms;
-    uint32_t rng;
-    bool encrypted;
-    bool auth_locked;
-    dpls_settings_state_t settings_state;
-    char name[DPLS_NAME_MAX + 1u];
-    uint8_t salt[DPLS_AUTH_SALT_SIZE];
-    uint8_t verifier[DPLS_AUTH_PROOF_SIZE];
-    dpls_mode_t hardware_mode;
-    dpls_power_t power;
-    bool reserve_low;
-    bool real_short;
-    bool identify_led;
-    uint16_t line_mv;
-    uint16_t port2_mv;
-    uint16_t port_t_mv;
-    uint16_t reserve_mv;
-    dpls_event_t events[DPLS_EVENT_CAPACITY];
-    uint16_t event_count;
-    uint32_t next_event_sequence;
-    unsigned drop_next_tx;
-    unsigned duplicate_next_tx;
-    size_t short_next_tx;
+    dpls_sim_board_t board;
+    bool last_led;
+    dpls_mode_t last_mode;
+    uint32_t last_event_seq;
 } simulator_t;
 
 static void print_hex(const char *prefix, const uint8_t *bytes, size_t length)
@@ -43,275 +24,47 @@ static void print_hex(const char *prefix, const uint8_t *bytes, size_t length)
     fflush(stdout);
 }
 
-static bool link_encrypted(void *context)
+static void emit_tx(void *context, const uint8_t *frame, size_t length)
 {
-    return ((simulator_t *)context)->encrypted;
+    (void)context;
+    print_hex("TX ", frame, length);
 }
 
-static bool link_indicate(void *context, const uint8_t *frame, size_t length)
+static void on_disconnect(void *context)
 {
-    simulator_t *sim = context;
-    size_t delivered = length;
-
-    if (sim->drop_next_tx != 0u) {
-        --sim->drop_next_tx;
-        puts("TX_DROPPED");
-        fflush(stdout);
-        return true;
-    }
-    if (sim->short_next_tx != 0u && sim->short_next_tx < delivered) {
-        delivered = sim->short_next_tx;
-        sim->short_next_tx = 0u;
-    }
-    print_hex("TX ", frame, delivered);
-    if (sim->duplicate_next_tx != 0u) {
-        --sim->duplicate_next_tx;
-        print_hex("TX ", frame, delivered);
-    }
-    return true;
-}
-
-static void link_disconnect(void *context)
-{
-    simulator_t *sim = context;
-    dpls_server_disconnected(&sim->server, sim->now_ms);
+    (void)context;
     puts("DISCONNECT");
     fflush(stdout);
 }
 
-static bool hardware_apply_mode(void *context, dpls_mode_t mode)
+static void breadcrumbs(simulator_t *sim)
 {
-    simulator_t *sim = context;
-    sim->hardware_mode = mode;
-    fprintf(stdout, "MODE %u\n", (unsigned)mode);
-    fflush(stdout);
-    return true;
-}
-
-static void hardware_safe_normal(void *context)
-{
-    simulator_t *sim = context;
-    if (sim->hardware_mode != DPLS_MODE_NORMAL) {
-        sim->hardware_mode = DPLS_MODE_NORMAL;
-        puts("MODE 0");
+    uint32_t seq;
+    if (sim->board.hardware_mode != sim->last_mode) {
+        sim->last_mode = sim->board.hardware_mode;
+        fprintf(stdout, "MODE %u\n", (unsigned)sim->last_mode);
         fflush(stdout);
     }
-}
-
-static uint16_t line_mv(void *context) { return ((simulator_t *)context)->line_mv; }
-static uint16_t port1_mv(void *context) { return ((simulator_t *)context)->line_mv; }
-static uint16_t port2_mv(void *context) { return ((simulator_t *)context)->port2_mv; }
-static uint16_t port_t_mv(void *context) { return ((simulator_t *)context)->port_t_mv; }
-static uint16_t reserve_mv(void *context) { return ((simulator_t *)context)->reserve_mv; }
-static dpls_power_t power_source(void *context) { return ((simulator_t *)context)->power; }
-static bool reserve_low(void *context) { return ((simulator_t *)context)->reserve_low; }
-static bool real_short(void *context) { return ((simulator_t *)context)->real_short; }
-
-static uint8_t measurement_validity(void *context)
-{
-    (void)context;
-    return DPLS_STATE_PORT_1_VALID |
-           DPLS_STATE_PORT_2_VALID |
-           DPLS_STATE_PORT_T_VALID |
-           DPLS_STATE_RESERVE_VOLTAGE_VALID |
-           DPLS_STATE_POWER_VALID |
-           DPLS_STATE_AUTOISO_VALID;
-}
-
-static void identify_led(void *context, bool enabled)
-{
-    simulator_t *sim = context;
-    if (sim->identify_led == enabled) return;
-    sim->identify_led = enabled;
-    fprintf(stdout, "LED %u\n", enabled ? 1u : 0u);
-    fflush(stdout);
-}
-
-static void device_info(void *context, dpls_device_info_t *out)
-{
-    (void)context;
-    memset(out, 0, sizeof(*out));
-    out->device_id = 0x00001234u;
-    out->fw_major = DPLS_FW_VERSION_MAJOR;
-    out->fw_minor = DPLS_FW_VERSION_MINOR;
-    out->fw_patch = DPLS_FW_VERSION_PATCH;
-    out->hw_revision = 2u;
-    out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT;
-}
-
-static dpls_settings_state_t settings_state(void *context)
-{
-    return ((simulator_t *)context)->settings_state;
-}
-
-static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
-{
-    simulator_t *sim = context;
-    memcpy(out, sim->salt, DPLS_AUTH_SALT_SIZE);
-}
-
-static bool settings_write(void *context, const char *name,
-                           const uint8_t salt[DPLS_AUTH_SALT_SIZE],
-                           const uint8_t verifier[DPLS_AUTH_PROOF_SIZE])
-{
-    simulator_t *sim = context;
-    strncpy(sim->name, name, DPLS_NAME_MAX);
-    sim->name[DPLS_NAME_MAX] = '\0';
-    memcpy(sim->salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(sim->verifier, verifier, DPLS_AUTH_PROOF_SIZE);
-    sim->settings_state = DPLS_SETTINGS_VALID;
-    return true;
-}
-
-static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
-{
-    simulator_t *sim = context;
-    memcpy(out, sim->name, sizeof(sim->name));
-}
-
-static bool settings_set_name(void *context, const char *name)
-{
-    simulator_t *sim = context;
-    strncpy(sim->name, name, DPLS_NAME_MAX);
-    sim->name[DPLS_NAME_MAX] = '\0';
-    return true;
-}
-
-static bool settings_set_password(void *context,
-                                  const uint8_t salt[DPLS_AUTH_SALT_SIZE],
-                                  const uint8_t verifier[DPLS_AUTH_PROOF_SIZE])
-{
-    simulator_t *sim = context;
-    memcpy(sim->salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(sim->verifier, verifier, DPLS_AUTH_PROOF_SIZE);
-    return true;
-}
-
-static bool random_bytes(void *context, uint8_t *out, size_t length)
-{
-    simulator_t *sim = context;
-    size_t i;
-    for (i = 0; i < length; ++i) {
-        sim->rng = sim->rng * 1664525u + 1013904223u;
-        out[i] = (uint8_t)(sim->rng >> 24);
+    if (sim->board.led_level != sim->last_led) {
+        sim->last_led = sim->board.led_level;
+        fprintf(stdout, "LED %u\n", sim->last_led ? 1u : 0u);
+        fflush(stdout);
     }
-    return true;
-}
-
-static bool verify_proof(void *context,
-                         const uint8_t device_nonce[DPLS_AUTH_NONCE_SIZE],
-                         const uint8_t client_nonce[DPLS_AUTH_NONCE_SIZE],
-                         uint32_t session_id,
-                         const uint8_t proof[DPLS_AUTH_PROOF_SIZE])
-{
-    (void)context;
-    (void)device_nonce;
-    (void)client_nonce;
-    (void)session_id;
-    (void)proof;
-    return true;
-}
-
-static bool lock_read(void *context) { return ((simulator_t *)context)->auth_locked; }
-static bool lock_write(void *context, bool locked)
-{
-    ((simulator_t *)context)->auth_locked = locked;
-    return true;
-}
-
-static bool events_init(void *context, uint16_t *count, uint32_t *next_sequence)
-{
-    simulator_t *sim = context;
-    *count = sim->event_count;
-    *next_sequence = sim->next_event_sequence;
-    return true;
-}
-
-static bool events_append(void *context, const dpls_event_t *event)
-{
-    simulator_t *sim = context;
-    size_t slot = (size_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY);
-    sim->events[slot] = *event;
-    if (sim->event_count < DPLS_EVENT_CAPACITY) ++sim->event_count;
-    sim->next_event_sequence = event->sequence + 1u;
-    return true;
-}
-
-static bool events_read(void *context, uint32_t sequence, dpls_event_t *event)
-{
-    simulator_t *sim = context;
-    size_t slot;
-    if (sequence == 0u) return false;
-    slot = (size_t)((sequence - 1u) % DPLS_EVENT_CAPACITY);
-    if (sim->events[slot].sequence != sequence) return false;
-    *event = sim->events[slot];
-    return true;
-}
-
-static void diagnostic_error(void *context, bool critical)
-{
-    (void)context;
-    fprintf(stdout, "DIAG %u\n", critical ? 1u : 0u);
-    fflush(stdout);
-}
-
-static dpls_hal_t make_hal(simulator_t *sim)
-{
-    dpls_hal_t hal;
-    memset(&hal, 0, sizeof(hal));
-    hal.context = sim;
-    hal.link.encrypted = link_encrypted;
-    hal.link.indicate = link_indicate;
-    hal.link.disconnect = link_disconnect;
-    hal.hardware.apply_mode = hardware_apply_mode;
-    hal.hardware.safe_normal = hardware_safe_normal;
-    hal.hardware.voltage_mv = line_mv;
-    hal.hardware.port1_voltage_mv = port1_mv;
-    hal.hardware.port2_voltage_mv = port2_mv;
-    hal.hardware.port_t_voltage_mv = port_t_mv;
-    hal.hardware.reserve_voltage_mv = reserve_mv;
-    hal.hardware.power_source = power_source;
-    hal.hardware.reserve_low = reserve_low;
-    hal.hardware.measurement_validity = measurement_validity;
-    hal.hardware.identify_led = identify_led;
-    hal.hardware.real_short_active = real_short;
-    hal.hardware.device_info = device_info;
-    hal.settings.state = settings_state;
-    hal.settings.salt = settings_salt;
-    hal.settings.write = settings_write;
-    hal.settings.name = settings_name;
-    hal.settings.set_name = settings_set_name;
-    hal.settings.set_password = settings_set_password;
-    hal.auth.random_bytes = random_bytes;
-    hal.auth.verify_proof = verify_proof;
-    hal.auth.lock_read = lock_read;
-    hal.auth.lock_write = lock_write;
-    hal.events.init = events_init;
-    hal.events.append = events_append;
-    hal.events.read = events_read;
-    hal.diagnostic_error = diagnostic_error;
-    return hal;
-}
-
-static void simulator_init(simulator_t *sim)
-{
-    dpls_hal_t hal;
-    size_t i;
-    memset(sim, 0, sizeof(*sim));
-    sim->rng = 0x44504C53u;
-    sim->encrypted = true;
-    sim->settings_state = DPLS_SETTINGS_VALID;
-    strcpy(sim->name, "Test-DPLS-SIM");
-    for (i = 0; i < DPLS_AUTH_SALT_SIZE; ++i) sim->salt[i] = (uint8_t)(0x40u + i);
-    sim->hardware_mode = DPLS_MODE_NORMAL;
-    sim->power = DPLS_POWER_LINE;
-    sim->line_mv = 12000u;
-    sim->port2_mv = 12000u;
-    sim->port_t_mv = 12000u;
-    sim->reserve_mv = 5000u;
-    sim->next_event_sequence = 1u;
-    hal = make_hal(sim);
-    dpls_server_init(&sim->server, &hal, sim->now_ms);
+    seq = sim->board.next_event_sequence;
+    while (sim->last_event_seq + 1u < seq) {
+        uint16_t slot;
+        const dpls_event_t *event;
+        ++sim->last_event_seq;
+        slot = (uint16_t)((sim->last_event_seq - 1u) % DPLS_EVENT_CAPACITY);
+        event = &sim->board.events[slot];
+        if (event->sequence == sim->last_event_seq) {
+            fprintf(stdout, "JOURNAL seq=%lu type=%u param=%u\n",
+                    (unsigned long)event->sequence,
+                    (unsigned)event->event_type,
+                    (unsigned)event->parameter);
+            fflush(stdout);
+        }
+    }
 }
 
 static int hex_digit(int c)
@@ -345,82 +98,298 @@ static size_t parse_hex(const char *text, uint8_t *out, size_t capacity)
     return high < 0 ? length : 0u;
 }
 
+static void json_string(FILE *out, const char *text)
+{
+    fputc('"', out);
+    for (; *text != '\0'; ++text) {
+        unsigned char c = (unsigned char)*text;
+        if (c == '"' || c == '\\') {
+            fputc('\\', out);
+            fputc((char)c, out);
+        } else if (c >= 32u) {
+            fputc((char)c, out);
+        }
+    }
+    fputc('"', out);
+}
+
+static void print_snapshot(simulator_t *sim)
+{
+    const phy6252_emu_t *radio = &sim->board.radio;
+    fputs("SNAPSHOT ", stdout);
+    fprintf(stdout,
+            "{\"now_ms\":%lu,\"connected\":%u,\"auth\":%u,\"encrypted\":%u,"
+            "\"mode\":%u,\"power\":%u,\"reserve_low\":%u,\"real_short\":%u,"
+            "\"identify\":%u,\"led\":%u,\"line_mv\":%u,\"port2_mv\":%u,"
+            "\"port_t_mv\":%u,\"reserve_mv\":%u,\"events\":%u,\"name\":",
+            (unsigned long)sim->board.now_ms,
+            sim->board.connected ? 1u : 0u,
+            dpls_server_authenticated(&sim->board.server) ? 1u : 0u,
+            sim->board.encrypted ? 1u : 0u,
+            (unsigned)sim->board.hardware_mode,
+            (unsigned)sim->board.power,
+            sim->board.reserve_low ? 1u : 0u,
+            sim->board.real_short ? 1u : 0u,
+            sim->board.identify_active ? 1u : 0u,
+            sim->board.led_level ? 1u : 0u,
+            (unsigned)sim->board.line_mv,
+            (unsigned)sim->board.port2_mv,
+            (unsigned)sim->board.port_t_mv,
+            (unsigned)sim->board.reserve_mv,
+            (unsigned)sim->board.event_count);
+    json_string(stdout, sim->board.name);
+    fprintf(stdout,
+            ",\"device_id\":%lu,\"fw\":\"%u.%u.%u\"",
+            (unsigned long)sim->board.config.device_id,
+            (unsigned)sim->board.config.fw_major,
+            (unsigned)sim->board.config.fw_minor,
+            (unsigned)sim->board.config.fw_patch);
+    fprintf(stdout,
+            ",\"gpio\":{\"iso1\":%u,\"iso2\":%u,\"isoT\":%u,\"kz1\":%u,\"kz2\":%u,\"kzT\":%u,"
+            "\"ledR\":%u,\"ledG\":%u,\"ledB\":%u}",
+            sim->board.gpio_iso_1 ? 1u : 0u,
+            sim->board.gpio_iso_2 ? 1u : 0u,
+            sim->board.gpio_iso_t ? 1u : 0u,
+            sim->board.gpio_kz_1 ? 1u : 0u,
+            sim->board.gpio_kz_2 ? 1u : 0u,
+            sim->board.gpio_kz_t ? 1u : 0u,
+            sim->board.gpio_led_r ? 1u : 0u,
+            sim->board.gpio_led_g ? 1u : 0u,
+            sim->board.gpio_led_b ? 1u : 0u);
+    fprintf(stdout,
+            ",\"radio\":{\"connected\":%u,\"cccd\":%u,\"notify\":%u,"
+            "\"rx\":%u,\"tx\":%u,\"inflight\":%u,\"inflight_since_ms\":%lu,"
+            "\"att_sent\":%u,\"snv_dirty\":%u,\"stack_bytes\":%u,"
+            "\"notify_pace_ms\":%u,\"indicate_timeout_ms\":%u}}\n",
+            radio->connected ? 1u : 0u,
+            (unsigned)radio->cccd,
+            phy6252_emu_cccd_notify(radio) ? 1u : 0u,
+            (unsigned)radio->rx.count,
+            (unsigned)radio->tx.count,
+            radio->tx.in_flight ? 1u : 0u,
+            (unsigned long)radio->tx.in_flight_since_ms,
+            radio->att_sent,
+            radio->snv_dirty ? 1u : 0u,
+            PHY6252_EMU_APP_STACK_BYTES,
+            PHY6252_EMU_NOTIFY_PACE_MS,
+            PHY6252_EMU_INDICATE_TIMEOUT_MS);
+    fflush(stdout);
+}
+
 static void done(void)
 {
     puts("DONE");
     fflush(stdout);
 }
 
-int main(void)
+static void fill_default_name(char *out, size_t capacity, uint32_t device_id)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    uint16_t tag = (uint16_t)(device_id & 0xffffu);
+    const char *prefix = "Test-DPLS-";
+    size_t i;
+    for (i = 0; prefix[i] != '\0' && i + 4u < capacity; ++i) out[i] = prefix[i];
+    if (i + 4u >= capacity) {
+        out[0] = '\0';
+        return;
+    }
+    out[i++] = HEX[(tag >> 12) & 0xfu];
+    out[i++] = HEX[(tag >> 8) & 0xfu];
+    out[i++] = HEX[(tag >> 4) & 0xfu];
+    out[i++] = HEX[tag & 0xfu];
+    out[i] = '\0';
+}
+
+static void copy_name_arg(char *out, const char *name)
+{
+    size_t i;
+    for (i = 0; i < DPLS_NAME_MAX && name[i] != '\0'; ++i) out[i] = name[i];
+    out[i] = '\0';
+}
+
+static int parse_fw(const char *text, uint8_t *major, uint8_t *minor, uint8_t *patch)
+{
+    unsigned a = 0u;
+    unsigned b = 0u;
+    unsigned c = 0u;
+    if (sscanf(text, "%u.%u.%u", &a, &b, &c) != 3) return 0;
+    if (a > 255u || b > 255u || c > 255u) return 0;
+    *major = (uint8_t)a;
+    *minor = (uint8_t)b;
+    *patch = (uint8_t)c;
+    return 1;
+}
+
+static void sim_boot(simulator_t *sim, const dpls_sim_board_config_t *config)
+{
+    memset(sim, 0, sizeof(*sim));
+    dpls_sim_board_init(&sim->board, config);
+    sim->last_led = sim->board.led_level;
+    sim->last_mode = sim->board.hardware_mode;
+    sim->last_event_seq = 0u;
+    puts("READY DPLS2");
+    breadcrumbs(sim);
+}
+
+static bool handle_line(simulator_t *sim, const char *line)
+{
+    uint8_t frame[DPLS_MAX_FRAME];
+    if (strncmp(line, "CONNECT", 7) == 0) {
+        dpls_sim_board_connect(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "DISCONNECT", 10) == 0) {
+        dpls_sim_board_disconnect(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "ENCRYPT ", 8) == 0) {
+        sim->board.encrypted = strtoul(line + 8, NULL, 10) != 0u;
+        done();
+    } else if (strncmp(line, "CONFIRM", 7) == 0) {
+        dpls_sim_board_tx_confirmed(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "FRAME ", 6) == 0) {
+        size_t length = parse_hex(line + 6, frame, sizeof(frame));
+        bool accepted = length != 0u && dpls_sim_board_push_rx(&sim->board, frame, length);
+        if (accepted) dpls_sim_board_run_after_write(&sim->board);
+        breadcrumbs(sim);
+        fprintf(stdout, "ACCEPT %u\n", accepted ? 1u : 0u);
+        done();
+    } else if (strncmp(line, "TICK ", 5) == 0) {
+        dpls_sim_board_tick(&sim->board, (uint32_t)strtoul(line + 5, NULL, 10));
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "LAB", 3) == 0 &&
+               (line[3] == '\0' || isspace((unsigned char)line[3]))) {
+        /* USB-powered PB-03F as captured on v1.3.0-rc.1: reserve ticks,
+         * +1 ~0.37 V, other rails ~0.03 V, "Низкий резерв". */
+        sim->board.power = DPLS_POWER_RESERVE;
+        sim->board.reserve_low = true;
+        sim->board.line_mv = 370u;
+        sim->board.port2_mv = 30u;
+        sim->board.port_t_mv = 30u;
+        sim->board.reserve_mv = 30u;
+        dpls_sim_board_refresh_led(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "POWER RESERVE", 13) == 0) {
+        sim->board.power = DPLS_POWER_RESERVE;
+        dpls_sim_board_refresh_led(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "POWER LINE", 10) == 0) {
+        sim->board.power = DPLS_POWER_LINE;
+        sim->board.reserve_low = false;
+        sim->board.line_mv = 12000u;
+        sim->board.port2_mv = 12000u;
+        sim->board.port_t_mv = 12000u;
+        sim->board.reserve_mv = 5000u;
+        dpls_sim_board_refresh_led(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "RESERVE_LOW ", 12) == 0) {
+        sim->board.reserve_low = strtoul(line + 12, NULL, 10) != 0u;
+        dpls_sim_board_refresh_led(&sim->board);
+        breadcrumbs(sim);
+        done();
+    } else if (strncmp(line, "REAL_SHORT ", 11) == 0) {
+        sim->board.real_short = strtoul(line + 11, NULL, 10) != 0u;
+        done();
+    } else if (strncmp(line, "SETTINGS EMPTY", 14) == 0) {
+        sim->board.settings_state = DPLS_SETTINGS_EMPTY;
+        done();
+    } else if (strncmp(line, "SETTINGS VALID", 14) == 0) {
+        sim->board.settings_state = DPLS_SETTINGS_VALID;
+        done();
+    } else if (strncmp(line, "CCCD ", 5) == 0) {
+        unsigned cfg = (unsigned)strtoul(line + 5, NULL, 0);
+        phy6252_emu_set_cccd(&sim->board.radio, (uint16_t)cfg);
+        done();
+    } else if (strncmp(line, "FAULT DROP", 10) == 0) {
+        sim->board.drop_next_tx = 1u;
+        done();
+    } else if (strncmp(line, "FAULT DUP", 9) == 0) {
+        sim->board.duplicate_next_tx = 1u;
+        done();
+    } else if (strncmp(line, "FAULT SHORT ", 12) == 0) {
+        sim->board.short_next_tx = (size_t)strtoul(line + 12, NULL, 10);
+        done();
+    } else if (strncmp(line, "STATE", 5) == 0) {
+        fprintf(stdout,
+                "STATE mode=%u led=%u auth=%u encrypted=%u power=%u reserve_low=%u "
+                "line_mv=%u port2_mv=%u port_t_mv=%u reserve_mv=%u identify=%u "
+                "now=%lu inflight=%u notify=%u\n",
+                (unsigned)sim->board.hardware_mode,
+                sim->board.led_level ? 1u : 0u,
+                dpls_server_authenticated(&sim->board.server) ? 1u : 0u,
+                sim->board.encrypted ? 1u : 0u,
+                (unsigned)sim->board.power,
+                sim->board.reserve_low ? 1u : 0u,
+                (unsigned)sim->board.line_mv,
+                (unsigned)sim->board.port2_mv,
+                (unsigned)sim->board.port_t_mv,
+                (unsigned)sim->board.reserve_mv,
+                sim->board.identify_active ? 1u : 0u,
+                (unsigned long)sim->board.now_ms,
+                sim->board.radio.tx.in_flight ? 1u : 0u,
+                phy6252_emu_cccd_notify(&sim->board.radio) ? 1u : 0u);
+        done();
+    } else if (strncmp(line, "SNAPSHOT", 8) == 0) {
+        print_snapshot(sim);
+        done();
+    } else if (strncmp(line, "QUIT", 4) == 0) {
+        return false;
+    } else {
+        puts("ERROR unknown-command");
+        done();
+    }
+    return true;
+}
+
+int main(int argc, char **argv)
 {
     simulator_t sim;
+    dpls_sim_board_config_t config;
+    char name[DPLS_NAME_MAX + 1u];
     char line[SIM_LINE_MAX];
-    uint8_t frame[DPLS_MAX_FRAME];
+    int i;
+
+    memset(&config, 0, sizeof(config));
+    config.device_id = 0x00001234u;
+    config.fw_major = DPLS_FW_VERSION_MAJOR;
+    config.fw_minor = DPLS_FW_VERSION_MINOR;
+    config.fw_patch = DPLS_FW_VERSION_PATCH;
+    config.rng = DPLS_SIM_RNG_LCG;
+    config.lcg_seed = 0x44504C53u;
+    config.emit_tx = emit_tx;
+    config.on_disconnect = on_disconnect;
+    config.callback_context = &sim;
+    name[0] = '\0';
+
+    for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
+            config.device_id = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+            copy_name_arg(name, argv[++i]);
+        } else if (strcmp(argv[i], "--fw") == 0 && i + 1 < argc) {
+            if (!parse_fw(argv[++i], &config.fw_major, &config.fw_minor, &config.fw_patch)) {
+                fprintf(stderr, "dpls_simulator: bad --fw, expected MAJOR.MINOR.PATCH\n");
+                return 2;
+            }
+        } else {
+            fprintf(stderr, "dpls_simulator: unknown arg %s\n", argv[i]);
+            fprintf(stderr, "usage: dpls_simulator [--id HEX] [--name STR] [--fw X.Y.Z]\n");
+            return 2;
+        }
+    }
+    if (name[0] == '\0') fill_default_name(name, sizeof(name), config.device_id);
+    config.name = name;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    simulator_init(&sim);
-    puts("READY DPLS2");
-
+    sim_boot(&sim, &config);
     while (fgets(line, sizeof(line), stdin) != NULL) {
-        if (strncmp(line, "CONNECT", 7) == 0) {
-            dpls_server_connected(&sim.server, sim.now_ms);
-            done();
-        } else if (strncmp(line, "DISCONNECT", 10) == 0) {
-            dpls_server_disconnected(&sim.server, sim.now_ms);
-            done();
-        } else if (strncmp(line, "ENCRYPT ", 8) == 0) {
-            sim.encrypted = strtoul(line + 8, NULL, 10) != 0u;
-            done();
-        } else if (strncmp(line, "FRAME ", 6) == 0) {
-            size_t length = parse_hex(line + 6, frame, sizeof(frame));
-            bool accepted = length != 0u && dpls_server_receive(&sim.server, frame, length, sim.now_ms);
-            fprintf(stdout, "ACCEPT %u\n", accepted ? 1u : 0u);
-            done();
-        } else if (strncmp(line, "TICK ", 5) == 0) {
-            sim.now_ms += (uint32_t)strtoul(line + 5, NULL, 10);
-            dpls_server_tick(&sim.server, sim.now_ms);
-            done();
-        } else if (strncmp(line, "POWER RESERVE", 13) == 0) {
-            sim.power = DPLS_POWER_RESERVE;
-            done();
-        } else if (strncmp(line, "POWER LINE", 10) == 0) {
-            sim.power = DPLS_POWER_LINE;
-            done();
-        } else if (strncmp(line, "RESERVE_LOW ", 12) == 0) {
-            sim.reserve_low = strtoul(line + 12, NULL, 10) != 0u;
-            done();
-        } else if (strncmp(line, "REAL_SHORT ", 11) == 0) {
-            sim.real_short = strtoul(line + 11, NULL, 10) != 0u;
-            done();
-        } else if (strncmp(line, "SETTINGS EMPTY", 14) == 0) {
-            sim.settings_state = DPLS_SETTINGS_EMPTY;
-            done();
-        } else if (strncmp(line, "SETTINGS VALID", 14) == 0) {
-            sim.settings_state = DPLS_SETTINGS_VALID;
-            done();
-        } else if (strncmp(line, "FAULT DROP", 10) == 0) {
-            sim.drop_next_tx = 1u;
-            done();
-        } else if (strncmp(line, "FAULT DUP", 9) == 0) {
-            sim.duplicate_next_tx = 1u;
-            done();
-        } else if (strncmp(line, "FAULT SHORT ", 12) == 0) {
-            sim.short_next_tx = (size_t)strtoul(line + 12, NULL, 10);
-            done();
-        } else if (strncmp(line, "STATE", 5) == 0) {
-            fprintf(stdout, "STATE mode=%u led=%u auth=%u encrypted=%u now=%lu\n",
-                    (unsigned)sim.hardware_mode,
-                    sim.identify_led ? 1u : 0u,
-                    dpls_server_authenticated(&sim.server) ? 1u : 0u,
-                    sim.encrypted ? 1u : 0u,
-                    (unsigned long)sim.now_ms);
-            done();
-        } else if (strncmp(line, "QUIT", 4) == 0) {
-            break;
-        } else {
-            puts("ERROR unknown-command");
-            done();
-        }
+        if (!handle_line(&sim, line)) break;
     }
     return 0;
 }

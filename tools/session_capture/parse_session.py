@@ -24,6 +24,88 @@ HEX_RX = re.compile(r"RX indication bytes=(?P<n>\d+)\s+hex=(?P<hex>[0-9A-Fa-f]+)
 HEX_TX = re.compile(r"TX write bytes=(?P<n>\d+)\s+hex=(?P<hex>[0-9A-Fa-f]+)")
 STATE = re.compile(r"^STATE\s+(?P<body>.+)$")
 ROW = re.compile(r"^(?P<ts>\S+)\t(?P<source>[^\t]+)\t(?P<body>.*)$")
+UART_DPLS_MODE = re.compile(r"DPLS MODE (\d+)")
+UART_DPLS_LED = re.compile(r"DPLS LED (\d+)")
+UART_DPLS_CCCD = re.compile(r"DPLS CCCD conn=(\d+) cfg=([0-9a-fA-F]+) rc=(\d+)")
+UART_DPLS_TX = re.compile(r"DPLS TX n=(\d+) t=([0-9a-fA-F]+) notify=(\d+) rc=(\d+)")
+UART_DPLS_QTX = re.compile(r"DPLS QTX n=(\d+) t=([0-9a-fA-F]+) count=(\d+)")
+UART_DPLS_RX = re.compile(r"DPLS RX n=(\d+) t=([0-9a-fA-F]+)")
+UART_DPLS_CONN = re.compile(r"DPLS CONN (\d+)")
+UART_DPLS_BOOT = re.compile(r"DPLS boot settings=(\d+)")
+UART_DPLS_CFM = re.compile(r"DPLS CFM inflight=(\d+) count=(\d+)")
+UART_SNV = re.compile(r"osal_snv_(read|write):([0-9a-fA-F]+),(\d+)")
+
+
+def parse_uart_dpls(ts: str, msg: str) -> dict[str, object] | None:
+    base: dict[str, object] = {"ts": ts, "source": "uart", "tag": "uart", "raw": msg}
+    match = UART_DPLS_MODE.search(msg)
+    if match:
+        return {**base, "kind": "hw_mode", "mode": int(match.group(1))}
+    match = UART_DPLS_LED.search(msg)
+    if match:
+        return {**base, "kind": "hw_led", "on": int(match.group(1))}
+    match = UART_DPLS_CCCD.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_cccd",
+            "conn": int(match.group(1)),
+            "cfg": int(match.group(2), 16),
+            "rc": int(match.group(3)),
+        }
+    match = UART_DPLS_TX.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_tx",
+            "bytes": int(match.group(1)),
+            "type_wire": int(match.group(2), 16),
+            "notify": int(match.group(3)),
+            "rc": int(match.group(4)),
+        }
+    match = UART_DPLS_QTX.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_qtx",
+            "bytes": int(match.group(1)),
+            "type_wire": int(match.group(2), 16),
+            "count": int(match.group(3)),
+        }
+    match = UART_DPLS_RX.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_rx",
+            "bytes": int(match.group(1)),
+            "type_wire": int(match.group(2), 16),
+        }
+    match = UART_DPLS_CONN.search(msg)
+    if match:
+        return {**base, "kind": "hw_conn", "handle": int(match.group(1))}
+    if "DPLS DISC" in msg:
+        return {**base, "kind": "hw_disc"}
+    match = UART_DPLS_BOOT.search(msg)
+    if match:
+        return {**base, "kind": "hw_boot", "settings": int(match.group(1))}
+    match = UART_DPLS_CFM.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_cfm",
+            "inflight": int(match.group(1)),
+            "count": int(match.group(2)),
+        }
+    match = UART_SNV.search(msg)
+    if match:
+        return {
+            **base,
+            "kind": "hw_snv",
+            "op": match.group(1),
+            "id": int(match.group(2), 16),
+            "length": int(match.group(3)),
+        }
+    return None
 
 
 def emit(events: list[dict[str, object]], event: dict[str, object]) -> None:
@@ -98,6 +180,10 @@ def handle_message(ts: str, source: str, tag: str, msg: str, events: list[dict[s
         return
 
     if source == "uart":
+        uart_event = parse_uart_dpls(ts, msg)
+        if uart_event is not None:
+            emit(events, uart_event)
+            return
         emit(events, {**base, "kind": "uart", "message": msg})
         return
 

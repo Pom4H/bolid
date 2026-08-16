@@ -10,11 +10,14 @@
 typedef uint8 (*dpls_gatt_rx_cb_t)(const uint8 *data, uint16 length);
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback);
-/* Returns the GATT_Indication result: SUCCESS means it was accepted and an ATT
- * confirmation will follow; a transient error (MSG_BUFFER_NOT_AVAIL /
- * bleMemAllocError) means retry; anything else is permanent (not subscribed /
- * not connected / too big for the negotiated MTU). */
+/* SUCCESS: the ATT PDU left the stack. If dpls_gatt_needs_confirmation() is
+ * true, wait for ATT_HANDLE_VALUE_CFM (or the TX confirm timeout) before the
+ * next frame; notifications do not confirm. Transient errors (blePending /
+ * bleMemAllocError / MSG_BUFFER_NOT_AVAIL / bleNotConnected) mean retry;
+ * ATT_ERR_INVALID_VALUE_SIZE is the only drop. */
 bStatus_t dpls_gatt_send_indication(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
+/* True only for indicate-only CCCD. Samsung writes 0x03 then never confirms. */
+bool dpls_gatt_needs_confirmation(uint16 conn_handle);
 bool dpls_gatt_subscribed(void);
 
 /* IDENTIFY uses the confirmation of its semantic ACK as the physical phase-zero

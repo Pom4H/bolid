@@ -12,15 +12,23 @@ object DplsBle {
     const val PREFERRED_MTU = 247
     const val ATT_HEADER_BYTES = 3
 
-    // Protocol v2 uses one confirmed TX path. Keep the legacy property name until
-    // platform adapters are renamed together; the value intentionally enables indication only.
-    val CCCD_ENABLE_INDICATE_NOTIFY = byteArrayOf(0x02, 0x00)
+    // Samsung SM-A135F only completes CCCD when both bits are set (0x03).
+    // Firmware then uses GATT_Notification so AUTH_RESULT is not stuck on a
+    // confirmation that this stack never sends. Mac CBPeripheralManager may
+    // reject 0x03 (GATT 245); the Android transport falls back to notify-only.
+    val CCCD_ENABLE_NOTIFY = byteArrayOf(0x01, 0x00)
+    val CCCD_ENABLE_INDICATE_NOTIFY = byteArrayOf(0x03, 0x00)
 
     fun displayName(advertisedName: String?, peripheralName: String?, deviceId: Long?): String {
-        advertisedName?.takeIf { it.isNotBlank() }?.let { return it }
-        peripheralName?.takeIf { it.isNotBlank() }?.let { return it }
-        if (deviceId == null) return "Test-DPLS"
-        return "Test-DPLS-${(deviceId and 0xffff).toString(16).uppercase().padStart(4, '0')}"
+        val fromId = deviceId?.let(DplsAdvertisement::displayName)
+        val raw = advertisedName?.takeIf { it.isNotBlank() }
+            ?: peripheralName?.takeIf { it.isNotBlank() }
+        if (raw != null) {
+            DplsAdvertisement.parseAirName(raw)?.let { return DplsAdvertisement.displayName(it) }
+            if (fromId != null && (raw == "Test-DPLS" || fromId.startsWith(raw))) return fromId
+            return raw
+        }
+        return fromId ?: "Test-DPLS"
     }
 
     fun discovered(
@@ -32,12 +40,16 @@ object DplsBle {
         rssi: Int,
     ): DplsTransportDevice {
         val parsed = manufacturerPayload?.let { DplsAdvertisement.parse(it, manufacturerIncludesCompanyId) }
+        val deviceId = parsed?.deviceId
+            ?: DplsAdvertisement.parseAirName(advertisedName)
+            ?: DplsAdvertisement.parseAirName(peripheralName)
         return DplsTransportDevice(
             address = address,
-            name = displayName(advertisedName, peripheralName, parsed?.deviceId),
-            deviceId = parsed?.deviceId,
+            name = displayName(advertisedName, peripheralName, deviceId),
+            deviceId = deviceId,
             rssi = rssi,
             advStatus = parsed?.status ?: 0,
+            firmwareVersion = parsed?.firmwareVersion,
         )
     }
 }

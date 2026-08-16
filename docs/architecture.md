@@ -52,7 +52,7 @@ Firmware owns:
 - reserve and real-short safety overrides;
 - persistent settings/authentication lock/event journal;
 - physical ADC/readback and board mapping;
-- ATT indication serialization and confirmation timeout.
+- ATT indication serialization and confirmation timeout (host/zmu chip model: `firmware/phy6252_emu`).
 
 A mobile crash or stale connection must not be able to keep a dangerous output active indefinitely.
 
@@ -73,6 +73,8 @@ It owns:
 - the Compose `DplsApp` screen tree.
 
 `commonMain` must not import Android framework APIs, CoreBluetooth, UIKit or other platform-only APIs.
+
+The host lab (`tools/dpls-lab`, `mobile/web`) reuses that same `DplsApp`. The wasm phone talks to the hub over WebSocket (`LabBleTransport`); it is not a second protocol or UI. Native `dpls-ble` is only a CoreBluetooth adapter for the laptop radio (one role at a time: peripheral *or* central).
 
 ### Platform code owns operating-system adaptation
 
@@ -145,6 +147,8 @@ Put a test at the lowest layer that can prove the behavior once:
 - application/session behavior → `DplsClient` fake-transport common tests;
 - Android framework integration → Android lint/build + hardware E2E;
 - iOS framework/export integration → Kotlin/Native tests + XCTest smoke;
+- host product path without a phone → `bash tools/soft_ble_e2e.sh` (`DplsClient` ↔ `dpls_simulator`);
+- interactive lab / wasm phone / laptop BLE → `bash tools/dpls_lab.sh`;
 - physical outputs/BLE pairing/radio behavior → hardware bring-up/E2E.
 
 The common suite includes CRC and crypto known-answer vectors, all-message round trips, binary control/state/log contracts, session reset tests, shared-controller flow tests, stale command-id rejection, 10,000 malformed decoder inputs and 2,000 randomized valid frame round trips.

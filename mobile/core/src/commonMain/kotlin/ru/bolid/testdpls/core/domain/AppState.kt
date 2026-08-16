@@ -21,6 +21,8 @@ data class DiscoveredDevice(
     val realShort: Boolean = false,
     val fromReserve: Boolean = false,
     val reserveLow: Boolean = false,
+    val firmwareVersion: String? = null,
+    val kind: String? = null,
 ) {
     val hasLineFault: Boolean get() = realShort || reserveLow || fromReserve
 }

@@ -48,9 +48,14 @@ arm-none-eabi-gcc \
     -ffunction-sections -fdata-sections \
     -Wall -Wextra -Werror \
     -I"$ROOT/firmware/include" \
+    -I"$ROOT/firmware/sim" \
+    -I"$ROOT/firmware/phy6252_emu" \
     -I"$OUT" \
     -T"$ROOT/firmware/zmu/link.ld" \
     "$ROOT/firmware/zmu/zmu_e2e.c" \
+    "$ROOT/firmware/sim/dpls_sim_board.c" \
+    "$ROOT/firmware/phy6252_emu/phy6252_emu.c" \
+    "$ROOT/firmware/src/dpls_hmac.c" \
     "$ROOT/firmware/src/dpls_protocol.c" \
     "$ROOT/firmware/src/dpls_server.c" \
     "$ROOT/firmware/src/dpls_safety.c" \

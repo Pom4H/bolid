@@ -551,7 +551,8 @@ private fun Devices(state: DplsUiState, c: DplsController, open: (DiscoveredDevi
         val scanHovered by scanInteraction.collectIsHoveredAsState()
         Button(
             onClick = {
-                if (state.scanning) c.stopScan() else c.startScan()
+                if (state.scanning && state.devices.isNotEmpty()) c.stopScan()
+                else c.startScan()
             },
             interactionSource = scanInteraction,
             modifier = Modifier
@@ -2326,13 +2327,25 @@ private fun FaultChip(label: String, color: Color) {
     )
 }
 
-private fun deviceListCaption(device: DiscoveredDevice): String = when {
-    device.realShort -> "КЗ изолировано"
-    device.reserveLow -> "Низкий резерв"
-    device.fromReserve -> "Питание от резерва"
-    device.deviceId != null ->
-        "ID ${(device.deviceId and 0xffff).toString(16).uppercase().padStart(4, '0')}"
-    else -> "Test-DPLS"
+private fun deviceListCaption(device: DiscoveredDevice): String {
+    val id = device.deviceId?.let { id ->
+        "ID ${(id and 0xffff).toString(16).uppercase().padStart(4, '0')}"
+    }
+    val fw = device.firmwareVersion?.takeIf { it.isNotBlank() }
+    val source = when (device.kind) {
+        "ble" -> "плата"
+        "sim" -> "сим"
+        else -> null
+    }
+    val fault = when {
+        device.realShort -> "КЗ изолировано"
+        device.reserveLow -> "Низкий резерв"
+        device.fromReserve -> "Питание от резерва"
+        else -> null
+    }
+    if (fault != null) return listOfNotNull(fw, fault).joinToString(" · ")
+    val parts = listOfNotNull(fw, id, source)
+    return if (parts.isEmpty()) "Test-DPLS" else parts.joinToString(" · ")
 }
 
 @Composable

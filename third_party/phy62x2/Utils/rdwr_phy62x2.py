@@ -399,7 +399,7 @@ class phyflasher:
 		self._port.setDTR(False) #TM  (hi)
 		self._port.setRTS(False) #RSTN (hi)
 		self._port.timeout = 0.04
-		ttcl = 250
+		ttcl = 1000 # ~40 s: KEY1 is released from chat, not from the script console
 		fct_mode = False
 		pkt = 'UXTDWU' # UXTL16 UDLL48 UXTDWU
 		while ttcl > 0:

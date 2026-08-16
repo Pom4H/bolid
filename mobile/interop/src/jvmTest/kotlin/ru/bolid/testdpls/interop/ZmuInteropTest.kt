@@ -2,6 +2,8 @@ package ru.bolid.testdpls.interop
 
 import java.io.File
 import kotlin.test.Test
+import ru.bolid.testdpls.core.protocol.DplsAuth
+import ru.bolid.testdpls.core.protocol.DplsCrypto
 import ru.bolid.testdpls.core.protocol.DplsProtocol
 import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
@@ -57,9 +59,16 @@ private fun request(
 )
 
 private fun requests(): List<Request> {
+    val salt = ByteArray(DplsAuth.SALT_SIZE) { index -> (0x40 + index).toByte() }
+    val verifier = DplsCrypto.deriveVerifier("TestDpls01", salt)
+    val deviceNonce = ByteArray(DplsAuth.NONCE_SIZE) { index -> (0x14 + index).toByte() }
+    val mac = DplsCrypto.hmacSha256(
+        verifier,
+        DplsAuth.proofMessage(deviceNonce, clientNonce, SESSION_ID),
+    )
     val proof = ByteArray(48).also { payload ->
         clientNonce.copyInto(payload, 0)
-        repeat(32) { index -> payload[16 + index] = 0x55 }
+        mac.copyInto(payload, 16)
     }
     val timeSync = sessionPayload(4).also { putU32(it, 12, 1_786_732_800L) }
     val deviceName = "ZmuLab01".encodeToByteArray()

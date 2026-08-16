@@ -82,5 +82,12 @@ class DplsControlMessagesTest {
         val legacy = DplsAdvertisement.parse(iosPayload, includesCompanyId = true)
         assertEquals(0x3B31, legacy.deviceId)
         assertEquals(0, legacy.status)
+        assertEquals(null, legacy.firmwareVersion)
+
+        val withFw = byteArrayOf(0x31, 0x3B, 0x00, 0x00, 0x05, 2, 1, 0)
+        val parsedFw = DplsAdvertisement.parse(withFw, includesCompanyId = false)
+        assertEquals(0x3B31, parsedFw.deviceId)
+        assertEquals(5, parsedFw.status)
+        assertEquals("2.1.0", parsedFw.firmwareVersion)
     }
 }

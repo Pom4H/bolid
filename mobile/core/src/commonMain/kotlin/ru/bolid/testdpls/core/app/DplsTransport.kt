@@ -42,6 +42,8 @@ data class DplsTransportDevice(
     val deviceId: Long?,
     val rssi: Int,
     val advStatus: Int = 0,
+    val firmwareVersion: String? = null,
+    val kind: String? = null,
 )
 
 /** Tiny platform surface that cannot be made deterministic in commonMain. */

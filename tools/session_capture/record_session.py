@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_DIR = ROOT / "tmp" / "sessions"
+ADB = os.environ.get("ADB") or os.path.expanduser("~/Library/Android/sdk/platform-tools/adb")
 LOGCAT_TAGS = (
     "TestDplsBle:I",
     "TestDplsSession:I",
@@ -53,7 +54,7 @@ class TeeWriter:
 
 
 def adb_base(serial: str | None) -> list[str]:
-    cmd = ["adb"]
+    cmd = [ADB]
     if serial:
         cmd.extend(["-s", serial])
     return cmd

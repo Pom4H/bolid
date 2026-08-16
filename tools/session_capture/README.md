@@ -3,6 +3,8 @@
 Goal: record how a **real phone ↔ real PHY6252 board** behaves in real time, then
 use those traces to harden `firmware/sim/dpls_simulator.c` and soft-BLE scenarios.
 
+Replay sends `CCCD 3` then `LAB` (Samsung notify + USB PB-03F voltages). Notify TX is paced by `TICK`, not `CONFIRM`.
+
 This is scaffolding — not a claim that the host simulator equals the Chinese board.
 
 ## Quick path

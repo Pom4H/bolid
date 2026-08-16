@@ -11,6 +11,7 @@
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
+#include "dpls_server.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
@@ -28,9 +29,18 @@
 static uint8 app_task_id;
 static uint8 link_up;
 
+/* ADV is already 29/31 bytes (flags + 128-bit UUID + manufacturer id).
+ * Firmware version rides in the scan response; Android concatenates the two
+ * manufacturer payloads for company 0x0B01 into id + status + major.minor.patch. */
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
+    'T','e','s','t','-','D','P','L','S','-','0','0','0','0',
+    0x08, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+    0x01, 0x0b,
+    0x00,
+    DPLS_FW_VERSION_MAJOR,
+    DPLS_FW_VERSION_MINOR,
+    DPLS_FW_VERSION_PATCH
 };
 
 static uint8 advertising_data[] = {
@@ -127,7 +137,7 @@ static gapBondCBs_t bond_callbacks = { NULL, bond_pair_state_cb };
 void SimpleBLEPeripheral_Init(uint8 task_id)
 {
     uint8 advertising_enabled = FALSE;
-    uint8 update_enabled = TRUE;
+    uint8 update_enabled = FALSE;
     uint8 channels = GAP_ADVCHAN_37 | GAP_ADVCHAN_38 | GAP_ADVCHAN_39;
     uint8 advertising_type = LL_ADV_CONNECTABLE_UNDIRECTED_EVT;
     uint16 advertising_off_time = 0;
@@ -217,6 +227,14 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         GAPBondMgr_Register(&bond_callbacks);
         return events ^ SBP_START_DEVICE_EVT;
     }
+    /* RX before TICK: AUTH_PROOF must be processed before the encrypt-timeout
+     * tick. Do not pump TX here and do not clear TX_EVT — rc1 sent from the
+     * dedicated TX turn so GATT_Notification is not nested under the write. */
+    if (events & DPLS_PHY6252_RX_EVT) {
+        dpls_phy6252_process_rx();
+        schedule_led_if_needed();
+        return events ^ DPLS_PHY6252_RX_EVT;
+    }
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();
         schedule_led_if_needed();
@@ -227,11 +245,6 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & SBP_DPLS_LED_EVT) {
         schedule_led_if_needed();
         return events ^ SBP_DPLS_LED_EVT;
-    }
-    if (events & DPLS_PHY6252_RX_EVT) {
-        dpls_phy6252_process_rx();
-        schedule_led_if_needed();
-        return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & DPLS_PHY6252_TX_EVT) {
         dpls_phy6252_process_tx();

@@ -96,6 +96,11 @@ def main() -> int:
 
     for line in cmd("CONNECT"):
         print(line)
+    notify_mode = True
+    for line in cmd("CCCD 3"):
+        print(line)
+    for line in cmd("LAB"):
+        print(line)
 
     matched = 0
     for index, hex_frame in enumerate(tx_frames, start=1):
@@ -103,10 +108,23 @@ def main() -> int:
         decoded = decode_frame(raw) if raw is not None else None
         label = decoded.type_name if decoded is not None else "?"
         print(f"# {index}/{len(tx_frames)} TX {label} {hex_frame}")
+        got_tx = False
         for line in cmd(f"FRAME {hex_frame}"):
             print(line)
             if line.startswith("TX "):
                 matched += 1
+                got_tx = True
+        # Indicate-only CCCD waits for ATT CFM. Samsung writes 0x03 (notify+
+        # indicate); firmware then uses GATT_Notification and completes TX
+        # without CONFIRM — matching the lab UART (DPLS TX notify=1, no CFM).
+        if got_tx and not notify_mode:
+            while got_tx:
+                got_tx = False
+                for line in cmd("CONFIRM"):
+                    print(line)
+                    if line.startswith("TX "):
+                        matched += 1
+                        got_tx = True
         if args.tick_ms > 0:
             for line in cmd(f"TICK {args.tick_ms}"):
                 print(line)

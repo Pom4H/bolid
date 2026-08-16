@@ -11,6 +11,8 @@ class DplsBleTest {
         assertEquals("Board", DplsBle.displayName(null, "Board", 0x3B31))
         assertEquals("Test-DPLS-3B31", DplsBle.displayName(null, null, 0x3B31))
         assertEquals("Test-DPLS", DplsBle.displayName("  ", "", null))
+        assertEquals("Test-DPLS-1234", DplsBle.displayName("DPLS1234", null, null))
+        assertEquals("Test-DPLS-1234", DplsBle.displayName("Test-DPLS", null, 0x1234))
     }
 
     @Test
@@ -28,6 +30,17 @@ class DplsBleTest {
         assertEquals(0x3B31, androidScan.deviceId)
         assertEquals(5, androidScan.advStatus)
         assertEquals(-51, androidScan.rssi)
+        assertEquals(null, androidScan.firmwareVersion)
+
+        val withFw = DplsBle.discovered(
+            address = "AA:BB",
+            advertisedName = "Test-DPLS-3B31",
+            peripheralName = null,
+            manufacturerPayload = byteArrayOf(0x31, 0x3B, 0x00, 0x00, 0x00, 1, 4, 0),
+            manufacturerIncludesCompanyId = false,
+            rssi = -40,
+        )
+        assertEquals("1.4.0", withFw.firmwareVersion)
 
         val iosScan = DplsBle.discovered(
             address = "uuid",
@@ -44,5 +57,9 @@ class DplsBleTest {
         val empty = DplsBle.discovered("x", null, null, null, false, 0)
         assertNull(empty.deviceId)
         assertEquals("Test-DPLS", empty.name)
+
+        val macAir = DplsBle.discovered("mac", "DPLS1234", null, null, false, -67)
+        assertEquals(0x1234, macAir.deviceId)
+        assertEquals("Test-DPLS-1234", macAir.name)
     }
 }

@@ -15,7 +15,7 @@ import ru.bolid.testdpls.core.app.DplsTransportListener
 /**
  * Soft-BLE adapter: maps [DplsTransport] onto the host `dpls_simulator` stdio protocol.
  *
- * stdin:  CONNECT / FRAME <hex> / TICK <ms> / DISCONNECT / QUIT
+ * stdin:  CONNECT / CCCD 3 / FRAME <hex> / TICK <ms> / CONFIRM / DISCONNECT / QUIT
  * stdout: READY / TX <hex> / ACCEPT / DONE / MODE / LED / …
  *
  * Indications are queued (like a BLE callback looper) so [DplsClient] can finish
@@ -48,14 +48,23 @@ class SimulatorBleTransport(
 
     fun start(): Unit = lock.withLock {
         check(process == null) { "simulator already started" }
-        val builder = ProcessBuilder(simulatorPath)
+        val builder = ProcessBuilder(simulatorPath, "--name", DEVICE_NAME)
             .redirectErrorStream(true)
         val started = builder.start()
         process = started
         reader = BufferedReader(InputStreamReader(started.inputStream, StandardCharsets.UTF_8))
         writer = BufferedWriter(OutputStreamWriter(started.outputStream, StandardCharsets.UTF_8))
-        val ready = readLineLocked()
-        check(ready == "READY DPLS2") { "unexpected simulator banner: $ready" }
+        while (true) {
+            val line = readLineLocked()
+            if (line == "READY DPLS2") break
+            check(
+                line.startsWith("JOURNAL ") ||
+                    line.startsWith("MODE ") ||
+                    line.startsWith("LED ") ||
+                    line.startsWith("STATE ") ||
+                    line.startsWith("DIAG "),
+            ) { "unexpected simulator banner: $line" }
+        }
     }
 
     /** Notify the client that the soft radio is up (call once after [setListener]). */
@@ -75,6 +84,13 @@ class SimulatorBleTransport(
         listener.onSubscribed(WRITE_LIMIT)
     }
 
+    /** Complete GAP/GATT if the client already called [connect] (auto-reconnect). */
+    fun finishLinkIfPending(): Boolean {
+        if (!pendingLinkUp) return false
+        completeLink()
+        return true
+    }
+
     /**
      * Deliver queued TX/DISCONNECT callbacks and flush any FRAME commands that were
      * enqueued from nested [send] calls during those callbacks.
@@ -88,8 +104,12 @@ class SimulatorBleTransport(
                     executeCommandLocked(deferredCommands.removeFirst())
                 }
                 when {
-                    pendingIndications.isNotEmpty() ->
+                    pendingIndications.isNotEmpty() -> {
                         listener.onBytes(pendingIndications.removeFirst())
+                        /* Samsung writes CCCD 0x03 and never sends ATT CFM.
+                         * PHY6252 advances the notify queue on the 80 ms pace tick. */
+                        deferredCommands.addLast("TICK 80")
+                    }
                     pendingDisconnects.isNotEmpty() ->
                         listener.onDisconnected(pendingDisconnects.removeFirst())
                     else -> break
@@ -124,6 +144,7 @@ class SimulatorBleTransport(
         check(!closed)
         check(address == ADDRESS) { "unknown soft-BLE address: $address" }
         runCommandLocked("CONNECT")
+        runCommandLocked("CCCD 3")
         linked = true
         pendingLinkUp = true
         return true
@@ -214,6 +235,7 @@ class SimulatorBleTransport(
                     line.startsWith("LED ") ||
                     line.startsWith("DIAG ") ||
                     line.startsWith("STATE ") ||
+                    line.startsWith("JOURNAL ") ||
                     line.startsWith("ERROR ") -> {
                     // Host-side hardware breadcrumbs for session capture parity.
                     System.err.println("TestDplsSim: $line")

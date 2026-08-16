@@ -45,6 +45,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var negotiatedMtu = 23
     private var pairing = false
     private var subscribed = false
+    private var servicesDiscovered = false
 
     private val writeQueue = ArrayDeque<ByteArray>()
     private var writeInProgress = false
@@ -60,6 +61,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var cccdRetryCount = 0
     private var suppressDisconnectEvent = false
     private var pairingFailed = false
+    /** Real PHY6252 advertisements carry 0x0B01; Mac CBPeripheralManager usually strips it. */
+    private val requiresBond = mutableMapOf<String, Boolean>()
+    private var cccdValue = DplsBle.CCCD_ENABLE_INDICATE_NOTIFY
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = acceptScan(result)
@@ -97,7 +101,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                             }
                         }
                         BluetoothDevice.BOND_NONE -> if (pairing && !pairingFailed) {
-                            failPairingNotConfirmed()
+                            if (gatt != null) {
+                                Log.i(TAG, "bond cleared while connected — continue GATT")
+                                beginGattNegotiation()
+                            } else {
+                                failPairingNotConfirmed()
+                            }
                         }
                     }
                 }
@@ -112,6 +121,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                         rx = null
                         tx = null
                         subscribed = false
+                        servicesDiscovered = false
                         resetWrites()
                         emit { onBluetoothUnavailable() }
                     }
@@ -207,6 +217,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             tx = null
             pairing = false
             subscribed = false
+            servicesDiscovered = false
             resetWrites()
             if (clearSelection) selectedAddress = null
         }
@@ -231,13 +242,15 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private fun acceptScan(result: ScanResult) {
         val record = result.scanRecord ?: return
         if (!record.serviceUuids.orEmpty().contains(ParcelUuid(SERVICE_UUID))) return
+        val manufacturerPayload = record.getManufacturerSpecificData(DplsBle.MANUFACTURER_ID)
+        requiresBond[result.device.address] = manufacturerPayload != null && manufacturerPayload.isNotEmpty()
         emit {
             onDiscovered(
                 DplsBle.discovered(
                     address = result.device.address,
                     advertisedName = record.deviceName,
                     peripheralName = result.device.name,
-                    manufacturerPayload = record.getManufacturerSpecificData(DplsBle.MANUFACTURER_ID),
+                    manufacturerPayload = manufacturerPayload,
                     manufacturerIncludesCompanyId = false,
                     rssi = result.rssi,
                 ),
@@ -268,12 +281,16 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                         schedulePairingTimeout()
                     }
                     else -> {
-                        pairing = true
-                        schedulePairingTimeout()
-                        if (!current.device.createBond()) {
-                            pairing = false
-                            cancelPairingTimeout()
-                            emit { onTransportError("Не удалось начать сопряжение") }
+                        if (requiresBond[current.device.address] != true) {
+                            Log.i(TAG, "GATT without bond (lab / no manufacturer data)")
+                            beginGattNegotiation()
+                        } else {
+                            pairing = true
+                            schedulePairingTimeout()
+                            if (!current.device.createBond()) {
+                                Log.i(TAG, "createBond refused — continue GATT")
+                                beginGattNegotiation()
+                            }
                         }
                     }
                 }
@@ -289,6 +306,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 rx = null
                 tx = null
                 subscribed = false
+                servicesDiscovered = false
                 resetWrites()
                 cancelCccdRetry()
                 if (closingGatt === current) {
@@ -343,6 +361,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (gatt !== this@AndroidBleTransport.gatt) return
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
             Log.i(TAG, "MTU changed mtu=$negotiatedMtu status=$status")
+            if (servicesDiscovered || subscribed) {
+                Log.i(TAG, "skip rediscovery after MTU update")
+                return
+            }
             if (!gatt.discoverServices()) {
                 emit { onTransportError("Не удалось запустить поиск BLE-службы") }
             }
@@ -359,6 +381,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 return
             }
             Log.i(TAG, "Services discovered")
+            servicesDiscovered = true
+            if (subscribed) {
+                Log.i(TAG, "CCCD already written; skip duplicate subscribe")
+                return
+            }
             writeCccd()
         }
 
@@ -371,6 +398,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (gatt !== this@AndroidBleTransport.gatt || descriptor.uuid != CCCD_UUID) return
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 cccdRetryCount = 0
+                if (subscribed) {
+                    Log.i(TAG, "CCCD written (duplicate ignored)")
+                    return
+                }
                 subscribed = true
                 Log.i(TAG, "CCCD written")
                 emit { onSubscribed((negotiatedMtu - ATT_HEADER_BYTES).coerceAtLeast(20)) }
@@ -381,9 +412,18 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 pairing = true
                 schedulePairingTimeout()
                 if (gatt.device.bondState == BluetoothDevice.BOND_NONE && !gatt.device.createBond()) {
-                    failPairingNotConfirmed()
+                    Log.i(TAG, "CCCD auth createBond refused — retry CCCD")
+                    scheduleCccdRetry()
                     return
                 }
+                scheduleCccdRetry()
+                return
+            }
+            if (status == GATT_CCCD_REJECTED &&
+                !cccdValue.contentEquals(DplsBle.CCCD_ENABLE_NOTIFY)
+            ) {
+                cccdValue = DplsBle.CCCD_ENABLE_NOTIFY
+                Log.i(TAG, "CCCD $status — fallback notify-only")
                 scheduleCccdRetry()
                 return
             }
@@ -451,7 +491,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             emit { onTransportError("Дескриптор BLE-индикаций не найден") }
             return
         }
-        val result = current.writeDescriptor(cccd, DplsBle.CCCD_ENABLE_INDICATE_NOTIFY)
+        val result = current.writeDescriptor(cccd, cccdValue)
+        Log.i(
+            TAG,
+            "CCCD write submit result=$result value=${cccdValue.toHexUpper()}",
+        )
         if (result == BluetoothStatusCodes.SUCCESS) return
         Log.i(TAG, "CCCD submit result=$result retry=$cccdRetryCount")
         if (result in TRANSIENT_CCCD_SUBMIT && cccdRetryCount < MAX_CCCD_RETRIES) {
@@ -565,7 +609,13 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             }
         }.also { handler.postDelayed(it, PAIRING_POLL_MS) }
         pairingTimeout = Runnable {
-            if (pairing) failPairingNotConfirmed()
+            if (!pairing) return@Runnable
+            if (gatt != null) {
+                Log.i(TAG, "pairing timeout — continue GATT")
+                beginGattNegotiation()
+            } else {
+                failPairingNotConfirmed()
+            }
         }.also { handler.postDelayed(it, PAIRING_TIMEOUT_MS) }
     }
 
@@ -581,6 +631,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         selectedAddress = address
         pairing = false
         subscribed = false
+        servicesDiscovered = false
         negotiatedMtu = 23
         resetWrites()
         cancelPairingTimeout()
@@ -591,10 +642,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         cancelCccdRetry()
         connectAttempts = 0
         if (gatt != null || closingGatt != null) {
+            suppressDisconnectEvent = true
             releaseGatt()
             scheduleOpenGatt(REOPEN_DELAY_MS)
             return
         }
+        suppressDisconnectEvent = false
         scheduleOpenGatt(SCAN_SETTLE_MS)
     }
 
@@ -624,6 +677,13 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         connectAttempts++
         cccdRetryCount = 0
         pairingFailed = false
+        servicesDiscovered = false
+        subscribed = false
+        rx = null
+        tx = null
+        negotiatedMtu = 23
+        cccdValue = DplsBle.CCCD_ENABLE_INDICATE_NOTIFY
+        resetWrites()
         Log.i(TAG, "connectGatt $address attempt=$connectAttempts")
         gatt = device.connectGatt(
             appContext,
@@ -699,6 +759,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private const val GATT_ERROR = 133
         private const val GATT_INSUFFICIENT_AUTHENTICATION = 5
         private const val GATT_INSUFFICIENT_ENCRYPTION = 15
+        private const val GATT_CCCD_REJECTED = 245
         private const val CLOSE_TIMEOUT_MS = 1_200L
         private const val REOPEN_DELAY_MS = 500L
         private const val SCAN_SETTLE_MS = 180L
@@ -713,6 +774,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private val TRANSIENT_CCCD_STATUSES = setOf(
             GATT_CONN_TIMEOUT,
             GATT_ERROR,
+            GATT_CCCD_REJECTED,
             137,
             143,
             BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY,

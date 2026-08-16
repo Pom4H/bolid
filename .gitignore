@@ -28,6 +28,10 @@ mobile/**/build/
 mobile/.gradle/
 mobile/local.properties
 mobile/keystore.properties
-**/*.keystore
+tools/dpls-lab/node_modules/
+tools/dpls-lab/native/dpls-ble
+/firmware/Testing/
+/TestDPLS/
+**/xcuserdata/
 
 **/__pycache__/

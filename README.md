@@ -15,10 +15,12 @@ The repository follows three ownership rules:
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
 | `firmware/zmu/` | Cortex-M0 E2E harness for the [zmu](https://github.com/jjkt/zmu) emulator |
 | `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
-| `mobile/android/` | Android shell: permissions, Activity, debug E2E |
-| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap |
+| `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.0**) |
+| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.0**) |
+| `mobile/web/` | Compose wasm phone for the host lab (`LabBleTransport` over WebSocket) |
 | `docs/` | Architecture, bring-up and PHY6252 engineering references |
-| `tools/` | Build, flash, lint, coverage and one-command checks |
+| `tools/` | Build, flash, lint, coverage, lab and one-command checks |
+| `tools/dpls-lab/` | Host lab: N simulators, native BLE central/peripheral, wasm phone |
 | `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
 
 The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
@@ -110,6 +112,17 @@ bash tools/soft_ble_e2e.sh
 
 This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
 
+### Host lab (simulator + wasm phone + laptop BLE)
+
+```sh
+bash tools/dpls_lab.sh
+# http://127.0.0.1:8787
+```
+
+The iframe on the right is the same Compose `DplsApp` as Android/iOS (`mobile/web`). The laptop can advertise a sim (`BLE сервер`) or scan real boards (`Найти плату`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
+
+Current firmware and phone version is **1.4.0** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
+
 ### Capture real phone↔board sessions (for simulator fidelity)
 
 Record live logcat (BLE frames + client `STATE`/`E2E` markers) and optionally UART, then parse/replay into `dpls_simulator`:
@@ -128,6 +141,7 @@ See `tools/session_capture/README.md`.
 cmake -S firmware -B firmware/build
 cmake --build firmware/build
 ctest --test-dir firmware/build --output-on-failure
+# phy6252_emu is the reusable PHY6252 ATT/OSAL host model; DPLS sim/zmu sit on top of it.
 
 # PHY6252 target
 tools/build_firmware.sh keil tmp/test-dpls.hex

@@ -51,6 +51,9 @@ TESTS=(
     test_calib
     test_protocol
     test_safety
+    test_hmac
+    test_sim_att
+    test_phy6252_emu
     test_adc_irq_model
 )
 
@@ -62,7 +65,27 @@ for name in "${TESTS[@]}"; do
     log="$OUT/${name}.log"
     echo "=== zmu $name ==="
     extras=()
-    if [[ "$name" != "test_adc_irq_model" ]]; then
+    includes=(-I"$OUT/include" -I"$ROOT/firmware/include")
+    if [[ "$name" == "test_adc_irq_model" ]]; then
+        extras=()
+    elif [[ "$name" == "test_phy6252_emu" ]]; then
+        src="$ROOT/firmware/phy6252_emu/test_phy6252_emu.c"
+        extras=("$ROOT/firmware/phy6252_emu/phy6252_emu.c")
+        includes+=(-I"$ROOT/firmware/phy6252_emu")
+    elif [[ "$name" == "test_hmac" ]]; then
+        extras=("$ROOT/firmware/src/dpls_hmac.c")
+    elif [[ "$name" == "test_sim_att" ]]; then
+        extras=(
+            "$ROOT/firmware/sim/dpls_sim_board.c"
+            "$ROOT/firmware/phy6252_emu/phy6252_emu.c"
+            "$ROOT/firmware/src/dpls_hmac.c"
+            "$ROOT/firmware/src/dpls_protocol.c"
+            "$ROOT/firmware/src/dpls_server.c"
+            "$ROOT/firmware/src/dpls_safety.c"
+            "$ROOT/firmware/src/dpls_led.c"
+        )
+        includes+=(-I"$ROOT/firmware/sim" -I"$ROOT/firmware/phy6252_emu")
+    else
         extras=(
             "$ROOT/firmware/src/dpls_protocol.c"
             "$ROOT/firmware/src/dpls_server.c"
@@ -77,8 +100,7 @@ for name in "${TESTS[@]}"; do
         -D__STARTUP_CLEAR_BSS -D__STACK_SIZE=0x8000 -D__HEAP_SIZE=0x2000 \
         -ffunction-sections -fdata-sections \
         -Wall -Wextra -Werror \
-        -I"$OUT/include" \
-        -I"$ROOT/firmware/include" \
+        "${includes[@]}" \
         -T"$ROOT/firmware/zmu/link.ld" \
         "$src" \
         "${extras[@]}" \

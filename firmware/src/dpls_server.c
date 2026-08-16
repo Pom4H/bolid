@@ -506,8 +506,8 @@ static void handle_setup(dpls_server_t *s, const dpls_frame_t *f) {
         return;
     }
     s->session.hello_received = false;
-    dpls_server_log(s, EVT_PASSWORD_SET, 0);
     send_auth_result(s, f->sequence, DPLS_AUTH_SETUP_COMPLETE, 0);
+    dpls_server_log(s, EVT_PASSWORD_SET, 0);
     s->session.setup_disconnect_deadline_ms = s->now_ms + 500u;
 }
 
@@ -517,9 +517,9 @@ static void block_authentication(dpls_server_t *s, const dpls_frame_t *f) {
         s->hal.diagnostic_error) {
         s->hal.diagnostic_error(s->hal.context, false);
     }
-    dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
     send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED,
                      (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
+    dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
 }
 
 static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
@@ -544,20 +544,21 @@ static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
     if (s->hal.auth.verify_proof(s->hal.context, s->session.device_nonce,
                                  s->session.client_nonce, s->session.session_id,
                                  f->payload + DPLS_AUTH_NONCE_SIZE)) {
-        if (!s->session.authenticated) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
+        bool first_success = !s->session.authenticated;
         s->session.authenticated = true;
         s->session.failed_auth_attempts = 0;
         s->session.last_authenticated_activity_ms = s->now_ms;
-        if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
         send_auth_result(s, f->sequence, DPLS_AUTH_OK, 0);
+        if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
+        if (first_success) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
         return;
     }
     ++s->session.failed_auth_attempts;
-    dpls_server_log(s, EVT_AUTH_FAILURE, s->session.failed_auth_attempts);
     if (s->session.failed_auth_attempts >= DPLS_AUTH_MAX_ATTEMPTS) {
         block_authentication(s, f);
     } else {
         send_auth_result(s, f->sequence, DPLS_AUTH_DENIED, 0);
+        dpls_server_log(s, EVT_AUTH_FAILURE, s->session.failed_auth_attempts);
     }
 }
 
@@ -602,8 +603,8 @@ static void handle_password_set(dpls_server_t *s, const dpls_frame_t *f) {
         send_settings_result(s, f->sequence, DPLS_SETTINGS_WRITE_FAILED);
         return;
     }
-    dpls_server_log(s, EVT_PASSWORD_SET, 0);
     send_settings_result(s, f->sequence, DPLS_SETTINGS_OK);
+    dpls_server_log(s, EVT_PASSWORD_SET, 0);
     s->session.authenticated = false;
     memset(s->session.token, 0, sizeof(s->session.token));
     s->session.setup_disconnect_deadline_ms = s->now_ms + 500u;

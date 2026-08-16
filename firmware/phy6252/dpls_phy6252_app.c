@@ -7,6 +7,7 @@
 #include "dpls_led.h"
 #include "dpls_server.h"
 #include "OSAL.h"
+#include "log.h"
 #if defined(__GNUC__)
 /* adc.h prototypes static helpers that live in adc.c. GCC diagnoses them at
  * end of TU, so a push/pop around the include does not hide -Wunused-function. */
@@ -158,9 +159,14 @@ typedef struct {
  * one-in-flight pipeline would wedge behind it forever. On timeout the frame is
  * written off and the pump moves on; the client's next poll refreshes state. */
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
+#define DPLS_TX_NOTIFY_PACE_MS 80u
 static dpls_tx_queue_t tx;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
+static bool journal_snv_dirty;
+static uint8_t journal_dirty_block = 0xffu;
+static uint8_t journal_pending[DPLS_JOURNAL_BLOCK_SIZE];
+static uint8_t journal_pending_block = 0xffu;
 
 static dpls_calib_t line_calib;
 static dpls_calib_t vcap_calib;
@@ -209,6 +215,13 @@ static void journal_wr32(uint8_t *p, uint32_t value)
 static uint8_t *journal_load_block(uint8_t block_index)
 {
     if (journal_cached_block == block_index) return journal_block_cache;
+    if (journal_snv_dirty && journal_cached_block != 0xffu) {
+        /* Park the dirty page in RAM. osal_snv_write on the RX path stalls the
+         * radio long enough that AUTH_RESULT never leaves the queue. */
+        memcpy(journal_pending, journal_block_cache, sizeof(journal_pending));
+        journal_pending_block = journal_cached_block;
+        journal_snv_dirty = false;
+    }
     memset(journal_block_cache, 0, sizeof(journal_block_cache));
     (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
                         (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
@@ -310,6 +323,27 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
     return true;
 }
 
+static void journal_flush_snv(void)
+{
+    /* Flash erase during an in-flight notify stalls the LL: UART then shows
+     * QTX t=04, osal_snv_write + FS GC, and no DPLS TX — AUTH_RESULT never
+     * reaches the phone. */
+    if (tx.count != 0u || tx.in_flight) return;
+    if (journal_pending_block == 0xffu && !journal_snv_dirty) return;
+    LOG("DPLS SNV flush pending=%u dirty=%u\n",
+        journal_pending_block != 0xffu ? 1u : 0u,
+        journal_snv_dirty ? 1u : 0u);
+    if (journal_pending_block != 0xffu) {
+        (void)osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + journal_pending_block),
+                             (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_pending);
+        journal_pending_block = 0xffu;
+    }
+    if (!journal_snv_dirty) return;
+    (void)osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + journal_dirty_block),
+                         (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
+    journal_snv_dirty = false;
+}
+
 static bool journal_storage_append(void *context, const dpls_event_t *event)
 {
     uint8_t *block;
@@ -322,8 +356,13 @@ static bool journal_storage_append(void *context, const dpls_event_t *event)
     record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
     block = journal_load_block(block_index);
     journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event);
-    return osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, block) == SUCCESS;
+    /* Defer the flash write until AUTH_RESULT (or any other indication) has
+     * left the radio. A 120-byte SNV page erase on PHY6252 stalls the LL long
+     * enough for Samsung to drop the link — UART then shows RX t=03, two
+     * osal_snv_write:9b, DPLS DISC, and no QTX/TX t=04. */
+    journal_dirty_block = block_index;
+    journal_snv_dirty = true;
+    return true;
 }
 
 static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t *event)
@@ -411,6 +450,7 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     }
     hardware_mode = mode;
     control_sleep_guard(mode != DPLS_MODE_NORMAL);
+    LOG("DPLS MODE %u\n", (unsigned)mode);
     return true;
 }
 
@@ -434,6 +474,7 @@ static void status_led_output(void *context, bool on)
     hal_gpio_write(DPLS_PIN_LED_RED, 0);
     hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
+    LOG("DPLS LED %u\n", on ? 1u : 0u);
 }
 
 static void load_calibration(void)
@@ -830,7 +871,10 @@ static bool auth_lock_write(void *context, bool locked)
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
                          uint32_t session_id, const uint8_t proof[32])
 {
-    struct tc_hmac_state_struct hmac;
+    /* HMAC on the OSAL stack overflows the 1 KiB ARMCM0 stack: receive already
+     * uses 496 bytes, verify_proof was 344, total ~1092. UART then shows
+     * QTX n=20 t=04 followed by TX n=57347 and drop rc=13. */
+    static struct tc_hmac_state_struct hmac;
     uint8_t signed_data[36];
     uint8_t expected[32];
     uint8_t difference = 0;
@@ -845,8 +889,12 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
     signed_data[35] = (uint8_t)(session_id >> 24);
     if (!tc_hmac_set_key(&hmac, settings.verifier, sizeof(settings.verifier)) ||
         !tc_hmac_init(&hmac) || !tc_hmac_update(&hmac, signed_data, sizeof(signed_data)) ||
-        !tc_hmac_final(expected, sizeof(expected), &hmac)) return false;
+        !tc_hmac_final(expected, sizeof(expected), &hmac)) {
+        memset(&hmac, 0, sizeof(hmac));
+        return false;
+    }
     for (i = 0; i < sizeof(expected); ++i) difference |= (uint8_t)(expected[i] ^ proof[i]);
+    memset(&hmac, 0, sizeof(hmac));
     memset(expected, 0, sizeof(expected));
     memset(signed_data, 0, sizeof(signed_data));
     return difference == 0;
@@ -855,22 +903,46 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
 /* Send the head of the TX queue if nothing is in flight. Runs from the OSAL
  * task (via DPLS_PHY6252_TX_EVT or the tick), never nested under the RX handler,
  * so the ATT indication buffer stays off the receive path's stack. */
+static void tx_complete_head(void)
+{
+    if (tx.count == 0u) {
+        tx.in_flight = false;
+        return;
+    }
+    tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
+    --tx.count;
+    tx.in_flight = false;
+}
+
 static void tx_pump(void)
 {
     bStatus_t rc;
-    if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+    if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) {
+        if (tx.count != 0u) {
+            LOG("DPLS TX skip inflight=%u count=%u conn=%u\n",
+                tx.in_flight ? 1u : 0u,
+                tx.count,
+                connection_handle == INVALID_CONNHANDLE ? 0u : 1u);
+        }
+        return;
+    }
     rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
                                    tx.slots[tx.head].length, task_id);
     if (rc == SUCCESS) {
+        /* rc1: one PDU in flight until the stack is ready again. Immediate
+         * complete_head on notify re-pumped the queue on every LED tick,
+         * exhausted ATT buffers (rc=19), and drop-new swallowed AUTH_RESULT. */
         tx.in_flight = true;
         tx.in_flight_since_ms = now_ms();
-    } else if (rc == bleMemAllocError || rc == blePending) {
-        /* Transient: keep the head and retry from the next tick. */
+    } else if (rc == bleMemAllocError || rc == blePending || rc == MSG_BUFFER_NOT_AVAIL ||
+               rc == bleNotConnected) {
+        /* Keep the head. bleNotConnected from a CCCD read in the write turn is
+         * not a reason to discard AUTH_RESULT; TX_EVT / tick retries. */
     } else {
-        /* Permanent (not subscribed / too big for MTU / not connected): drop
-         * this frame so the queue cannot deadlock behind an unsendable head. */
-        tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
-        if (tx.count) --tx.count;
+        LOG("DPLS TX drop t=%02x rc=%u\n",
+            tx.slots[tx.head].length > 1u ? tx.slots[tx.head].data[1] : 0u,
+            rc);
+        tx_complete_head();
         if (tx.count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
     }
 }
@@ -880,18 +952,17 @@ static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
     (void)context;
     if (length > DPLS_TX_SLOT_SIZE) return false;
     if (tx.count >= DPLS_TX_QUEUE_DEPTH) {
-        /* Queue full: the client has stopped confirming. Fail safe rather than
-         * lose a control response — drop to Norma, reset the queue and drop the
-         * link so the reconnect starts clean. */
-        safe_normal(NULL);
-        memset(&tx, 0, sizeof(tx));
-        if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
+        LOG("DPLS QTX full t=%02x count=%u\n", length > 1u ? frame[1] : 0u, tx.count);
         return false;
     }
     memcpy(tx.slots[tx.tail].data, frame, length);
     tx.slots[tx.tail].length = (uint16)length;
     tx.tail = (uint8)((tx.tail + 1u) % DPLS_TX_QUEUE_DEPTH);
     ++tx.count;
+    LOG("DPLS QTX n=%u t=%02x count=%u\n",
+        (unsigned)length,
+        length > 1u ? frame[1] : 0u,
+        tx.count);
     osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
     return true;
 }
@@ -903,11 +974,8 @@ void dpls_phy6252_process_tx(void)
 
 void dpls_phy6252_tx_confirmed(void)
 {
-    if (tx.in_flight) {
-        tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
-        if (tx.count) --tx.count;
-        tx.in_flight = false;
-    }
+    LOG("DPLS CFM inflight=%u count=%u\n", tx.in_flight ? 1u : 0u, tx.count);
+    if (tx.in_flight) tx_complete_head();
     tx_pump();
 }
 
@@ -1073,6 +1141,7 @@ void dpls_phy6252_init(uint8 new_task_id)
 
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
+    LOG("DPLS boot settings=%u\n", (unsigned)settings_state);
 }
 
 static void erase_stored_bonds(void)
@@ -1115,6 +1184,7 @@ void dpls_phy6252_connected(uint16 conn_handle)
     /* An idle connection is allowed to sleep: the guard belongs to the power
      * stage, not to the link. See control_sleep_guard(). */
     dpls_server_connected(&server, now_ms());
+    LOG("DPLS CONN %u\n", conn_handle);
 }
 
 void dpls_phy6252_disconnected(void)
@@ -1128,6 +1198,7 @@ void dpls_phy6252_disconnected(void)
     connection_had_encryption = false;
     memset(&rx, 0, sizeof(rx));
     memset(&tx, 0, sizeof(tx));
+    LOG("DPLS DISC\n");
 }
 
 void dpls_phy6252_process_rx(void)
@@ -1151,8 +1222,10 @@ static void tick_link_security(uint32_t now)
             pre_auth_disconnect_window_ms = 0;
         }
     }
-    if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) && connected_at_ms != 0u &&
+    if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) &&
+        !connection_had_encryption && connected_at_ms != 0u &&
         (uint32_t)(now - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
+        LOG("DPLS KILL encrypt\n");
         connected_at_ms = 0;
         erase_bonds_and_drop_link();
     }
@@ -1183,9 +1256,10 @@ static void tick_measurements(void)
 
 static void tick_tx(uint32_t now)
 {
-    /* A lost ATT confirmation must not wedge every later response behind it. */
-    if (tx.in_flight &&
-        (uint32_t)(now - tx.in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
+    uint32_t pace_ms = dpls_gatt_needs_confirmation(connection_handle)
+                           ? DPLS_TX_CONFIRM_TIMEOUT_MS
+                           : DPLS_TX_NOTIFY_PACE_MS;
+    if (tx.in_flight && (uint32_t)(now - tx.in_flight_since_ms) >= pace_ms) {
         dpls_phy6252_tx_confirmed();
         return;
     }
@@ -1200,6 +1274,10 @@ void dpls_phy6252_tick(void)
     tick_measurements();
     dpls_server_tick(&server, now);
     tick_tx(now);
+    /* Journal flash must not share an OSAL turn with GATT_Notification:
+     * SNV GC after AUTH_RESULT notify leaves the PDU in the LL until erase,
+     * and Samsung never sees t=04. */
+    journal_flush_snv();
 }
 
 uint32 dpls_phy6252_led_tick(void)

@@ -23,7 +23,11 @@ cppcheck \
     --suppress=assertWithSideEffect \
     --suppress=unmatchedSuppression \
     -I "$ROOT/firmware/include" \
+    -I "$ROOT/firmware/sim" \
+    -I "$ROOT/firmware/phy6252_emu" \
     "$ROOT/firmware/src" \
     "$ROOT/firmware/include" \
+    "$ROOT/firmware/sim" \
+    "$ROOT/firmware/phy6252_emu" \
     "$ROOT/firmware/tests" \
     2> >(tee "$REPORT" >&2)

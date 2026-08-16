@@ -44,7 +44,10 @@ for path in "${legacy[@]}"; do
   if legacy_is_required "$path"; then
     continue
   fi
-  test ! -e "$path" || { echo "legacy directory must not exist: $path" >&2; exit 1; }
+  if git ls-files -- "$path" | grep -q .; then
+    echo "legacy path must not be tracked: $path" >&2
+    exit 1
+  fi
 done
 
 # Gradle module names are part of the public repository architecture.
@@ -130,4 +133,9 @@ for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
   ! grep -q "components/driver/$source" "$ac6_target"
 done
 
-echo "OK: repository layout and ownership boundaries"
+test -f tools/dpls_lab.sh
+test -f tools/dpls-lab/hub.ts
+test -f mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt
+test ! -e tools/dpls-lab/src/protocol.ts
+test ! -e tools/dpls-lab/src/crypto.ts
+test ! -e tools/dpls-lab/src/ble.ts

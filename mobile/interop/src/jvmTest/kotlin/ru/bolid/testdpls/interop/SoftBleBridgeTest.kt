@@ -13,6 +13,7 @@ import kotlin.test.fail
 import ru.bolid.testdpls.core.app.DplsClient
 import ru.bolid.testdpls.core.domain.ConnectionPhase
 import ru.bolid.testdpls.core.domain.DplsMode
+import ru.bolid.testdpls.core.domain.SettingsOp
 
 /**
  * Phone-E2E-like scenarios over soft-BLE: real `dpls_simulator` + real `DplsClient`.
@@ -59,6 +60,60 @@ class SoftBleBridgeTest {
         assertEquals(DplsMode.NORMAL, dpls.uiState.value.state?.mode)
         assertEquals("Test-DPLS-SIM", dpls.uiState.value.deviceInfo?.userName)
         assertTrue(requireNotNull(platform).hasVerifier("node:4660"))
+    }
+
+    @Test
+    fun threeWrongPasswordsThenLoginLikePhoneE2e() {
+        val dpls = client ?: return
+        val ble = requireNotNull(transport)
+        dpls.startScan()
+        dpls.connect(SimulatorBleTransport.ADDRESS)
+        ble.completeLink()
+        awaitCondition("login challenge") {
+            dpls.uiState.value.awaitingUserPassword ||
+                dpls.uiState.value.phase == ConnectionPhase.AUTHENTICATING
+        }
+
+        repeat(3) { attempt ->
+            dpls.authenticate(WRONG_PASSWORD)
+            awaitCondition("wrong password ${attempt + 1}") {
+                dpls.uiState.value.error == "Неверный пароль" &&
+                    dpls.uiState.value.awaitingUserPassword &&
+                    !dpls.uiState.value.authenticated
+            }
+            /* Firmware rate-limits AUTH_PROOF to 1 Hz; phone E2E sleeps 1.2 s. */
+            ble.tick(1_200)
+        }
+        assertFalse(dpls.uiState.value.error.orEmpty().contains("заблокирована"))
+
+        dpls.authenticate(PASSWORD)
+        awaitCondition("READY after 3 wrong then correct") {
+            dpls.uiState.value.phase == ConnectionPhase.READY &&
+                dpls.uiState.value.authenticated
+        }
+    }
+
+    @Test
+    fun changePasswordRoundTripLikePhoneE2e() {
+        val dpls = client ?: return
+        val ble = requireNotNull(transport)
+        bringToReady(dpls)
+
+        dpls.changePassword(PASSWORD, PASSWORD_NEW)
+        awaitCondition("password saved") {
+            dpls.uiState.value.settingsOp == SettingsOp.DONE
+        }
+        dpls.disconnect()
+        ble.tick(1_200)
+        reconnectWithPassword(dpls, PASSWORD_NEW)
+        dpls.changePassword(PASSWORD_NEW, PASSWORD)
+        awaitCondition("password restored") {
+            dpls.uiState.value.settingsOp == SettingsOp.DONE
+        }
+        dpls.disconnect()
+        ble.tick(1_200)
+        reconnectWithPassword(dpls, PASSWORD)
+        assertEquals(ConnectionPhase.READY, dpls.uiState.value.phase)
     }
 
     @Test
@@ -181,6 +236,26 @@ class SoftBleBridgeTest {
         }
     }
 
+    private fun reconnectWithPassword(dpls: DplsClient, password: String) {
+        val ble = requireNotNull(transport)
+        dpls.startScan()
+        dpls.connect(SimulatorBleTransport.ADDRESS)
+        ble.completeLink()
+        awaitCondition("auth after reconnect") {
+            dpls.uiState.value.phase == ConnectionPhase.AUTHENTICATING ||
+                dpls.uiState.value.awaitingUserPassword ||
+                dpls.uiState.value.authenticated
+        }
+        if (!dpls.uiState.value.authenticated) {
+            dpls.authenticate(password)
+        }
+        awaitCondition("READY after reconnect") {
+            dpls.uiState.value.phase == ConnectionPhase.READY &&
+                dpls.uiState.value.authenticated &&
+                dpls.uiState.value.state != null
+        }
+    }
+
     private fun awaitCondition(label: String, timeoutMs: Long = 5_000L, predicate: () -> Boolean) {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000L
         while (System.nanoTime() < deadline) {
@@ -200,6 +275,8 @@ class SoftBleBridgeTest {
 
     companion object {
         private const val PASSWORD = "TestDpls01"
+        private const val PASSWORD_NEW = "NewDpls01"
+        private const val WRONG_PASSWORD = "WrongPwd1"
         private val PHONE_E2E_MODES = listOf(
             DplsMode.SHORT_1,
             DplsMode.SHORT_2,
