@@ -34,13 +34,8 @@ data class AuthSession(
     }
 }
 
-enum class RecoveryReason {
-    LINK_LOSS,
-    SETUP_APPLIED,
-}
-
 /**
- * The only owner of link/auth/recovery lifecycle.
+ * The only owner of link/auth lifecycle.
  *
  * [candidateNodeId] is an untrusted discovery hint. It is used only to check that
  * authenticated DEVICE_INFO agrees with the advertisement; credentials are never
@@ -94,14 +89,11 @@ sealed interface DeviceSession {
         val auth: AuthSession,
     ) : DeviceSession
 
+    /** The physical route is known, but link/auth state must be rebuilt. */
     data class Recovering(
         val nodeId: NodeId?,
         val endpoint: LinkEndpoint,
-        val attempt: Int = 0,
-        val reason: RecoveryReason = RecoveryReason.LINK_LOSS,
-    ) : DeviceSession {
-        init { require(attempt >= 0) }
-    }
+    ) : DeviceSession
 
     data class Failed(
         val endpoint: LinkEndpoint?,
