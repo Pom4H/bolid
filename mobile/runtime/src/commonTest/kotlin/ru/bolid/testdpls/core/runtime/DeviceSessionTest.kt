@@ -62,7 +62,6 @@ class DeviceSessionTest {
         val recovering: DeviceSession = DeviceSession.Recovering(
             nodeId = NodeId(0x20),
             endpoint = endpoint,
-            attempt = 3,
         )
 
         assertFalse(recovering.isAuthenticated)
