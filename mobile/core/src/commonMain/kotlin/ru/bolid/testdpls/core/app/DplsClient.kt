@@ -35,21 +35,29 @@ import ru.bolid.testdpls.core.protocol.parseLogHistogramReport
 import ru.bolid.testdpls.core.protocol.parseSettingsResult
 import ru.bolid.testdpls.core.protocol.parseStateReport
 import ru.bolid.testdpls.core.protocol.putU16
+import ru.bolid.testdpls.core.protocol.putU32
 import ru.bolid.testdpls.core.runtime.AuthSession
 import ru.bolid.testdpls.core.runtime.DeviceSession
 import ru.bolid.testdpls.core.runtime.LinkEndpoint
 import ru.bolid.testdpls.core.runtime.LinkFailure
 import ru.bolid.testdpls.core.runtime.NodeId
+import ru.bolid.testdpls.core.runtime.SessionChallenge
+import ru.bolid.testdpls.core.runtime.authOrNull
+import ru.bolid.testdpls.core.runtime.challengeOrNull
 import ru.bolid.testdpls.core.runtime.credentialKey
-import ru.bolid.testdpls.core.session.DplsSessionRuntime
+import ru.bolid.testdpls.core.runtime.credentialsReady
+import ru.bolid.testdpls.core.runtime.endpointOrNull
+import ru.bolid.testdpls.core.runtime.initializedOrNull
+import ru.bolid.testdpls.core.runtime.isAuthenticated
+import ru.bolid.testdpls.core.runtime.nodeIdOrNull
+import ru.bolid.testdpls.core.session.FrameSequencer
 
 class DplsClient(
     private val transport: DplsTransport,
     private val platform: DplsPlatformServices,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
 ) : DplsController, DplsTransportListener {
-    private data class Target(
-        val address: String,
+    private data class ReconnectPolicy(
         val reachedReady: Boolean = false,
         val expectSetupReconnect: Boolean = false,
     )
@@ -79,10 +87,10 @@ class DplsClient(
     )
     override val uiState: StateFlow<DplsUiState> = mutableState.asStateFlow()
 
-    private val wireSession = DplsSessionRuntime()
+    private val frameSequencer = FrameSequencer()
     private val journal = JournalMachine()
-    private var runtimeSession: DeviceSession = DeviceSession.Offline
-    private var target: Target? = null
+    private var session: DeviceSession = DeviceSession.Offline
+    private var reconnectPolicy = ReconnectPolicy()
     private var identify = Identify()
     private var operation: Operation? = null
     private var cachedVerifier: ByteArray? = null
@@ -105,7 +113,7 @@ class DplsClient(
     init { transport.setListener(this) }
 
     override fun startScan() {
-        if (state.authenticated && transport.hasConnection()) return browseDevices()
+        if (session.isAuthenticated && transport.hasConnection()) return browseDevices()
         disconnectInternal(clearSelection = true, clearVerifier = true)
         mutableState.value = retainedUiState(ConnectionPhase.SCANNING, "Поиск Test-DPLS…", scanning = true)
         if (transport.startScan()) armScanDeadline(keepSession = false)
@@ -117,15 +125,15 @@ class DplsClient(
         scanJob = null
         updateState {
             when {
-                it.authenticated -> it.copy(scanning = false, statusText = deviceListCaption(it.devices.size))
-                it.phase == ConnectionPhase.SCANNING -> it.copy(phase = ConnectionPhase.IDLE, scanning = false, statusText = deviceListCaption(it.devices.size))
-                else -> it
+                session.isAuthenticated -> it.copy(scanning = false, statusText = deviceListCaption(it.devices.size))
+                session is DeviceSession.Offline && it.scanning -> it.copy(phase = ConnectionPhase.IDLE, scanning = false, statusText = deviceListCaption(it.devices.size))
+                else -> it.copy(scanning = false)
             }
         }
     }
 
     override fun resumeSession() {
-        if (!state.authenticated || !transport.hasConnection()) return
+        if (!session.isAuthenticated || !transport.hasConnection()) return
         transport.stopScan()
         scanJob?.cancel()
         scanJob = null
@@ -146,13 +154,13 @@ class DplsClient(
     }
 
     override fun connect(address: String) {
-        if (state.authenticated && target?.address == address && transport.hasConnection()) return resumeSession()
+        if (session.isAuthenticated && currentBleAddress() == address && transport.hasConnection()) return resumeSession()
         stopScan()
         cancelLinkJobs()
-        wireSession.resetAll()
+        frameSequencer.reset()
         clearOperation()
-        target = Target(address)
-        runtimeSession = DeviceSession.Connecting(LinkEndpoint.Ble(address))
+        reconnectPolicy = ReconnectPolicy()
+        setSession(DeviceSession.Connecting(LinkEndpoint.Ble(address)))
         timeSyncAttempted = false
         reconnectAttempt = 0
         previousMode = null
@@ -161,8 +169,6 @@ class DplsClient(
                 phase = ConnectionPhase.CONNECTING,
                 statusText = "Подключение…",
                 selectedDevice = it.devices.firstOrNull { device -> device.address == address },
-                credentialsReady = false,
-                authenticated = false,
                 browsingDevices = false,
                 scanning = false,
                 setupPassword = "",
@@ -183,7 +189,7 @@ class DplsClient(
     }
 
     override fun identify(address: String) {
-        if (state.authenticated && target?.address == address && transport.hasConnection()) return resumeSession()
+        if (session.isAuthenticated && currentBleAddress() == address && transport.hasConnection()) return resumeSession()
         updateState {
             it.copy(
                 identifyActive = true,
@@ -205,14 +211,15 @@ class DplsClient(
 
     override fun confirmIdentifiedDevice() {
         stopIdentify()
-        if (state.credentialsReady) return
+        if (session.credentialsReady) return
         if (!transport.hasConnection()) {
-            target = null
+            setSession(DeviceSession.Offline)
             updateState { it.copy(selectedDevice = null) }
             return fail("Связь с платой оборвалась. Выберите устройство снова.")
         }
+        val linked = session as? DeviceSession.Linked ?: return fail("BLE-сессия не готова к аутентификации")
         updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…", error = null) }
-        request(DplsProtocol.Type.HELLO, wireSession.clientNonce, priority = true)
+        request(DplsProtocol.Type.HELLO, linked.clientNonce, priority = true)
     }
 
     override fun updateSetupName(name: String) = updateState { it.copy(setupName = name) }
@@ -221,7 +228,8 @@ class DplsClient(
 
     override fun authenticate(password: String) {
         if (password.length < 8) return fail("Пароль должен содержать не менее 8 символов")
-        val verifier = DplsCrypto.deriveVerifier(password, wireSession.authSalt)
+        val challenge = session.challengeOrNull ?: return fail("Устройство не прислало параметры аутентификации")
+        val verifier = DplsCrypto.deriveVerifier(password, challenge.authSalt)
         replaceCachedVerifier(verifier)
         sendAuthProof(verifier)
     }
@@ -230,12 +238,13 @@ class DplsClient(
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return fail("Введите имя устройства")
         if (password.length < 8) return fail("Пароль должен содержать не менее 8 символов")
+        val challenge = session.challengeOrNull ?: return fail("Устройство не готово к первичной настройке")
         val salt = platform.secureRandomBytes(DplsAuth.SALT_SIZE)
         val verifier = DplsCrypto.deriveVerifier(password, salt)
         replaceCachedVerifier(verifier)
         val nameBytes = utf8Truncate(trimmed, 31)
         val payload = ByteArray(5 + nameBytes.size + salt.size + verifier.size)
-        putU32(payload, 0, wireSession.sessionId)
+        putU32(payload, 0, challenge.sessionId)
         payload[4] = nameBytes.size.toByte()
         nameBytes.copyInto(payload, 5)
         salt.copyInto(payload, 5 + nameBytes.size)
@@ -245,15 +254,17 @@ class DplsClient(
     }
 
     override fun requestMode(mode: DplsMode) {
-        if (state.controlsEnabled && (operation == null || mode == DplsMode.NORMAL)) updateState { it.copy(pendingMode = mode) }
+        val controlsReady = session.isAuthenticated && state.state != null && !state.commandInProgress
+        if (controlsReady && (operation == null || mode == DplsMode.NORMAL)) updateState { it.copy(pendingMode = mode) }
     }
 
     override fun cancelMode() = updateState { it.copy(pendingMode = null) }
 
     override fun confirmMode() {
         val mode = state.pendingMode ?: return
+        if (!session.isAuthenticated) return
         if (operation != null && mode != DplsMode.NORMAL) return
-        val payload = wireSession.authenticatedPayload() + byteArrayOf(mode.wire.toByte())
+        val payload = authenticatedPayload() + byteArrayOf(mode.wire.toByte())
         if (operation != null) {
             updateState { it.copy(pendingMode = null, statusText = "Возврат в Норму…") }
             request(DplsProtocol.Type.MODE_SET, payload, priority = true)
@@ -263,8 +274,8 @@ class DplsClient(
         operation = Operation.Mode(sequence)
         updateState { it.copy(commandInProgress = true, pendingMode = null, statusText = "Команда отправлена…") }
         armOperationTimeout(COMMAND_TIMEOUT_MS) {
-            if (operation is Operation.Mode) {
-                request(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
+            if (operation is Operation.Mode && session.isAuthenticated) {
+                request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
                 updateState { it.copy(statusText = "Запрос состояния устройства…") }
             }
         }
@@ -284,20 +295,21 @@ class DplsClient(
         if (canStartLog()) startLog(incremental = !journal.isEmpty)
     }
 
-    private fun canStartLog(): Boolean = state.authenticated && operation == null && !journal.isActive && transport.hasConnection()
+    private fun canStartLog(): Boolean = session.isAuthenticated && operation == null && !journal.isActive && transport.hasConnection()
 
     private fun startLog(incremental: Boolean) {
+        if (!session.isAuthenticated) return
         journal.begin(incremental)
         logLoadPending = true
         sessionLoopJob?.cancel()
         updateState { it.copy(logProgress = 0f, error = null) }
-        request(DplsProtocol.Type.LOG_START, wireSession.authenticatedPayload(), flush = true)
+        request(DplsProtocol.Type.LOG_START, authenticatedPayload(), flush = true)
         armLogTimeout()
     }
 
     override fun loadLogHistogram() {
-        if (!state.authenticated || !transport.hasConnection() || operation != null || journal.isActive) return
-        val sequence = request(DplsProtocol.Type.LOG_HIST_GET, wireSession.authenticatedPayload() + byteArrayOf(24))
+        if (!session.isAuthenticated || !transport.hasConnection() || operation != null || journal.isActive) return
+        val sequence = request(DplsProtocol.Type.LOG_HIST_GET, authenticatedPayload() + byteArrayOf(24))
         operation = Operation.Histogram(sequence)
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS) {
             if (operation is Operation.Histogram) {
@@ -308,7 +320,7 @@ class DplsClient(
     }
 
     override fun loadMoreEventLog() {
-        if (!state.authenticated || journal.isActive || !state.logHasMore || operation != null) return
+        if (!session.isAuthenticated || journal.isActive || !state.logHasMore || operation != null) return
         sessionLoopJob?.cancel()
         applyJournalEffect(journal.more())
     }
@@ -320,11 +332,13 @@ class DplsClient(
     }
 
     override fun refreshState() {
-        if (state.authenticated && !journal.isActive && transport.hasConnection() && operation !is Operation.TimeSync) request(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
+        if (session.isAuthenticated && !journal.isActive && transport.hasConnection() && operation !is Operation.TimeSync) {
+            request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+        }
     }
 
     override fun requestDeviceInfo() {
-        if (state.authenticated && transport.hasConnection() && operation == null) requestDeviceInfoInternal()
+        if (session.isAuthenticated && transport.hasConnection() && operation == null) requestDeviceInfoInternal()
     }
 
     override fun clearSettingsOp() {
@@ -335,10 +349,10 @@ class DplsClient(
     override fun setDeviceName(name: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return settingsFailure("Введите имя устройства")
-        if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
+        if (!session.isAuthenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
         if (operation != null) return settingsFailure("Дождитесь завершения текущей операции")
         val bytes = utf8Truncate(trimmed, 31)
-        val payload = wireSession.authenticatedPayload() + byteArrayOf(bytes.size.toByte()) + bytes
+        val payload = authenticatedPayload() + byteArrayOf(bytes.size.toByte()) + bytes
         val sequence = request(DplsProtocol.Type.NAME_SET, payload)
         operation = Operation.Name(sequence, trimmed)
         updateState { it.copy(settingsOp = SettingsOp.IN_PROGRESS, settingsError = null, settingsNotice = null) }
@@ -347,15 +361,16 @@ class DplsClient(
 
     override fun changePassword(current: String, newPassword: String) {
         if (newPassword.length < 8) return settingsFailure("Пароль должен содержать не менее 8 символов")
-        if (!state.authenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
+        if (!session.isAuthenticated || !transport.hasConnection()) return settingsFailure("Нет соединения с устройством")
         if (operation != null) return settingsFailure("Дождитесь завершения текущей операции")
-        val currentVerifier = DplsCrypto.deriveVerifier(current, wireSession.authSalt)
+        val auth = authenticatedSession()
+        val currentVerifier = DplsCrypto.deriveVerifier(current, auth.authSalt)
         val matches = cachedVerifier?.let { constantTimeEquals(it, currentVerifier) } == true
         currentVerifier.fill(0)
         if (!matches) return settingsFailure("Неверный текущий пароль")
         val salt = platform.secureRandomBytes(DplsAuth.SALT_SIZE)
         val verifier = DplsCrypto.deriveVerifier(newPassword, salt)
-        val payload = wireSession.authenticatedPayload() + salt + verifier
+        val payload = auth.authenticatedPayload() + salt + verifier
         salt.fill(0)
         val sequence = request(DplsProtocol.Type.PASSWORD_SET, payload)
         operation = Operation.Password(sequence, verifier)
@@ -410,15 +425,19 @@ class DplsClient(
 
     override fun onBluetoothAvailable() {
         reconnectAttempt = 0
-        if (target != null && !transport.hasConnection()) return scheduleReconnect()
-        if ((state.phase == ConnectionPhase.SCANNING || state.browsingDevices) && transport.startScan()) armScanDeadline(state.authenticated)
+        if (session.endpointOrNull != null && !transport.hasConnection()) return scheduleReconnect()
+        if ((state.scanning || state.browsingDevices) && transport.startScan()) armScanDeadline(session.isAuthenticated)
     }
 
     override fun onBluetoothUnavailable() {
-        cancelLinkJobs(); clearOperation(); wireSession.resetLink()
-        runtimeSession = target?.let { DeviceSession.Recovering(nodeIdOrNull(), LinkEndpoint.Ble(it.address), reconnectAttempt) } ?: DeviceSession.Offline
+        val endpoint = session.endpointOrNull
+        val nodeId = knownNodeId()
+        cancelLinkJobs()
+        clearOperation()
+        if (endpoint != null) setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
+        else setSession(DeviceSession.Offline)
         platform.keepConnectionAlive(false)
-        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Bluetooth выключен", authenticated = false, credentialsReady = cachedVerifier != null, savedCredentials = cachedVerifier != null, staleState = it.state != null, commandInProgress = false, logProgress = null, error = null) }
+        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Bluetooth выключен", savedCredentials = cachedVerifier != null, staleState = it.state != null, commandInProgress = false, logProgress = null, error = null) }
     }
 
     override fun onDiscovered(device: DplsTransportDevice) {
@@ -427,7 +446,7 @@ class DplsClient(
         updateState {
             val merged = it.devices.filterNot { old -> old.address == item.address } + item
             val selected = it.selectedDevice
-            val all = if (it.authenticated && selected != null && merged.none { row -> row.address == selected.address }) merged + selected else merged
+            val all = if (session.isAuthenticated && selected != null && merged.none { row -> row.address == selected.address }) merged + selected else merged
             it.copy(devices = all.sortedWith(compareByDescending<DiscoveredDevice> { row -> row.realShort }.thenByDescending { row -> row.reserveLow }.thenByDescending { row -> row.fromReserve }.thenByDescending(DiscoveredDevice::rssi)), statusText = "Найдено: ${all.size}")
         }
     }
@@ -436,14 +455,16 @@ class DplsClient(
 
     override fun onSubscribed(writeLimit: Int) {
         if (writeLimit < DplsProtocol.OVERHEAD) return fail("BLE write limit слишком мал: $writeLimit")
-        wireSession.clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
+        val endpoint = session.endpointOrNull ?: return fail("Нет активного BLE endpoint")
+        val clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
+        setSession(DeviceSession.Linked(endpoint, clientNonce))
         if (identify.afterConnect) {
             val sequence = request(DplsProtocol.Type.IDENTIFY_START)
             identify = Identify(responseSequence = sequence, sentAtMillis = platform.nowMillis())
             updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Показать на объекте…") }
         } else {
             updateState { it.copy(phase = ConnectionPhase.AUTHENTICATING, statusText = "Подключение…") }
-            request(DplsProtocol.Type.HELLO, wireSession.clientNonce)
+            request(DplsProtocol.Type.HELLO, clientNonce)
         }
     }
 
@@ -455,7 +476,10 @@ class DplsClient(
     }
 
     override fun onWriteComplete(errorCode: Long?) {
-        if (errorCode != null) { if (target?.reachedReady == true) scheduleReconnect() else fail("Ошибка передачи BLE: $errorCode") }
+        if (errorCode != null) {
+            if (reconnectPolicy.reachedReady) scheduleReconnect()
+            else fail("Ошибка передачи BLE: $errorCode")
+        }
     }
 
     override fun onRssi(rssi: Int) {
@@ -469,19 +493,24 @@ class DplsClient(
         connectTimeoutJob?.cancel()
         if (state.staleBond) return
         if (looksLikeStaleBondError(error)) return onStaleBond()
-        val current = target
-        if (current?.expectSetupReconnect == true) { target = current.copy(expectSetupReconnect = false); return scheduleReconnect(immediate = true) }
-        if (current?.reachedReady == true && state.phase != ConnectionPhase.ERROR) return scheduleReconnect()
+        if (reconnectPolicy.expectSetupReconnect) {
+            reconnectPolicy = reconnectPolicy.copy(expectSetupReconnect = false)
+            return scheduleReconnect(immediate = true)
+        }
+        if (reconnectPolicy.reachedReady && session !is DeviceSession.Failed) return scheduleReconnect()
         identify = Identify()
         if (state.identifyActive) return fail(error ?: "Связь с платой оборвалась до идентификации")
-        target = null; runtimeSession = DeviceSession.Offline; platform.keepConnectionAlive(false)
+        reconnectPolicy = ReconnectPolicy()
+        setSession(DeviceSession.Offline)
+        platform.keepConnectionAlive(false)
         updateState { it.copy(phase = ConnectionPhase.IDLE, selectedDevice = null, statusText = error ?: "Отключено", identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, browsingDevices = false) }
     }
 
     override fun onTransportError(message: String) { if (looksLikeStaleBondError(message)) onStaleBond() else fail(message) }
 
     override fun onStaleBond() {
-        target = target?.copy(reachedReady = false, expectSetupReconnect = false); identify = Identify()
+        reconnectPolicy = reconnectPolicy.copy(reachedReady = false, expectSetupReconnect = false)
+        identify = Identify()
         val name = state.selectedDevice?.userName ?: state.selectedDevice?.advertisedName ?: "Test-DPLS"
         fail("Старое сопряжение с «$name». Настройки → Bluetooth → ⓘ у этого имени → Забыть. Затем «Повторить».", staleBond = true)
     }
@@ -508,32 +537,54 @@ class DplsClient(
     }
 
     private fun handleAuthChallenge(payload: ByteArray) {
-        val challenge = parseAuthChallenge(payload) ?: return fail("Повреждённый AUTH_CHALLENGE")
-        wireSession.setChallenge(challenge.sessionId, challenge.deviceNonce, challenge.salt, challenge.initialized)
-        val endpoint = LinkEndpoint.Ble(target?.address ?: return fail("Нет выбранного устройства"))
-        runtimeSession = if (challenge.initialized) DeviceSession.Authenticating(endpoint, challenge.sessionId) else DeviceSession.Commissioning(endpoint, challenge.sessionId)
-        val autoAuth = challenge.initialized && cachedVerifier != null
-        updateState { it.copy(initialized = challenge.initialized, credentialsReady = true, awaitingUserPassword = !autoAuth, statusText = if (autoAuth) "Вход…" else "Подключено", setupName = it.setupName.ifBlank { it.selectedDevice?.userName ?: "Test-DPLS-001" }, setupPassword = "", setupRepeatPassword = "") }
+        val wireChallenge = parseAuthChallenge(payload) ?: return fail("Повреждённый AUTH_CHALLENGE")
+        val linked = session as? DeviceSession.Linked ?: return fail("AUTH_CHALLENGE получен вне ожидаемого состояния")
+        val challenge = SessionChallenge(
+            sessionId = wireChallenge.sessionId,
+            clientNonce = linked.clientNonce,
+            deviceNonce = wireChallenge.deviceNonce,
+            authSalt = wireChallenge.salt,
+            initialized = wireChallenge.initialized,
+        )
+        setSession(
+            if (wireChallenge.initialized) DeviceSession.Authenticating(linked.endpoint, challenge)
+            else DeviceSession.Commissioning(linked.endpoint, challenge),
+        )
+        val autoAuth = wireChallenge.initialized && cachedVerifier != null
+        updateState { it.copy(awaitingUserPassword = !autoAuth, statusText = if (autoAuth) "Вход…" else "Подключено", setupName = it.setupName.ifBlank { it.selectedDevice?.userName ?: "Test-DPLS-001" }, setupPassword = "", setupRepeatPassword = "") }
         if (autoAuth) cachedVerifier?.let(::sendAuthProof)
     }
 
     private fun handleAuthResult(payload: ByteArray) {
-        if (state.authenticated) return
+        if (session.isAuthenticated) return
+        val challenge = session.challengeOrNull ?: return fail("AUTH_RESULT получен вне аутентификации")
         val result = parseAuthResult(payload) ?: return fail("Повреждённый AUTH_RESULT")
         if (result.status == 3) {
-            persistCachedVerifier(); target = target?.copy(expectSetupReconnect = true)
-            updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Настройка сохранена. Повторное подключение…", credentialsReady = true, initialized = true, awaitingUserPassword = false, setupPassword = "", setupRepeatPassword = "", error = null) }
+            persistCachedVerifier()
+            reconnectPolicy = reconnectPolicy.copy(expectSetupReconnect = true)
+            val endpoint = session.endpointOrNull ?: return fail("Потерян endpoint после первичной настройки")
+            setSession(DeviceSession.Recovering(knownNodeId(), endpoint, reconnectAttempt))
+            updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = "Настройка сохранена. Повторное подключение…", awaitingUserPassword = false, setupPassword = "", setupRepeatPassword = "", error = null) }
             return
         }
         if (result.status != 0) {
-            forgetCachedVerifier(); updateState { it.copy(awaitingUserPassword = true) }
+            forgetCachedVerifier()
+            updateState { it.copy(awaitingUserPassword = true) }
             return fail(if (result.retryAfterSeconds > 0) "Аутентификация заблокирована на ${result.retryAfterSeconds} с" else "Неверный пароль")
         }
         persistCachedVerifier()
         val token = result.sessionToken ?: return fail("AUTH_RESULT без session token")
-        wireSession.authenticate(token)
-        updateState { it.copy(authenticated = true, awaitingUserPassword = false, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, phase = ConnectionPhase.SYNCHRONIZING, statusText = "Чтение состояния…", error = null) }
-        request(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload()); startSessionLoop()
+        val endpoint = session.endpointOrNull ?: return fail("Потерян endpoint после аутентификации")
+        setSession(
+            DeviceSession.Online(
+                nodeId = knownNodeId(),
+                endpoint = endpoint,
+                auth = AuthSession(challenge.sessionId, token, challenge.authSalt),
+            ),
+        )
+        updateState { it.copy(awaitingUserPassword = false, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, phase = ConnectionPhase.SYNCHRONIZING, statusText = "Чтение состояния…", error = null) }
+        request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+        startSessionLoop()
     }
 
     private fun handleCommandResult(frame: DplsProtocol.Frame) {
@@ -543,7 +594,7 @@ class DplsClient(
         clearOperation()
         if (result.status != 0) return fail(commandRejectReason(result.status))
         updateState { it.copy(commandInProgress = false, statusText = "Команда применена, чтение состояния…", lastAckMillis = platform.nowMillis()) }
-        request(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
+        if (session.isAuthenticated) request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
     }
 
     private fun handleDeviceInfo(frame: DplsProtocol.Frame) {
@@ -552,9 +603,12 @@ class DplsClient(
         clearOperation()
         val info = parseDeviceInfoReport(frame.payload) ?: return fail("Повреждённый DEVICE_INFO_REPORT")
         updateState { it.copy(deviceInfo = info, selectedDevice = it.selectedDevice?.copy(userName = info.userName.ifBlank { it.selectedDevice.userName })) }
-        val id = nodeIdOrNull(); val endpoint = target?.address?.let { LinkEndpoint.Ble(it) }
-        if (id != null && endpoint != null) runtimeSession = DeviceSession.Online(id, endpoint, AuthSession(wireSession.sessionId, wireSession.sessionToken))
-        loadTimeAnchors(); persistTimeAnchors(); attemptTimeSync()
+        val online = session as? DeviceSession.Online ?: return fail("DEVICE_INFO получен вне активной сессии")
+        val nodeId = info.deviceId.takeIf { it > 0 }?.let(::NodeId) ?: return fail("Устройство прислало некорректный ID")
+        setSession(online.copy(nodeId = nodeId))
+        loadTimeAnchors()
+        persistTimeAnchors()
+        attemptTimeSync()
     }
 
     private fun handleSettingsResult(frame: DplsProtocol.Frame) {
@@ -579,8 +633,9 @@ class DplsClient(
     private fun handleState(payload: ByteArray) {
         val now = platform.nowMillis()
         val device = parseStateReport(payload, now) ?: return fail("Повреждённый STATE_REPORT")
-        target = target?.copy(reachedReady = true); reconnectAttempt = 0
-        updateState { it.copy(phase = ConnectionPhase.READY, statusText = "Состояние получено", state = device, deviceBootEpochSeconds = now / 1000 - device.uptimeSeconds, authenticated = true, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, staleState = false, lastAckMillis = now, error = null) }
+        reconnectPolicy = reconnectPolicy.copy(reachedReady = true)
+        reconnectAttempt = 0
+        updateState { it.copy(phase = ConnectionPhase.READY, statusText = "Состояние получено", state = device, deviceBootEpochSeconds = now / 1000 - device.uptimeSeconds, identifyActive = false, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, staleState = false, lastAckMillis = now, error = null) }
         val old = previousMode; previousMode = device.mode
         if (old?.dangerous == true && device.mode == DplsMode.NORMAL) platform.notifyOperator(DplsOperatorAlerts.NORMAL_TITLE, DplsOperatorAlerts.NORMAL_BODY)
         if (state.deviceInfo == null && operation == null) requestDeviceInfoInternal() else if (operation == null) attemptTimeSync()
@@ -623,22 +678,31 @@ class DplsClient(
     }
 
     private fun requestDeviceInfoInternal() {
-        if (operation != null || !state.authenticated || !transport.hasConnection()) return
-        val sequence = request(DplsProtocol.Type.DEVICE_INFO_GET, wireSession.authenticatedPayload()); operation = Operation.DeviceInfo(sequence)
+        if (operation != null || !session.isAuthenticated || !transport.hasConnection()) return
+        val sequence = request(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+        operation = Operation.DeviceInfo(sequence)
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS) { if (operation is Operation.DeviceInfo) { clearOperation(); if (state.deviceInfo == null) requestDeviceInfoInternal() } }
     }
 
     private fun attemptTimeSync() {
-        if (timeSyncAttempted || operation != null || !state.authenticated || !transport.hasConnection()) return
-        val payload = buildTimeSyncPayload(wireSession.sessionId, wireSession.sessionToken, platform.nowMillis() / 1000L) ?: return
+        if (timeSyncAttempted || operation != null || !session.isAuthenticated || !transport.hasConnection()) return
+        val auth = authenticatedSession()
+        val payload = buildTimeSyncPayload(auth.sessionId, auth.token, platform.nowMillis() / 1000L) ?: return
         timeSyncAttempted = true
-        val sequence = request(DplsProtocol.Type.TIME_SYNC, payload); operation = Operation.TimeSync(sequence)
+        val sequence = request(DplsProtocol.Type.TIME_SYNC, payload)
+        operation = Operation.TimeSync(sequence)
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS) { if (operation is Operation.TimeSync) clearOperation() }
     }
 
     private fun applyJournalEffect(effect: JournalMachine.Effect) {
         when (effect) {
-            is JournalMachine.Effect.Ack -> { val suffix = ByteArray(2); putU16(suffix, 0, effect.index); request(DplsProtocol.Type.LOG_ACK, wireSession.authenticatedPayload() + suffix); armLogTimeout() }
+            is JournalMachine.Effect.Ack -> {
+                if (!session.isAuthenticated) return
+                val suffix = ByteArray(2)
+                putU16(suffix, 0, effect.index)
+                request(DplsProtocol.Type.LOG_ACK, authenticatedPayload() + suffix)
+                armLogTimeout()
+            }
             JournalMachine.Effect.Pause, JournalMachine.Effect.Complete -> finishJournalPage()
             is JournalMachine.Effect.Error -> failLog(effect.message)
             JournalMachine.Effect.None -> Unit
@@ -660,15 +724,23 @@ class DplsClient(
     private fun failLog(message: String) { journal.fail(); logLoadPending = false; drainLog = false; logTimeoutJob?.cancel(); updateState { it.copy(logProgress = null, logHasMore = false, error = message) }; startSessionLoop() }
 
     private fun sendAuthProof(verifier: ByteArray) {
-        val signed = DplsAuth.proofMessage(wireSession.deviceNonce, wireSession.clientNonce, wireSession.sessionId)
-        val mac = DplsCrypto.hmacSha256(verifier, signed); signed.fill(0); request(DplsProtocol.Type.AUTH_PROOF, wireSession.clientNonce + mac); mac.fill(0)
+        val challenge = session.challengeOrNull ?: return fail("Нет активного challenge")
+        val signed = DplsAuth.proofMessage(challenge.deviceNonce, challenge.clientNonce, challenge.sessionId)
+        val mac = DplsCrypto.hmacSha256(verifier, signed)
+        signed.fill(0)
+        request(DplsProtocol.Type.AUTH_PROOF, challenge.clientNonce + mac)
+        mac.fill(0)
     }
 
     private fun request(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf(), priority: Boolean = false, flush: Boolean = false): Int {
-        val sequence = wireSession.nextSequence(); sendFrame(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush); return sequence
+        val sequence = frameSequencer.next()
+        sendFrame(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush)
+        return sequence
     }
 
-    private fun oneWay(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf()) { sendFrame(type, wireSession.nextSequence(), 0, payload, false, false) }
+    private fun oneWay(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf()) {
+        sendFrame(type, frameSequencer.next(), 0, payload, false, false)
+    }
 
     private fun sendFrame(type: DplsProtocol.Type, sequence: Int, flags: Int, payload: ByteArray, priority: Boolean, flush: Boolean) {
         val bytes = encodeFrame(DplsProtocol.Frame(type, sequence, flags, payload))
@@ -677,29 +749,42 @@ class DplsClient(
 
     private fun startSessionLoop() {
         sessionLoopJob?.cancel()
-        if (!state.authenticated || !transport.hasConnection() || journal.isActive) return
+        if (!session.isAuthenticated || !transport.hasConnection() || journal.isActive) return
         sessionLoopJob = scope.launch {
             var ticks = 0
-            while (isActive && state.authenticated && transport.hasConnection()) {
-                delay(STATE_REFRESH_MS); ++ticks
+            while (isActive && session.isAuthenticated && transport.hasConnection()) {
+                delay(STATE_REFRESH_MS)
+                ++ticks
                 if (journal.isActive || operation is Operation.TimeSync) continue
-                if (state.needsPeriodicStateRefresh) {
+                val shouldRefresh = !state.commandInProgress && state.logProgress == null && state.state != null
+                if (shouldRefresh) {
                     val receivedAt = state.state?.receivedAtMillis
                     if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) updateState { it.copy(staleState = true) }
-                    request(DplsProtocol.Type.STATE_GET, wireSession.authenticatedPayload())
-                } else if (ticks % KEEP_ALIVE_TICKS == 0) oneWay(DplsProtocol.Type.KEEP_ALIVE, wireSession.authenticatedPayload())
+                    request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
+                } else if (ticks % KEEP_ALIVE_TICKS == 0) {
+                    oneWay(DplsProtocol.Type.KEEP_ALIVE, authenticatedPayload())
+                }
             }
         }
     }
 
     private fun scheduleReconnect(immediate: Boolean = false) {
-        val current = target ?: return
+        val endpoint = session.endpointOrNull ?: return
+        val nodeId = knownNodeId()
         if (reconnectJob?.isActive == true) return
-        cancelLinkJobs(); clearOperation(); wireSession.resetLink(); timeSyncAttempted = false
-        runtimeSession = DeviceSession.Recovering(nodeIdOrNull(), LinkEndpoint.Ble(current.address), reconnectAttempt); platform.keepConnectionAlive(true)
-        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = if (current.reachedReady || logLoadPending) "Восстановление связи…" else "Подключение…", authenticated = false, staleState = it.state != null, credentialsReady = cachedVerifier != null, savedCredentials = cachedVerifier != null, commandInProgress = false) }
-        val delays = longArrayOf(500, 1_000, 2_000, 4_000, 5_000); val wait = if (immediate) 0L else delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]; reconnectAttempt++
-        reconnectJob = scope.launch { if (wait > 0) delay(wait); if (target != null && !transport.reconnect()) fail("Устройство недоступно. Запустите поиск снова.") }
+        cancelLinkJobs()
+        clearOperation()
+        timeSyncAttempted = false
+        setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
+        platform.keepConnectionAlive(true)
+        updateState { it.copy(phase = ConnectionPhase.RECONNECTING, statusText = if (reconnectPolicy.reachedReady || logLoadPending) "Восстановление связи…" else "Подключение…", staleState = it.state != null, savedCredentials = cachedVerifier != null, commandInProgress = false) }
+        val delays = longArrayOf(500, 1_000, 2_000, 4_000, 5_000)
+        val wait = if (immediate) 0L else delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
+        reconnectAttempt++
+        reconnectJob = scope.launch {
+            if (wait > 0) delay(wait)
+            if (session.endpointOrNull != null && !transport.reconnect()) fail("Устройство недоступно. Запустите поиск снова.")
+        }
     }
 
     private fun armOperationTimeout(delayMs: Long, action: () -> Unit) { operationJob?.cancel(); operationJob = scope.launch { delay(delayMs); action() } }
@@ -713,11 +798,19 @@ class DplsClient(
     private fun armLogTimeout() { logTimeoutJob?.cancel(); logTimeoutJob = scope.launch { delay(LOG_CHUNK_TIMEOUT_MS); if (journal.isActive) failLog("Не удалось загрузить журнал") } }
 
     private fun armScanDeadline(keepSession: Boolean) {
-        scanJob?.cancel(); scanJob = scope.launch { delay(SCAN_DURATION_MS); transport.stopScan(); updateState { if (keepSession || it.phase == ConnectionPhase.SCANNING) it.copy(scanning = false, phase = if (keepSession) it.phase else ConnectionPhase.IDLE, statusText = deviceListCaption(it.devices.size)) else it } }
+        scanJob?.cancel(); scanJob = scope.launch { delay(SCAN_DURATION_MS); transport.stopScan(); updateState { if (keepSession || it.scanning) it.copy(scanning = false, phase = if (keepSession) it.phase else ConnectionPhase.IDLE, statusText = deviceListCaption(it.devices.size)) else it } }
     }
 
     private fun armConnectTimeout() {
-        connectTimeoutJob?.cancel(); connectTimeoutJob = scope.launch { delay(CONNECT_TIMEOUT_MS); val now = state; if (!now.identifyLedLive && !now.identifyActive && !now.authenticated && !now.awaitingUserPassword && !now.credentialsReady) { transport.disconnect(clearSelection = false); fail("Плата не отвечает по Bluetooth. Выберите устройство снова.") } }
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = scope.launch {
+            delay(CONNECT_TIMEOUT_MS)
+            val now = state
+            if (!now.identifyLedLive && !now.identifyActive && !session.credentialsReady && !session.isAuthenticated) {
+                transport.disconnect(clearSelection = false)
+                fail("Плата не отвечает по Bluetooth. Выберите устройство снова.")
+            }
+        }
     }
 
     private fun cancelLinkJobs() { reconnectJob?.cancel(); sessionLoopJob?.cancel(); operationJob?.cancel(); connectTimeoutJob?.cancel(); rssiJob?.cancel(); reconnectJob = null; sessionLoopJob = null; operationJob = null; connectTimeoutJob = null; rssiJob = null }
@@ -725,14 +818,48 @@ class DplsClient(
     private fun stopRssiPoll() { rssiJob?.cancel(); rssiJob = null }
 
     private fun disconnectInternal(clearSelection: Boolean, clearVerifier: Boolean) {
-        scanJob?.cancel(); cancelLinkJobs(); logTimeoutJob?.cancel(); clearOperation(); journal.fail(); transport.disconnect(clearSelection); platform.keepConnectionAlive(false); wireSession.resetAll()
-        runtimeSession = DeviceSession.Offline; identify = Identify(); reconnectAttempt = 0; previousMode = null; lastOperatorAlert = null; logLoadPending = false; drainLog = false; timeSyncAttempted = false
-        if (clearSelection) target = null
+        scanJob?.cancel()
+        cancelLinkJobs()
+        logTimeoutJob?.cancel()
+        clearOperation()
+        journal.fail()
+        transport.disconnect(clearSelection)
+        platform.keepConnectionAlive(false)
+        frameSequencer.reset()
+        setSession(DeviceSession.Offline)
+        reconnectPolicy = ReconnectPolicy()
+        identify = Identify()
+        reconnectAttempt = 0
+        previousMode = null
+        lastOperatorAlert = null
+        logLoadPending = false
+        drainLog = false
+        timeSyncAttempted = false
         if (clearVerifier) replaceCachedVerifier(null)
     }
 
-    private fun nodeIdOrNull(): NodeId? { val raw = state.deviceInfo?.deviceId ?: state.selectedDevice?.deviceId ?: return null; return raw.takeIf { it > 0 }?.let(::NodeId) }
-    private fun credentialKeys(): List<String> = buildList { val id = nodeIdOrNull(); if (id != null) { add(credentialKey(id)); add("id:${id.value}") }; target?.address?.takeIf { it.isNotBlank() }?.let { add("legacy-addr:$it"); add("addr:$it") } }
+    private fun authenticatedSession(): AuthSession = session.authOrNull ?: error("Authenticated operation without DeviceSession.Online")
+    private fun authenticatedPayload(): ByteArray = authenticatedSession().authenticatedPayload()
+    private fun currentBleAddress(): String? = (session.endpointOrNull as? LinkEndpoint.Ble)?.address
+
+    private fun knownNodeId(): NodeId? {
+        session.nodeIdOrNull?.let { return it }
+        val raw = state.deviceInfo?.deviceId ?: state.selectedDevice?.deviceId ?: return null
+        return raw.takeIf { it > 0 }?.let(::NodeId)
+    }
+
+    private fun credentialKeys(): List<String> = buildList {
+        val id = knownNodeId()
+        if (id != null) {
+            add(credentialKey(id))
+            add("id:${id.value}")
+        }
+        currentBleAddress()?.takeIf { it.isNotBlank() }?.let {
+            add("legacy-addr:$it")
+            add("addr:$it")
+        }
+    }
+
     private fun loadCachedVerifier() { val stored = credentialKeys().firstNotNullOfOrNull { key -> platform.readDeviceVerifier(key)?.takeIf { bytes -> bytes.size == DplsAuth.VERIFIER_SIZE } }; replaceCachedVerifier(stored); updateState { it.copy(savedCredentials = stored != null) } }
     private fun persistCachedVerifier() { val stored = cachedVerifier; credentialKeys().forEach { platform.writeDeviceVerifier(it, stored) }; updateState { it.copy(savedCredentials = stored != null) } }
     private fun forgetCachedVerifier() { replaceCachedVerifier(null); persistCachedVerifier() }
@@ -749,13 +876,39 @@ class DplsClient(
     private fun retainedUiState(phase: ConnectionPhase = ConnectionPhase.IDLE, status: String = "Готово к поиску", scanning: Boolean = false) = DplsUiState(phase = phase, statusText = status, scanning = scanning, uiTheme = state.uiTheme, keepScreenOn = state.keepScreenOn, hapticsEnabled = state.hapticsEnabled)
 
     private fun fail(message: String, staleBond: Boolean = false) {
-        cancelLinkJobs(); clearOperation(); journal.fail(); platform.keepConnectionAlive(false); runtimeSession = DeviceSession.Failed(target?.address?.let { LinkEndpoint.Ble(it) }, LinkFailure.Platform(message))
+        val endpoint = session.endpointOrNull
+        cancelLinkJobs()
+        clearOperation()
+        journal.fail()
+        platform.keepConnectionAlive(false)
+        setSession(DeviceSession.Failed(endpoint, LinkFailure.Platform(message)))
         updateState { it.copy(phase = ConnectionPhase.ERROR, statusText = message, error = message, commandInProgress = false, logProgress = null, identifyLedLive = false, identifyLedPhaseOffsetMs = 0, linkRssi = null, staleBond = staleBond) }
         if (message != lastOperatorAlert) { lastOperatorAlert = message; platform.notifyOperator(DplsOperatorAlerts.ERROR_TITLE, message) }
     }
 
+    private fun setSession(next: DeviceSession) {
+        session = next
+        mutableState.value = projectSession(mutableState.value)
+    }
+
+    private fun projectSession(ui: DplsUiState): DplsUiState {
+        val initialized = when (session) {
+            is DeviceSession.Commissioning -> false
+            is DeviceSession.Authenticating, is DeviceSession.Online -> true
+            is DeviceSession.Recovering, is DeviceSession.Failed -> session.initializedOrNull ?: ui.initialized
+            else -> false
+        }
+        val credentialsReady = session.credentialsReady ||
+            (session is DeviceSession.Recovering && cachedVerifier != null)
+        return ui.copy(
+            authenticated = session.isAuthenticated,
+            initialized = initialized,
+            credentialsReady = credentialsReady,
+        )
+    }
+
     private fun settingsFailure(message: String) = updateState { it.copy(settingsOp = SettingsOp.FAILED, settingsError = message, settingsNotice = null) }
-    private inline fun updateState(block: (DplsUiState) -> DplsUiState) { mutableState.value = block(mutableState.value) }
+    private inline fun updateState(block: (DplsUiState) -> DplsUiState) { mutableState.value = projectSession(block(mutableState.value)) }
     private val state: DplsUiState get() = mutableState.value
     private fun deviceListCaption(count: Int): String = if (count == 0) "Устройства не найдены" else "Выберите устройство"
 
