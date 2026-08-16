@@ -5,7 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/mobile"
 
 ./gradlew \
+  :wire:testDebugUnitTest \
+  :runtime:testDebugUnitTest \
   :core:testDebugUnitTest \
+  :wire:lintDebug \
+  :runtime:lintDebug \
   :core:lintDebug \
   :android:lintDebug \
   :android:assembleDebug
@@ -16,6 +20,8 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ./gradlew \
+  :wire:iosSimulatorArm64Test \
+  :runtime:iosSimulatorArm64Test \
   :core:iosSimulatorArm64Test \
   :core:linkDebugFrameworkIosSimulatorArm64
 
