@@ -48,7 +48,6 @@ import ru.bolid.testdpls.core.runtime.challengeOrNull
 import ru.bolid.testdpls.core.runtime.credentialKey
 import ru.bolid.testdpls.core.runtime.credentialsReady
 import ru.bolid.testdpls.core.runtime.endpointOrNull
-import ru.bolid.testdpls.core.runtime.initializedOrNull
 import ru.bolid.testdpls.core.runtime.isAuthenticated
 import ru.bolid.testdpls.core.runtime.nodeIdOrNull
 import ru.bolid.testdpls.core.session.FrameSequencer
@@ -135,7 +134,7 @@ class DplsClient(
             return
         }
         disconnectInternal(clearSelection = true, clearVerifier = true)
-        mutableState.value = retainedUiState(scanning = true)
+        mutableState.value = projectSession(retainedUiState(scanning = true))
         if (transport.startScan()) armScanDeadline(keepSession = false)
     }
 
@@ -560,7 +559,7 @@ class DplsClient(
     override fun disconnect() {
         stopIdentify()
         disconnectInternal(clearSelection = true, clearVerifier = true)
-        mutableState.value = retainedUiState()
+        mutableState.value = projectSession(retainedUiState())
     }
 
     override fun openBluetoothSettings() {
@@ -892,7 +891,7 @@ class DplsClient(
                 ?: return fail("Потерян endpoint после первичной настройки")
             setSession(
                 DeviceSession.Recovering(
-                    nodeId = session.candidateNodeIdOrNull,
+                    nodeId = session.nodeIdOrNull,
                     endpoint = endpoint,
                     attempt = reconnectAttempt,
                 ),
@@ -1595,9 +1594,6 @@ class DplsClient(
     private fun currentBleAddress(): String? =
         (session.endpointOrNull as? LinkEndpoint.Ble)?.address
 
-    /** Verified identity only. */
-    private fun knownNodeId(): NodeId? = session.nodeIdOrNull
-
     /** Candidate identity is allowed only while locating saved credentials. */
     private fun credentialNodeId(): NodeId? =
         session.nodeIdOrNull ?: session.candidateNodeIdOrNull
@@ -1714,8 +1710,8 @@ class DplsClient(
     }
 
     /**
-     * Lifecycle fields are projections. Controller decisions never read them.
-     * This makes DeviceSession -> UI a one-way mapping with no second truth.
+     * Lifecycle fields are pure projections. No previous lifecycle projection is
+     * read back as authority; DeviceSession and cached credentials are sufficient.
      */
     private fun projectSession(ui: DplsUiState): DplsUiState {
         val initialized = when (session) {
@@ -1724,9 +1720,7 @@ class DplsClient(
             is DeviceSession.Synchronizing,
             is DeviceSession.Online,
             -> true
-            is DeviceSession.Recovering,
-            is DeviceSession.Failed,
-            -> session.initializedOrNull ?: ui.initialized
+            is DeviceSession.Recovering -> cachedVerifier != null
             else -> false
         }
         val credentialsReady = session.credentialsReady ||
