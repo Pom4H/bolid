@@ -21,4 +21,5 @@ rootProject.name = "test-dpls-mobile"
 include(":wire")
 include(":runtime")
 include(":core")
+include(":interop")
 include(":android")
