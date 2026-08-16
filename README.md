@@ -13,6 +13,7 @@ The repository follows three ownership rules:
 | Path | Purpose |
 |---|---|
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
+| `firmware/zmu/` | Cortex-M0 E2E harness for the [zmu](https://github.com/jjkt/zmu) emulator |
 | `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
 | `mobile/android/` | Android shell: permissions, Activity, debug E2E |
 | `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap |
