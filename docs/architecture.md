@@ -1,175 +1,115 @@
 # Architecture
 
-This document defines ownership boundaries in Test-DPLS. Moving a responsibility across one of these boundaries is an architecture change, not a local refactor.
+This document is the repository-level ownership map for Test-DPLS. Detailed mobile runtime invariants live in `docs/runtime-architecture.md`.
 
-## Runtime model
+The rule behind the layout is simple: **a test double may duplicate effects, not product decisions**. A responsibility may have several language-specific implementations only when they are independently checked against one explicit contract.
 
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ firmware/                                                    │
-│ portable C99 server + PHY6252 adapter                        │
-│ safety · persistence · outputs · ATT indication queue        │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ Test-DPLS binary protocol
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│ mobile/core/src/commonMain                                   │
-│                                                              │
-│ DplsClient — single application controller                   │
-│ frame/CRC · auth/crypto · parsers · domain/session           │
-│ reconnect · commands · settings · journal · shared DplsApp   │
-└──────────────────────────────┬───────────────────────────────┘
-                               │ DplsTransport + DplsPlatformServices
-                 ┌─────────────┴─────────────┐
-                 │                           │
-        ┌────────▼──────────┐       ┌────────▼──────────┐
-        │ core/androidMain  │       │ core/iosMain      │
-        │ AndroidBleTransport│      │ IosBleTransport  │
-        │ AndroidPlatform   │       │ IosPlatform      │
-        │ BLE keep-alive FGS│       │ local alerts     │
-        └────────┬──────────┘       └────────┬─────────┘
-                 │                           │
-        ┌────────▼──────────┐       ┌────────▼──────────┐
-        │ mobile/android/   │       │ mobile/ios/       │
-        │ Activity, perms,  │       │ Xcode shell       │
-        │ debug E2E         │       │ one Swift bootstrap│
-        └───────────────────┘       └───────────────────┘
-```
+## Sources of truth
 
-Both platforms use the same `DplsClient` and render the same `DplsApp`. Platform code in `core/androidMain` and `core/iosMain` supplies BLE transport, clock/random, operator alerts and keep-screen-on. `mobile/android` and `mobile/ios` are OS shells (permissions, manifest/plist, debug E2E, one Swift bootstrap).
+| Concern | Owner |
+|---|---|
+| DPLS frame/message/mode numeric contract | `protocol/dpls-wire.json` |
+| Portable device behavior | `firmware/src` + `firmware/include` |
+| Dangerous-mode safety | `firmware/src/dpls_safety.c` |
+| Physical PHY6252 pins and ADC routing | `firmware/phy6252/dpls_board.h` |
+| PHY6252 target adaptation | `firmware/phy6252` + `firmware/targets/phy6252` |
+| PHY6252 ATT/OSAL/SNV host model | `firmware/phy6252_emu` |
+| Host device test double | `firmware/sim` |
+| Mobile frame/crypto/advertisement implementation | `mobile/wire` |
+| Mobile identity/session lifecycle | `mobile/runtime` |
+| Product orchestration and shared UI | `mobile/core` |
+| Android/iOS OS adaptation | `mobile/core/src/androidMain`, `mobile/core/src/iosMain` |
+| Interactive host lab | `tools/dpls-lab` + `mobile/web` |
 
-## Ownership rules
+## Firmware boundary
 
-### Firmware owns safety
+`firmware/src` is the portable product core. The same `dpls_server`, `dpls_safety`, LED, crypto, calibration and protocol implementation is linked into host tests and `dpls_simulator`.
 
-Only firmware decides whether an electrical test mode may remain energized. Mobile software requests actions; it is never the safety boundary.
+Only firmware decides whether an electrical test mode may remain energized. Mobile software requests actions; it is not a safety boundary.
 
-Firmware owns:
+The PHY6252 target owns vendor-specific effects: GPIO, ADC, bonding, SNV, BLE/ATT scheduling and power-management quirks. Portable `firmware/src` must not include vendor SDK headers.
 
-- safe `NORMAL` state at boot/disconnect/error;
-- break-before-make output switching;
-- dangerous-mode and session timeouts;
-- reserve and real-short safety overrides;
-- persistent settings/authentication lock/event journal;
-- physical ADC/readback and board mapping;
-- ATT indication serialization and confirmation timeout (host/zmu chip model: `firmware/phy6252_emu`).
+## Simulator boundary
 
-A mobile crash or stale connection must not be able to keep a dangerous output active indefinitely.
+`firmware/sim` is a **HAL/test-double zone around the real portable firmware**, not another implementation of the product.
 
-### `commonMain` owns product behavior
+It may own:
 
-Put code in `mobile/core/src/commonMain` when Android and iOS must produce the same answer or show the same product behavior.
+- deterministic/random hardware inputs;
+- simulated GPIO/readback and voltage values;
+- in-memory settings/event persistence;
+- fault injection;
+- snapshots and the stdio command surface;
+- wiring to `phy6252_emu`.
 
-It owns:
+It must not own:
 
-- `DplsClient`, the single application/session controller;
-- frame types and CRC-16/CCITT-FALSE;
-- binary encode/decode;
-- authentication byte contracts plus SHA-256/HMAC/PBKDF2 implementation;
-- `AUTH_*`, `COMMAND_RESULT`, `SETTINGS_RESULT`, `STATE_REPORT`, device-info and journal parsing;
-- shared domain types and secret-bearing session runtime;
-- reconnect/keepalive/state-refresh/command/settings/journal orchestration;
-- command-id correlation so stale acknowledgements cannot complete a newer command;
-- the Compose `DplsApp` screen tree.
+- a DPLS message table or frame codec;
+- HELLO/auth/session handlers;
+- mode/safety state-machine decisions;
+- a second journal protocol;
+- a second product controller.
 
-`commonMain` must not import Android framework APIs, CoreBluetooth, UIKit or other platform-only APIs.
+`dpls_simulator` must link the portable firmware core and `phy6252_emu`. `tools/architecture_guard.py` enforces this boundary by content, not by filenames.
 
-The host lab (`tools/dpls-lab`, `mobile/web`) reuses that same `DplsApp`. The wasm phone talks to the hub over WebSocket (`LabBleTransport`); it is not a second protocol or UI. Native `dpls-ble` is only a CoreBluetooth adapter for the laptop radio (one role at a time: peripheral *or* central).
+### Test-double parity
 
-### Platform code owns operating-system adaptation
+A simulator is allowed to expose richer **diagnostic snapshots** than the product wire, because the lab needs observability. It must not expose richer behavior to `DplsClient` than the real target.
 
-Android platform code in `core/src/androidMain` owns:
+Example: the current PHY6252 scan response reserves an advertisement status byte but emits `0`. The simulator may still show `power`, `reserve_low` and `real_short` in its internal board snapshot, but soft-BLE and native simulated advertising must present status `0` until the physical target implements dynamic status too.
 
-- `BluetoothGatt` callbacks, bonding, MTU and CCCD subscription;
-- transient write retries and stale-bond/GATT-133 recovery;
-- foreground-service keep-alive and local operator notifications.
+Mode/output and pin mappings are intentionally implemented independently by target, simulator and lab visualization. `tools/test_dpls_protocol_crc.py` compares all three against the canonical contract/board mapping so divergence fails CI instead of becoming a second truth.
 
-`mobile/android` owns:
-
-- runtime Bluetooth permissions and the enable-Bluetooth prompt;
-- Activity/application entry point and debug E2E broadcast driver.
-
-iOS platform code in `core/src/iosMain` owns:
-
-- `CBCentralManager` / `CBPeripheral` callbacks;
-- write queue and CoreBluetooth lifecycle;
-- secure random bytes and clock from Apple frameworks;
-- local operator notifications;
-- the Compose `UIViewController` host.
-
-`mobile/ios` itself is only the Xcode product shell: signing, plist, assets and the one Swift entry point required to launch the exported Kotlin view controller.
-
-Platform adapters translate native events into `DplsTransportListener` events. Advertisement identity (name, manufacturer payload, device id) is parsed once in `DplsBle.discovered`. Keep-screen-on is applied from shared Compose through `PlatformSessionEffects`. Adapters must not introduce a second frame codec, parser, session controller or application UI.
-
-## Command truth model
-
-A successful BLE write is not proof that hardware entered the requested mode.
+## Mobile dependency direction
 
 ```text
-operator request
-    → DplsClient assigns command id
-    → platform transport writes GATT
-    → firmware validates + applies/rejects
-    → matching COMMAND_RESULT
-    → STATE_REPORT
-    → shared UI reflects confirmed hardware state
+:wire
+  frame / CRC / crypto / advertisement
+        ↓
+:runtime
+  NodeId / endpoint / session lifecycle / sequence
+        ↓
+:core
+  DplsClient / product flow / journal / Compose
+        ↓
+platform adapters and product shells
 ```
 
-A `COMMAND_RESULT` with a different command id is ignored. The final `STATE_REPORT` is the application-visible source of hardware truth.
+`DeviceSession` is the only mutable owner of link/auth/identity lifecycle. `DplsProtocol.Frame.sequence` is the only transaction id. `STATE_REPORT` is the application-visible source of confirmed hardware state.
 
-## Dependency direction
+Platform adapters translate OS events into `DplsTransportListener`; they must not introduce another frame codec, parser, session controller or UI tree.
 
-Allowed:
+## Host lab boundary
 
-```text
-mobile/android shell           → core/androidMain + commonMain
-core/androidMain transport     → commonMain
-core/iosMain transport         → commonMain
-mobile/ios Xcode bootstrap     → DplsCore framework
-firmware target adapter        → pinned vendor SDK
-```
+`tools/dpls-lab` is orchestration and diagnostics. `mobile/web` runs the same Compose product UI through `LabBleTransport`.
 
-Not allowed:
+The TypeScript lab may define its own WebSocket/control JSON (`spawn`, `snapshot`, `tick`, `ble_up`, etc.) because that is a lab API, not DPLS. It must not contain DPLS message ids, frame flags, crypto or another phone controller. `tools/architecture_guard.py` scans all TS/TSX files, so renaming a duplicate `protocol.ts` to `types.ts` cannot bypass the invariant.
 
-```text
-commonMain → Android/CoreBluetooth/UIKit APIs
-portable firmware/src → vendor SDK headers
-platform code → duplicate protocol/controller/UI implementations
-mobile app → hardware safety decisions
-```
+## Wire contract
+
+`protocol/dpls-wire.json` is the machine-readable description of the **current wire format**: frame sizes, flags, message ids, mode ids/output semantics and advertisement bits.
+
+C, Kotlin and the dependency-free Python capture/replay codec remain separate implementations on purpose. CI compares each representation against the JSON contract and also runs independent known-answer/behavioral tests. We do not generate runtime code from JSON because that would make the implementations less independent and add a build dependency for little value at this stage.
+
+The JSON field `wire_version: 2` is a byte-level protocol-format value. It is **not a product major version** and does not make the device/application a 2.x product line. Until the product is released to series, there is one active product line and one active wire contract.
 
 ## Test placement
 
-Put a test at the lowest layer that can prove the behavior once:
+Put a test at the lowest layer that proves the behavior once:
 
-- firmware behavior → firmware host tests;
-- wire bytes/CRC/auth/message parsing → KMP common tests;
-- application/session behavior → `DplsClient` fake-transport common tests;
-- Android framework integration → Android lint/build + hardware E2E;
-- iOS framework/export integration → Kotlin/Native tests + XCTest smoke;
-- host product path without a phone → `bash tools/soft_ble_e2e.sh` (`DplsClient` ↔ `dpls_simulator`);
-- interactive lab / wasm phone / laptop BLE → `bash tools/dpls_lab.sh`;
-- physical outputs/BLE pairing/radio behavior → hardware bring-up/E2E.
+- portable firmware behavior → `firmware/tests`;
+- PHY6252 queue/ATT behavior → `firmware/phy6252_emu` tests;
+- C/Kotlin/Python wire agreement + target/simulator/lab mapping parity → `tools/test_dpls_protocol_crc.py`;
+- application/session behavior → `DplsClient` common tests;
+- product path against the real C simulator → soft-BLE/differential replay E2E;
+- Android/iOS framework integration → platform tests/builds;
+- physical GPIO/ADC/radio behavior → hardware bring-up/E2E.
 
-The common suite includes CRC and crypto known-answer vectors, all-message round trips, binary control/state/log contracts, session reset tests, shared-controller flow tests, stale command-id rejection, 10,000 malformed decoder inputs and 2,000 randomized valid frame round trips.
+## Repository gates
 
-## Repository invariants
+- `tools/check_repo_layout.sh` protects module/layout ownership.
+- `tools/architecture_guard.py` protects lifecycle, dependency and simulator/lab boundaries.
+- `tools/test_dpls_protocol_crc.py` protects machine-contract and target/simulator parity.
+- `tools/check_all.sh` is the host-side aggregate gate.
 
-`tools/check_repo_layout.sh` prevents the architecture from drifting back into duplicate implementations. It rejects legacy top-level directories as well as old Android/Swift controllers, duplicate platform protocol facades, duplicate UI trees and obsolete KMP bridges.
-
-Production iOS intentionally contains one Swift bootstrap source. Each OS has one BLE transport in the KMP module (`androidMain` / `iosMain`).
-
-## Developer experience rule
-
-An ordinary product feature should normally touch **one shared Kotlin area**, not Android + Swift copies.
-
-- screen or application flow → `mobile/core/src/commonMain/.../app/`
-- protocol/auth contract → `mobile/core/src/commonMain/.../protocol/`
-- secret/session runtime → `mobile/core/src/commonMain/.../session/`
-- Android OS/Bluetooth quirk → `mobile/core/src/androidMain/`
-- iOS OS/Bluetooth quirk → `mobile/core/src/iosMain/`
-- Android/iOS product shell → `mobile/android/` or `mobile/ios/`
-
-Use `bash tools/check_mobile.sh` for the mobile loop and `bash tools/check_all.sh` for all host-side repository gates.
-
-The PHY62XX SDK remains independently pinned in `firmware/sdk/phy6252-sdk.env`; changing the SDK is not part of ordinary application work.
+Architecture changes should change the relevant gate in the same PR. A guard that no longer represents the current product is itself architecture drift.
