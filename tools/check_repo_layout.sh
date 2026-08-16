@@ -6,6 +6,7 @@ cd "$ROOT"
 
 required=(
   firmware
+  protocol
   mobile/android
   mobile/wire
   mobile/runtime
@@ -57,6 +58,10 @@ grep -q 'include(":core")' mobile/settings.gradle.kts
 grep -q 'include(":android")' mobile/settings.gradle.kts
 ! grep -q 'include(":app")' mobile/settings.gradle.kts
 ! grep -q 'include(":shared")' mobile/settings.gradle.kts
+
+# The machine-readable wire contract is a repository-level source of truth,
+# not an implementation detail of firmware, mobile or the lab.
+test -f protocol/dpls-wire.json
 
 # Dependency zones are represented by physical modules.
 test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
