@@ -22,8 +22,7 @@ typedef enum {
     DPLS_SAFETY_RETURN_SESSION_TIMEOUT,
     DPLS_SAFETY_RETURN_LOW_RESERVE,
     DPLS_SAFETY_RETURN_DISCONNECT,
-    DPLS_SAFETY_RETURN_REAL_SHORT,
-    DPLS_SAFETY_RETURN_INTERNAL_ERROR
+    DPLS_SAFETY_RETURN_REAL_SHORT
 } dpls_safety_return_t;
 
 typedef struct {
@@ -42,7 +41,7 @@ typedef struct {
 
 void dpls_safety_init(dpls_safety_t *s);
 bool dpls_safety_can_enter(dpls_safety_mode_t mode, bool real_short);
-void dpls_safety_applied(dpls_safety_t *s, dpls_safety_mode_t mode, uint32_t now_ms);
+void dpls_safety_commit_mode(dpls_safety_t *s, dpls_safety_mode_t mode, uint32_t now_ms);
 void dpls_safety_force_normal(dpls_safety_t *s);
 dpls_safety_return_t dpls_safety_required_return(
     const dpls_safety_t *s,

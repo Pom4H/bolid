@@ -133,7 +133,7 @@ Do not add `fooValue + fooValid` pairs. Capability bits stay packed in `DeviceCa
 
 `dpls_safety` is the single owner of dangerous-mode state, deadline math, revision and forced-return precedence. BLE, journal export, authentication proof and wall-clock time must not be added to it.
 
-A failed `hardware_apply_mode()` forces both physical outputs and the logical safety state to Normal, preventing physical/logical split-brain.
+A failed `hal.hardware.apply_mode()` forces both physical outputs and the logical safety state to Normal, preventing physical/logical split-brain.
 
 ## Future mesh and RS-232
 

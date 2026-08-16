@@ -192,6 +192,7 @@ project:
         - file: source/dplsBLEPeripheral.c
         - file: ../../src/dpls_protocol.c
         - file: ../../src/dpls_server.c
+        - file: ../../src/dpls_safety.c
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
         - file: ../../phy6252/dpls_gatt_service.c

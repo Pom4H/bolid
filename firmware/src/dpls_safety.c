@@ -15,7 +15,7 @@ bool dpls_safety_can_enter(dpls_safety_mode_t mode, bool real_short) {
     return mode == DPLS_SAFE_NORMAL || !real_short;
 }
 
-void dpls_safety_applied(dpls_safety_t *s, dpls_safety_mode_t mode, uint32_t now_ms) {
+void dpls_safety_commit_mode(dpls_safety_t *s, dpls_safety_mode_t mode, uint32_t now_ms) {
     if (s->mode != mode) ++s->revision;
     s->mode = mode;
     s->mode_deadline_ms = mode == DPLS_SAFE_NORMAL ? 0u : now_ms + DPLS_SAFETY_MODE_MAX_MS;

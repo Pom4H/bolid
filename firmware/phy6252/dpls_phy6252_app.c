@@ -131,8 +131,13 @@ static uint32_t pre_auth_disconnect_window_ms;
 #define DPLS_RX_QUEUE_DEPTH 6u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
-static dpls_rx_slot_t rx_queue[DPLS_RX_QUEUE_DEPTH];
-static uint8 rx_head, rx_tail, rx_count;
+typedef struct {
+    dpls_rx_slot_t slots[DPLS_RX_QUEUE_DEPTH];
+    uint8 head;
+    uint8 tail;
+    uint8 count;
+} dpls_rx_queue_t;
+static dpls_rx_queue_t rx;
 
 /* Indications are paced one-in-flight against the ATT confirmation, otherwise a
  * busy stack drops back-to-back responses. The largest response is a batched
@@ -141,14 +146,19 @@ static uint8 rx_head, rx_tail, rx_count;
 #define DPLS_TX_QUEUE_DEPTH 4u
 #define DPLS_TX_SLOT_SIZE 168u
 typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
-static dpls_tx_slot_t tx_queue[DPLS_TX_QUEUE_DEPTH];
-static uint8 tx_head, tx_tail, tx_count;
-static bool tx_in_flight;
+typedef struct {
+    dpls_tx_slot_t slots[DPLS_TX_QUEUE_DEPTH];
+    uint8 head;
+    uint8 tail;
+    uint8 count;
+    bool in_flight;
+    uint32_t in_flight_since_ms;
+} dpls_tx_queue_t;
 /* The host occasionally loses a confirmation, and without a deadline the
  * one-in-flight pipeline would wedge behind it forever. On timeout the frame is
  * written off and the pump moves on; the client's next poll refreshes state. */
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
-static uint32_t tx_in_flight_since_ms;
+static dpls_tx_queue_t tx;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
 
@@ -229,57 +239,73 @@ static void journal_encode_record(uint8_t record[DPLS_JOURNAL_RECORD_SIZE], cons
     record[11] = (uint8_t)(crc >> 8);
 }
 
-static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_sequence)
+static uint8_t *journal_scan_block(uint16_t block_index)
 {
-    uint8_t *block;
-    uint8_t present[(DPLS_EVENT_CAPACITY + 7u) / 8u];
+    /* A full boot scan exceeds the watchdog period before the OSAL feed task exists. */
+    hal_watchdog_feed();
+    return journal_load_block((uint8_t)block_index);
+}
+
+static bool journal_record_in_slot(const uint8_t *record, uint16_t slot, dpls_event_t *event)
+{
+    return journal_decode_record(record, event) &&
+           (uint16_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY) == slot;
+}
+
+static uint32_t journal_latest_sequence(void)
+{
     dpls_event_t event;
     uint32_t max_sequence = 0;
-    uint16_t block_index, record_index, suffix_count = 0;
-    (void)context;
-    memset(present, 0, sizeof(present));
-    journal_cached_block = 0xffu;
+    uint16_t block_index, record_index;
 
-    /* First pass finds the newest individually checksummed record. */
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
-        /* Scanning 20 populated blocks outlasts the 2 s watchdog window, and
-         * init runs before the OSAL feed task exists. Feed per block or a full
-         * journal makes the device unbootable. */
-        hal_watchdog_feed();
-        block = journal_load_block((uint8_t)block_index);
+        uint8_t *block = journal_scan_block(block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
-            if (journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &event) &&
-                (uint16_t)((event.sequence - 1u) % DPLS_EVENT_CAPACITY) == slot &&
+            if (journal_record_in_slot(block + record_index * DPLS_JOURNAL_RECORD_SIZE, slot, &event) &&
                 event.sequence > max_sequence) max_sequence = event.sequence;
         }
     }
-    if (max_sequence == 0u || max_sequence == UINT32_MAX) {
-        *count = 0;
-        *next_sequence = 1;
-        return true;
-    }
+    return max_sequence;
+}
 
-    /* Second pass builds a 25-byte validity bitmap and keeps no event array in
-     * RAM. A torn record truncates the recovered history there rather than
-     * exporting stale bytes. */
+static uint16_t journal_contiguous_count(uint32_t max_sequence)
+{
+    /* A torn slot truncates exported history; older bytes must never bridge the gap. */
+    uint8_t present[(DPLS_EVENT_CAPACITY + 7u) / 8u];
+    dpls_event_t event;
+    uint16_t block_index, record_index, count = 0;
+    memset(present, 0, sizeof(present));
+
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
-        hal_watchdog_feed();
-        block = journal_load_block((uint8_t)block_index);
+        uint8_t *block = journal_scan_block(block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
             uint32_t age;
-            if (!journal_decode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &event) ||
-                (uint16_t)((event.sequence - 1u) % DPLS_EVENT_CAPACITY) != slot ||
+            if (!journal_record_in_slot(block + record_index * DPLS_JOURNAL_RECORD_SIZE, slot, &event) ||
                 event.sequence > max_sequence) continue;
             age = max_sequence - event.sequence;
             if (age < DPLS_EVENT_CAPACITY)
                 present[age / 8u] |= (uint8_t)(1u << (age % 8u));
         }
     }
-    while (suffix_count < DPLS_EVENT_CAPACITY &&
-           (present[suffix_count / 8u] & (uint8_t)(1u << (suffix_count % 8u)))) ++suffix_count;
-    *count = suffix_count;
+    while (count < DPLS_EVENT_CAPACITY &&
+           (present[count / 8u] & (uint8_t)(1u << (count % 8u)))) ++count;
+    return count;
+}
+
+static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_sequence)
+{
+    uint32_t max_sequence;
+    (void)context;
+    journal_cached_block = 0xffu;
+    max_sequence = journal_latest_sequence();
+    if (max_sequence == 0u || max_sequence == UINT32_MAX) {
+        *count = 0u;
+        *next_sequence = 1u;
+        return true;
+    }
+    *count = journal_contiguous_count(max_sequence);
     *next_sequence = max_sequence + 1u;
     return true;
 }
@@ -427,7 +453,6 @@ static void load_calibration(void)
     }
 }
 
-/* Fold one sample into a moving-average window and return the current average. */
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
     uint32_t sum = 0u;
@@ -467,7 +492,6 @@ static void adc_evt(adc_Evt_t *event)
     osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
 }
 
-/* Task context: raw samples, pin volts, calibration, moving average. */
 static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t size,
                                 const dpls_calib_t *calib, uint16_t *window,
                                 uint8_t *wcount, uint8_t *wpos, volatile uint16_t *cached)
@@ -733,7 +757,6 @@ static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
     }
 }
 
-/* NAME_SET: replace just the user name, keep salt/verifier. */
 static bool settings_set_name(void *context, const char *name)
 {
     size_t name_length;
@@ -746,7 +769,6 @@ static bool settings_set_name(void *context, const char *name)
     return persist_current_settings();
 }
 
-/* PASSWORD_SET: replace just salt+verifier, keep the name. */
 static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
 {
     (void)context;
@@ -836,20 +858,20 @@ static bool verify_proof(void *context, const uint8_t device_nonce[16], const ui
 static void tx_pump(void)
 {
     bStatus_t rc;
-    if (tx_in_flight || tx_count == 0u || connection_handle == INVALID_CONNHANDLE) return;
-    rc = dpls_gatt_send_indication(connection_handle, tx_queue[tx_head].data,
-                                   tx_queue[tx_head].length, task_id);
+    if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+    rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
+                                   tx.slots[tx.head].length, task_id);
     if (rc == SUCCESS) {
-        tx_in_flight = true; /* wait for the ATT confirmation before the next */
-        tx_in_flight_since_ms = now_ms();
+        tx.in_flight = true;
+        tx.in_flight_since_ms = now_ms();
     } else if (rc == bleMemAllocError || rc == blePending) {
         /* Transient: keep the head and retry from the next tick. */
     } else {
         /* Permanent (not subscribed / too big for MTU / not connected): drop
          * this frame so the queue cannot deadlock behind an unsendable head. */
-        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
-        if (tx_count) --tx_count;
-        if (tx_count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+        tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx.count) --tx.count;
+        if (tx.count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
     }
 }
 
@@ -857,20 +879,19 @@ static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
 {
     (void)context;
     if (length > DPLS_TX_SLOT_SIZE) return false;
-    if (tx_count >= DPLS_TX_QUEUE_DEPTH) {
+    if (tx.count >= DPLS_TX_QUEUE_DEPTH) {
         /* Queue full: the client has stopped confirming. Fail safe rather than
          * lose a control response — drop to Norma, reset the queue and drop the
          * link so the reconnect starts clean. */
         safe_normal(NULL);
-        tx_head = tx_tail = tx_count = 0;
-        tx_in_flight = false;
+        memset(&tx, 0, sizeof(tx));
         if (connection_handle != INVALID_CONNHANDLE) (void)GAPRole_TerminateConnection();
         return false;
     }
-    memcpy(tx_queue[tx_tail].data, frame, length);
-    tx_queue[tx_tail].length = (uint16)length;
-    tx_tail = (uint8)((tx_tail + 1u) % DPLS_TX_QUEUE_DEPTH);
-    ++tx_count;
+    memcpy(tx.slots[tx.tail].data, frame, length);
+    tx.slots[tx.tail].length = (uint16)length;
+    tx.tail = (uint8)((tx.tail + 1u) % DPLS_TX_QUEUE_DEPTH);
+    ++tx.count;
     osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
     return true;
 }
@@ -882,18 +903,12 @@ void dpls_phy6252_process_tx(void)
 
 void dpls_phy6252_tx_confirmed(void)
 {
-    if (tx_in_flight) {
-        tx_head = (uint8)((tx_head + 1u) % DPLS_TX_QUEUE_DEPTH);
-        if (tx_count) --tx_count;
-        tx_in_flight = false;
+    if (tx.in_flight) {
+        tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
+        if (tx.count) --tx.count;
+        tx.in_flight = false;
     }
     tx_pump();
-}
-
-static bool tx_notify(void *context, const uint8_t *frame, size_t length)
-{
-    (void)context;
-    return dpls_gatt_send_notification(connection_handle, frame, (uint16)length, task_id);
 }
 
 static uint8 receive_frame(const uint8 *data, uint16 length)
@@ -902,12 +917,12 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
     if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
     /* Full queue: NAK the write so the client retries instead of losing the
      * frame silently. */
-    if (rx_count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
-    slot = &rx_queue[rx_tail];
+    if (rx.count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
+    slot = &rx.slots[rx.tail];
     memcpy(slot->data, data, length);
     slot->length = length;
-    rx_tail = (uint8)((rx_tail + 1u) % DPLS_RX_QUEUE_DEPTH);
-    ++rx_count;
+    rx.tail = (uint8)((rx.tail + 1u) % DPLS_RX_QUEUE_DEPTH);
+    ++rx.count;
     osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
     return SUCCESS;
 }
@@ -960,36 +975,15 @@ static void classify_settings(void)
     memset(&settings, 0, sizeof(settings));
 }
 
-void dpls_phy6252_init(uint8 new_task_id)
+static void initialize_retained_outputs(void)
 {
-    dpls_hal_t hal;
-    task_id = new_task_id;
-    connection_handle = INVALID_CONNHANDLE;
-    rx_head = rx_tail = rx_count = 0;
-    tx_head = tx_tail = tx_count = 0;
-    tx_in_flight = false;
-    identify_led_active = false;
-    /* Drive every mode output to the safe "Norma" level before the radio or the
-     * state machine can touch them. hal_gpio_write() is the only glitch-safe
-     * primitive here: it loads the data latch and only then enables the output
-     * direction. Enabling the direction first — hal_gpio_pin_init(pin, OEN) —
-     * would assert a pulse on an active-high control pin whenever a retained or
-     * warm-boot latch still holds 1. */
-    hal_gpio_write(DPLS_PIN_ISO_1, 0);
-    hal_gpio_write(DPLS_PIN_ISO_2, 0);
-    hal_gpio_write(DPLS_PIN_ISO_T, 0);
-    hal_gpio_write(DPLS_PIN_KZ_1, 0);
-    hal_gpio_write(DPLS_PIN_KZ_2, 0);
-    hal_gpio_write(DPLS_PIN_KZ_T, 0);
+    /* hal_gpio_write loads the safe latch before enabling output; pin_init can pulse a retained high latch. */
+    mode_outputs_off();
     hal_gpio_write(DPLS_PIN_LED_RED, 0);
     hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
     hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
-    /* PHY62xx sleep powers the GPIO block down: an output pad holds its level
-     * through sleep only while it is registered for AON retention, and the
-     * wake handler restores just those pins. Without this a mode output goes
-     * high and then silently collapses at the first sleep window — the pin is
-     * written once on the mode change and never again, so it never comes back
-     * (the LED only survived because its blink rewrites the pad). */
+
+    /* PHY62xx powers GPIO down in sleep, so every stateful output must use AON retention. */
     (void)hal_gpioretention_register(DPLS_PIN_ISO_1);
     (void)hal_gpioretention_register(DPLS_PIN_ISO_2);
     (void)hal_gpioretention_register(DPLS_PIN_ISO_T);
@@ -1000,7 +994,10 @@ void dpls_phy6252_init(uint8 new_task_id)
     (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
     (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
     hardware_mode = DPLS_MODE_NORMAL;
-    dpls_led_init(&status_led, status_led_output, NULL, now_ms());
+}
+
+static void reset_measurements(void)
+{
     line_window_count = line_window_pos = 0;
     port2_window_count = port2_window_pos = 0;
     port_t_window_count = port_t_window_pos = 0;
@@ -1008,11 +1005,60 @@ void dpls_phy6252_init(uint8 new_task_id)
     cached_line_mv = cached_port2_mv = cached_port_t_mv = cached_vcap_mv = 0;
     adc_pending = 0u;
     adc_raw_ready = false;
+    adc_busy = false;
     power_state = DPLS_POWER_LINE;
     reserve_low_state = false;
     auto_isolation_active = false;
     line_established = false;
-    adc_busy = false;
+}
+
+static dpls_hal_t server_hal(void)
+{
+    dpls_hal_t hal;
+    memset(&hal, 0, sizeof(hal));
+    hal.link.encrypted = link_encrypted;
+    hal.link.indicate = tx_indicate;
+    hal.link.disconnect = disconnect_after_setup;
+    hal.hardware.apply_mode = apply_mode;
+    hal.hardware.safe_normal = safe_normal;
+    hal.hardware.voltage_mv = voltage_mv;
+    hal.hardware.port1_voltage_mv = port1_voltage_mv;
+    hal.hardware.port2_voltage_mv = port2_voltage_mv;
+    hal.hardware.port_t_voltage_mv = port_t_voltage_mv;
+    hal.hardware.reserve_voltage_mv = reserve_voltage_mv;
+    hal.hardware.power_source = power_source;
+    hal.hardware.reserve_low = reserve_low;
+    hal.hardware.measurement_validity = measurement_validity;
+    hal.hardware.real_short_active = real_short_active;
+    hal.hardware.identify_led = identify_led;
+    hal.hardware.device_info = device_info;
+    hal.settings.state = get_settings_state;
+    hal.settings.salt = settings_salt;
+    hal.settings.write = write_settings;
+    hal.settings.name = settings_name;
+    hal.settings.set_name = settings_set_name;
+    hal.settings.set_password = settings_set_password;
+    hal.auth.random_bytes = random_bytes;
+    hal.auth.verify_proof = verify_proof;
+    hal.auth.lock_read = auth_lock_read;
+    hal.auth.lock_write = auth_lock_write;
+    hal.events.init = journal_storage_init;
+    hal.events.append = journal_storage_append;
+    hal.events.read = journal_storage_read;
+    return hal;
+}
+
+void dpls_phy6252_init(uint8 new_task_id)
+{
+    dpls_hal_t hal = server_hal();
+    task_id = new_task_id;
+    connection_handle = INVALID_CONNHANDLE;
+    memset(&rx, 0, sizeof(rx));
+    memset(&tx, 0, sizeof(tx));
+    identify_led_active = false;
+    initialize_retained_outputs();
+    dpls_led_init(&status_led, status_led_output, NULL, now_ms());
+    reset_measurements();
     load_calibration();
     hal_adc_init();
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
@@ -1025,37 +1071,6 @@ void dpls_phy6252_init(uint8 new_task_id)
         dpls_ble_identity_reset_bonding_keys();
     }
 
-    memset(&hal, 0, sizeof(hal));
-    hal.link_encrypted = link_encrypted;
-    hal.hardware_apply_mode = apply_mode;
-    hal.hardware_safe_normal = safe_normal;
-    hal.voltage_mv = voltage_mv;
-    hal.port1_voltage_mv = port1_voltage_mv;
-    hal.port2_voltage_mv = port2_voltage_mv;
-    hal.port_t_voltage_mv = port_t_voltage_mv;
-    hal.reserve_voltage_mv = reserve_voltage_mv;
-    hal.power_source = power_source;
-    hal.reserve_low = reserve_low;
-    hal.measurement_validity = measurement_validity;
-    hal.real_short_active = real_short_active;
-    hal.identify_led = identify_led;
-    hal.random_bytes = random_bytes;
-    hal.settings_state = get_settings_state;
-    hal.settings_salt = settings_salt;
-    hal.settings_write = write_settings;
-    hal.settings_name = settings_name;
-    hal.settings_set_name = settings_set_name;
-    hal.settings_set_password = settings_set_password;
-    hal.device_info = device_info;
-    hal.verify_auth_proof = verify_proof;
-    hal.auth_lock_read = auth_lock_read;
-    hal.auth_lock_write = auth_lock_write;
-    hal.event_storage_init = journal_storage_init;
-    hal.event_storage_append = journal_storage_append;
-    hal.event_storage_read = journal_storage_read;
-    hal.tx_indicate = tx_indicate;
-    hal.tx_notify = tx_notify;
-    hal.disconnect_after_setup = disconnect_after_setup;
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
 }
@@ -1076,7 +1091,7 @@ static void erase_bonds_and_drop_link(void)
 static void note_pre_auth_disconnect(void)
 {
     uint32_t now = now_ms();
-    if (server.authenticated || !connection_had_encryption) {
+    if (dpls_server_authenticated(&server) || !connection_had_encryption) {
         return;
     }
     if (pre_auth_disconnect_window_ms == 0u ||
@@ -1111,46 +1126,51 @@ void dpls_phy6252_disconnected(void)
     connection_handle = INVALID_CONNHANDLE;
     connected_at_ms = 0;
     connection_had_encryption = false;
-    rx_head = rx_tail = rx_count = 0;
-    tx_head = tx_tail = tx_count = 0;
-    tx_in_flight = false;
+    memset(&rx, 0, sizeof(rx));
+    memset(&tx, 0, sizeof(tx));
 }
 
 void dpls_phy6252_process_rx(void)
 {
     dpls_rx_slot_t *slot;
-    if (rx_count == 0u) return;
-    slot = &rx_queue[rx_head];
+    if (rx.count == 0u) return;
+    slot = &rx.slots[rx.head];
     (void)dpls_server_receive(&server, slot->data, slot->length, now_ms());
     slot->length = 0;
-    rx_head = (uint8)((rx_head + 1u) % DPLS_RX_QUEUE_DEPTH);
-    --rx_count;
-    if (rx_count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    rx.head = (uint8)((rx.head + 1u) % DPLS_RX_QUEUE_DEPTH);
+    --rx.count;
+    if (rx.count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
-void dpls_phy6252_tick(void)
+static void tick_link_security(uint32_t now)
 {
     if (connection_handle != INVALID_CONNHANDLE) {
-        if (link_encrypted(NULL)) {
-            connection_had_encryption = true;
-        }
-        if (server.authenticated) {
+        if (link_encrypted(NULL)) connection_had_encryption = true;
+        if (dpls_server_authenticated(&server)) {
             pre_auth_disconnect_count = 0;
             pre_auth_disconnect_window_ms = 0;
         }
     }
     if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) && connected_at_ms != 0u &&
-        (uint32_t)(now_ms() - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
+        (uint32_t)(now - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
         connected_at_ms = 0;
         erase_bonds_and_drop_link();
     }
+}
+
+static void tick_factory_reset(uint32_t now)
+{
     if (factory_reset_armed) {
         if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
-        else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
+        else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
             factory_reset_armed = false;
             clear_settings_and_bonds();
         }
     }
+}
+
+static void tick_measurements(void)
+{
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
         adc_pending = connection_handle != INVALID_CONNHANDLE
@@ -1159,16 +1179,27 @@ void dpls_phy6252_tick(void)
         adc_kick();
     }
     update_power_state();
-    dpls_server_tick(&server, now_ms());
-    /* Recover from a lost ATT confirmation: drop the unacknowledged head so the
-     * response pipeline cannot stay wedged behind it (see tx_in_flight_since_ms). */
-    if (tx_in_flight &&
-        (uint32_t)(now_ms() - tx_in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
+}
+
+static void tick_tx(uint32_t now)
+{
+    /* A lost ATT confirmation must not wedge every later response behind it. */
+    if (tx.in_flight &&
+        (uint32_t)(now - tx.in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
         dpls_phy6252_tx_confirmed();
         return;
     }
-    /* Retry a TX head that hit a transient stack-busy error on a prior attempt. */
     tx_pump();
+}
+
+void dpls_phy6252_tick(void)
+{
+    uint32_t now = now_ms();
+    tick_link_security(now);
+    tick_factory_reset(now);
+    tick_measurements();
+    dpls_server_tick(&server, now);
+    tick_tx(now);
 }
 
 uint32 dpls_phy6252_led_tick(void)

@@ -93,12 +93,3 @@ bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 lengt
     ind.handle = attrs[DPLS_TX_VALUE_INDEX].handle; ind.len = length; osal_memcpy(ind.value, data, length);
     return GATT_Indication(conn, &ind, FALSE, task_id);
 }
-
-bool dpls_gatt_send_notification(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
-    attHandleValueNoti_t noti;
-    (void)task_id;
-    if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_NOTIFY) ||
-        length + 3u > ATT_GetCurrentMTUSize(conn)) return false;
-    noti.handle = attrs[DPLS_TX_VALUE_INDEX].handle; noti.len = length; osal_memcpy(noti.value, data, length);
-    return GATT_Notification(conn, &noti, FALSE) == SUCCESS;
-}

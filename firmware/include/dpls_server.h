@@ -28,13 +28,11 @@ enum {
 #endif
 #define DPLS_LOG_CHUNK_EVENTS 15u
 #define DPLS_MODE_MAX_MS DPLS_SAFETY_MODE_MAX_MS
-#define DPLS_SESSION_TIMEOUT_MS DPLS_SAFETY_SESSION_TIMEOUT_MS
 #define DPLS_AUTH_BLOCK_MS 300000u
 #define DPLS_AUTH_MAX_ATTEMPTS 5u
 #define DPLS_AUTH_MIN_INTERVAL_MS 1000u
 #define DPLS_SETUP_WINDOW_MS 300000u
 #define DPLS_IDENTIFY_MAX_MS 60000u
-#define DPLS_IDENTIFY_BLINK_MS 500u
 
 typedef dpls_safety_mode_t dpls_mode_t;
 #define DPLS_MODE_NORMAL DPLS_SAFE_NORMAL
@@ -92,9 +90,14 @@ typedef struct {
 } dpls_device_info_t;
 
 typedef struct {
-    bool (*link_encrypted)(void *context);
-    bool (*hardware_apply_mode)(void *context, dpls_mode_t mode);
-    void (*hardware_safe_normal)(void *context);
+    bool (*encrypted)(void *context);
+    bool (*indicate)(void *context, const uint8_t *frame, size_t length);
+    void (*disconnect)(void *context);
+} dpls_link_hal_t;
+
+typedef struct {
+    bool (*apply_mode)(void *context, dpls_mode_t mode);
+    void (*safe_normal)(void *context);
     uint16_t (*voltage_mv)(void *context);
     uint16_t (*port1_voltage_mv)(void *context);
     uint16_t (*port2_voltage_mv)(void *context);
@@ -104,26 +107,40 @@ typedef struct {
     bool (*reserve_low)(void *context);
     uint8_t (*measurement_validity)(void *context);
     void (*identify_led)(void *context, bool enabled);
-    bool (*random_bytes)(void *context, uint8_t *out, size_t length);
     bool (*real_short_active)(void *context);
-    dpls_settings_state_t (*settings_state)(void *context);
-    void (*settings_salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
-    bool (*settings_write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
-    void (*settings_name)(void *context, char out[DPLS_NAME_MAX + 1u]);
-    bool (*settings_set_name)(void *context, const char *name);
-    bool (*settings_set_password)(void *context, const uint8_t salt[16], const uint8_t verifier[32]);
     void (*device_info)(void *context, dpls_device_info_t *out);
-    bool (*verify_auth_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
-    bool (*auth_lock_read)(void *context);
-    bool (*auth_lock_write)(void *context, bool locked);
-    bool (*event_storage_init)(void *context, uint16_t *count, uint32_t *next_sequence);
-    bool (*event_storage_append)(void *context, const dpls_event_t *event);
-    bool (*event_storage_read)(void *context, uint32_t sequence, dpls_event_t *event);
-    bool (*tx_indicate)(void *context, const uint8_t *frame, size_t length);
-    bool (*tx_notify)(void *context, const uint8_t *frame, size_t length);
+} dpls_hardware_hal_t;
+
+typedef struct {
+    dpls_settings_state_t (*state)(void *context);
+    void (*salt)(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
+    bool (*write)(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32]);
+    void (*name)(void *context, char out[DPLS_NAME_MAX + 1u]);
+    bool (*set_name)(void *context, const char *name);
+    bool (*set_password)(void *context, const uint8_t salt[16], const uint8_t verifier[32]);
+} dpls_settings_hal_t;
+
+typedef struct {
+    bool (*random_bytes)(void *context, uint8_t *out, size_t length);
+    bool (*verify_proof)(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16], uint32_t session_id, const uint8_t proof[32]);
+    bool (*lock_read)(void *context);
+    bool (*lock_write)(void *context, bool locked);
+} dpls_auth_hal_t;
+
+typedef struct {
+    bool (*init)(void *context, uint16_t *count, uint32_t *next_sequence);
+    bool (*append)(void *context, const dpls_event_t *event);
+    bool (*read)(void *context, uint32_t sequence, dpls_event_t *event);
+} dpls_event_store_hal_t;
+
+typedef struct {
+    dpls_link_hal_t link;
+    dpls_hardware_hal_t hardware;
+    dpls_settings_hal_t settings;
+    dpls_auth_hal_t auth;
+    dpls_event_store_hal_t events;
     void *context;
     void (*diagnostic_error)(void *context, bool critical);
-    void (*disconnect_after_setup)(void *context);
 } dpls_hal_t;
 
 typedef struct {
@@ -136,43 +153,65 @@ typedef struct {
 } dpls_cached_command_t;
 
 typedef struct {
-    dpls_hal_t hal;
-    dpls_safety_t safety;
     bool connected;
     bool authenticated;
-    bool identify_active;
-    bool identify_led_on;
     bool hello_received;
-    bool critical_fault;
-    bool power_state_known;
-    dpls_power_t last_power_source;
-    bool last_reserve_low;
-    bool real_short;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
     uint32_t last_auth_proof_ms;
-    uint32_t boot_ms;
-    uint32_t now_ms;
-    bool wall_clock_valid;
-    uint32_t wall_clock_unix_seconds;
-    uint32_t wall_clock_last_ms;
-    uint16_t wall_clock_fraction_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
-    uint32_t identify_deadline_ms;
-    uint32_t identify_blink_last_ms;
     uint32_t setup_disconnect_deadline_ms;
-    uint8_t device_nonce[16];
-    uint8_t client_nonce[16];
-    uint8_t session_token[8];
-    dpls_cached_command_t command_cache[DPLS_COMMAND_CACHE_SIZE];
-    uint8_t command_cache_cursor;
+    uint8_t device_nonce[DPLS_AUTH_NONCE_SIZE];
+    uint8_t client_nonce[DPLS_AUTH_NONCE_SIZE];
+    uint8_t token[DPLS_SESSION_TOKEN_SIZE];
+} dpls_server_session_t;
+
+typedef struct {
+    bool valid;
+    uint32_t unix_seconds;
+    uint32_t last_ms;
+    uint16_t fraction_ms;
+} dpls_server_clock_t;
+
+typedef struct {
+    bool active;
+    uint32_t deadline_ms;
+} dpls_server_identify_t;
+
+typedef struct {
+    bool known;
+    dpls_power_t power_source;
+    bool reserve_low;
+    bool real_short_active;
+} dpls_server_observed_inputs_t;
+
+typedef struct {
+    dpls_cached_command_t entries[DPLS_COMMAND_CACHE_SIZE];
+    uint8_t cursor;
+} dpls_server_command_cache_t;
+
+typedef struct {
+    uint16_t count;
+    uint32_t next_sequence;
+    bool export_active;
+    uint16_t export_count;
+    uint32_t export_first_sequence;
+} dpls_server_journal_t;
+
+typedef struct {
+    dpls_hal_t hal;
+    dpls_safety_t safety;
+    dpls_server_session_t session;
+    dpls_server_clock_t clock;
+    dpls_server_identify_t identify;
+    dpls_server_observed_inputs_t observed_inputs;
+    dpls_server_command_cache_t command_cache;
+    dpls_server_journal_t journal;
+    bool critical_fault;
+    uint32_t boot_ms;
+    uint32_t now_ms;
     uint8_t tx_encoded[DPLS_MAX_FRAME];
-    uint16_t event_count;
-    uint32_t next_event_sequence;
-    bool log_export_active;
-    uint16_t log_export_count;
-    uint32_t log_export_first_sequence;
 } dpls_server_t;
 
 void dpls_server_init(dpls_server_t *server, const dpls_hal_t *hal, uint32_t now_ms);
@@ -181,5 +220,6 @@ void dpls_server_disconnected(dpls_server_t *server, uint32_t now_ms);
 void dpls_server_tick(dpls_server_t *server, uint32_t now_ms);
 bool dpls_server_receive(dpls_server_t *server, const uint8_t *frame, size_t length, uint32_t now_ms);
 void dpls_server_log(dpls_server_t *server, uint8_t type, uint8_t parameter);
+bool dpls_server_authenticated(const dpls_server_t *server);
 
 #endif

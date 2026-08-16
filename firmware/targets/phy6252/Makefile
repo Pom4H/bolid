@@ -127,6 +127,7 @@ APP_SOURCES := \
 	source/dplsBLEPeripheral.c \
 	$(FW)/src/dpls_protocol.c \
 	$(FW)/src/dpls_server.c \
+	$(FW)/src/dpls_safety.c \
 	$(FW)/src/dpls_led.c \
 	$(FW)/src/dpls_calib.c \
 	$(FW)/phy6252/dpls_gatt_service.c \

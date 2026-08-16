@@ -123,6 +123,8 @@ grep -q 'check_chip_mAddr' "$identity"
 ! grep -q '0x4000u' "$identity"
 grep -q 'components/driver/key' "$gnu_target"
 grep -q 'components/driver/key' "$ac6_target"
+grep -q 'src/dpls_safety.c' "$gnu_target"
+grep -q 'src/dpls_safety.c' "$ac6_target"
 for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
   ! grep -q "components/driver/$source" "$gnu_target"
   ! grep -q "components/driver/$source" "$ac6_target"
