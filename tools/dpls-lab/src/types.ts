@@ -127,27 +127,6 @@ export const MODE_TITLES = [
   "КЗ +Т",
 ] as const;
 
-export const MSG = {
-  HELLO: 0x01,
-  AUTH_CHALLENGE: 0x02,
-  AUTH_PROOF: 0x03,
-  AUTH_RESULT: 0x04,
-  DEVICE_INFO_GET: 0x06,
-  DEVICE_INFO_REPORT: 0x07,
-  TIME_SYNC: 0x0b,
-  STATE_GET: 0x10,
-  STATE_REPORT: 0x11,
-  MODE_SET: 0x12,
-  COMMAND_RESULT: 0x13,
-  IDENTIFY_START: 0x14,
-  IDENTIFY_STOP: 0x15,
-  KEEP_ALIVE: 0x30,
-} as const;
-
-export const FLAG_REQUEST = 1;
-export const FLAG_RESPONSE = 2;
-export const PROTOCOL_VERSION = 2;
-
 function parseOptionalId(value: unknown): string | null | undefined {
   if (value === undefined || value === null) return null;
   if (typeof value === "string") return value;
