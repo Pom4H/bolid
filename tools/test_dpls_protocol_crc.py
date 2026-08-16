@@ -38,6 +38,11 @@ def forbid(source: str, needle: str, label: str) -> None:
         fail(label)
 
 
+def require_regex(source: str, pattern: str, label: str) -> None:
+    if re.search(pattern, source, flags=re.MULTILINE) is None:
+        fail(label)
+
+
 def bit_index(value: int) -> int:
     if value <= 0 or value & (value - 1):
         raise ValueError(f"flag must be one bit, got {value}")
@@ -82,8 +87,11 @@ def check_wire(contract: dict[str, object]) -> None:
     require(c, f"#define DPLS_PROTOCOL_OVERHEAD {int(frame['overhead'])}u", "C frame overhead drift")
     require(c, f"#define DPLS_MAX_PAYLOAD {int(frame['max_payload'])}u", "C max payload drift")
     for name, value in flags.items():
-        require(c, f"DPLS_FLAG_{name}", f"C missing flag {name}")
-        require(c, f"(1u << {bit_index(int(value))})", f"C flag {name} drift")
+        require_regex(
+            c,
+            rf"^#define\s+DPLS_FLAG_{name}\s+\(1u << {bit_index(int(value))}\)$",
+            f"C flag {name} drift",
+        )
     for name, value in messages.items():
         require(c, f"DPLS_MSG_{name} = 0x{int(value):02x}", f"C message {name} drift")
 
@@ -120,6 +128,30 @@ def check_wire(contract: dict[str, object]) -> None:
                 fail(f"{path.relative_to(ROOT)} contains duplicate wire constant {symbol}")
 
     wire_known_answer(contract)
+
+
+def check_auth(contract: dict[str, object]) -> None:
+    auth = contract["auth"]
+    assert isinstance(auth, dict)
+    server = text("firmware/include/dpls_server.h")
+    require(server, f"#define DPLS_AUTH_NONCE_SIZE {int(auth['nonce_size'])}u", "C auth nonce size drift")
+    require(server, f"#define DPLS_AUTH_SALT_SIZE {int(auth['salt_size'])}u", "C auth salt size drift")
+    require(server, f"#define DPLS_AUTH_PROOF_SIZE {int(auth['proof_size'])}u", "C auth proof size drift")
+    require(server, f"#define DPLS_SESSION_TOKEN_SIZE {int(auth['token_size'])}u", "C session token size drift")
+
+    kt = text("mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsAuth.kt")
+    require(kt, f"const val PBKDF2_ITERATIONS = {int(auth['pbkdf2_iterations']):_}", "Kotlin PBKDF2 iteration drift")
+    require(kt, f"const val VERIFIER_SIZE = {int(auth['proof_size'])}", "Kotlin verifier size drift")
+    require(kt, f"const val NONCE_SIZE = {int(auth['nonce_size'])}", "Kotlin auth nonce size drift")
+    require(kt, f"const val SALT_SIZE = {int(auth['salt_size'])}", "Kotlin auth salt size drift")
+    require(kt, f"const val TOKEN_SIZE = {int(auth['token_size'])}", "Kotlin session token size drift")
+
+    replay = text("tools/session_capture/differential_replay.py")
+    require(
+        replay,
+        f"PBKDF2_ITERATIONS = {int(auth['pbkdf2_iterations']):_}",
+        "capture/replay PBKDF2 iteration drift",
+    )
 
 
 def check_advertisement(contract: dict[str, object]) -> None:
@@ -182,6 +214,8 @@ def check_modes_and_pins(contract: dict[str, object]) -> None:
             f"case DPLS_MODE_{name}:\n        board->gpio_{sim_field} = true;",
             f"simulator mode {name} no longer mirrors {output}",
         )
+
+    for output in ("ISO_1", "ISO_2", "ISO_T", "KZ_1", "KZ_2", "KZ_T"):
         pin_match = re.search(rf"#define DPLS_PIN_{re.escape(output)} GPIO_(P\d+)", board)
         if pin_match is None:
             fail(f"board mapping missing DPLS_PIN_{output}")
@@ -194,6 +228,7 @@ def check_modes_and_pins(contract: dict[str, object]) -> None:
 def main() -> int:
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     check_wire(contract)
+    check_auth(contract)
     check_advertisement(contract)
     check_modes_and_pins(contract)
     if failures:
@@ -201,7 +236,7 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
-    print("OK: DPLS wire contract matches C/Kotlin/Python")
+    print("OK: DPLS wire/auth contract matches C/Kotlin/Python")
     print("OK: lab contains no second DPLS protocol table")
     print("OK: simulator ADV semantics match current PHY6252 target")
     print("OK: mode/output/pin mappings agree across target, simulator and lab")
