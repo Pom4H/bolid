@@ -298,7 +298,7 @@ static void simulator_init(simulator_t *sim)
     dpls_hal_t hal;
     size_t i;
     memset(sim, 0, sizeof(*sim));
-    sim->rng = 0xDPL5u;
+    sim->rng = 0x44504C53u;
     sim->encrypted = true;
     sim->settings_state = DPLS_SETTINGS_VALID;
     strcpy(sim->name, "Test-DPLS-SIM");
