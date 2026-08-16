@@ -1,0 +1,61 @@
+{
+  "wire_version": 2,
+  "frame": {
+    "header_size": 7,
+    "trailer_size": 2,
+    "overhead": 9,
+    "max_payload": 235
+  },
+  "flags": {
+    "REQUEST": 1,
+    "RESPONSE": 2,
+    "EVENT": 4,
+    "ERROR": 8
+  },
+  "messages": {
+    "HELLO": 1,
+    "AUTH_CHALLENGE": 2,
+    "AUTH_PROOF": 3,
+    "AUTH_RESULT": 4,
+    "SETUP": 5,
+    "DEVICE_INFO_GET": 6,
+    "DEVICE_INFO_REPORT": 7,
+    "NAME_SET": 8,
+    "PASSWORD_SET": 9,
+    "SETTINGS_RESULT": 10,
+    "TIME_SYNC": 11,
+    "STATE_GET": 16,
+    "STATE_REPORT": 17,
+    "MODE_SET": 18,
+    "COMMAND_RESULT": 19,
+    "IDENTIFY_START": 20,
+    "IDENTIFY_STOP": 21,
+    "LOG_START": 32,
+    "LOG_INFO": 33,
+    "LOG_CHUNK": 34,
+    "LOG_ACK": 35,
+    "LOG_FINISH": 36,
+    "LOG_RESULT": 37,
+    "LOG_HIST_GET": 38,
+    "LOG_HIST_REPORT": 39,
+    "KEEP_ALIVE": 48,
+    "ERROR": 127
+  },
+  "modes": {
+    "NORMAL": { "wire": 0, "output": null },
+    "OPEN_T": { "wire": 1, "output": "ISO_T" },
+    "OPEN_MAIN": { "wire": 2, "output": "ISO_2" },
+    "SHORT_1": { "wire": 3, "output": "KZ_1" },
+    "SHORT_2": { "wire": 4, "output": "KZ_2" },
+    "SHORT_T": { "wire": 5, "output": "KZ_T" }
+  },
+  "advertisement": {
+    "company_id": 2817,
+    "status_bits": {
+      "REAL_SHORT": 1,
+      "FROM_RESERVE": 2,
+      "RESERVE_LOW": 4
+    },
+    "target_emits_dynamic_status": false
+  }
+}
