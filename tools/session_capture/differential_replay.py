@@ -36,7 +36,9 @@ from dpls_wire import (
 
 PBKDF2_ITERATIONS = 10_000
 DEFAULT_PASSWORD = "TestDpls01"
+NOTIFY_PACE_MS = 80
 
+HELLO = 0x01
 AUTH_CHALLENGE = 0x02
 AUTH_PROOF = 0x03
 AUTH_RESULT = 0x04
@@ -131,15 +133,25 @@ class SimulatorProcess:
                 return out
             out.append(text)
 
-    def frame(self, raw: bytes) -> list[Frame]:
+    @staticmethod
+    def _decode_tx(lines: list[str]) -> list[Frame]:
         frames: list[Frame] = []
-        for line in self.command(f"FRAME {raw.hex().upper()}"):
+        for line in lines:
             if not line.startswith("TX "):
                 continue
             encoded = parse_hex(line.removeprefix("TX ").strip())
             decoded = decode_frame(encoded) if encoded is not None else None
             if decoded is not None:
                 frames.append(decoded)
+        return frames
+
+    def frame(self, raw: bytes) -> list[Frame]:
+        # CCCD 0x03 uses the PHY6252 notify path. The host PHY model deliberately
+        # keeps one TX in-flight until its 80 ms pacing tick, exactly like
+        # SimulatorBleTransport. Advance that timer before the next request so a
+        # replay cannot accidentally hide behind an uncleared previous response.
+        frames = self._decode_tx(self.command(f"FRAME {raw.hex().upper()}"))
+        frames.extend(self._decode_tx(self.command(f"TICK {NOTIFY_PACE_MS}")))
         return frames
 
     def close(self, force: bool = False) -> None:
@@ -361,7 +373,8 @@ def replay(
     finally:
         sim.close()
 
-    return compared, len(expected), mismatches
+    expected_count = sum(len(frames) for frames in expected.values())
+    return compared, expected_count, mismatches
 
 
 def main() -> int:
