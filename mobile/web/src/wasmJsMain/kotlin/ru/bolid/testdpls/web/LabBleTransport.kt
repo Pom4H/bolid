@@ -136,9 +136,11 @@ internal fun deviceFromDiscovered(json: String): DplsTransportDevice? {
     val name = jsonString(json, "name") ?: "Test-DPLS"
     val deviceId = jsonLong(json, "deviceId")
     val rssi = jsonInt(json, "rssi") ?: LabBleTransport.RSSI
-    val status = jsonInt(json, "advStatus") ?: 0
     val firmware = jsonString(json, "firmware")
     val kind = jsonString(json, "kind")
+    // The real PHY6252 target currently reserves the ADV status byte but emits 0.
+    // Do not let soft-BLE teach DplsClient a richer discovery contract than hardware.
+    val status = if (kind == "sim") 0 else jsonInt(json, "advStatus") ?: 0
     return DplsTransportDevice(
         address = address,
         name = name,
