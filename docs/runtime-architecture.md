@@ -1,5 +1,7 @@
 # Runtime architecture: one truth, serialized effects
 
+This is the detailed mobile/runtime annex to the repository ownership map in `docs/architecture.md`.
+
 An abstraction is useful here only when it removes mutable state, makes an invalid state unrepresentable, or defines a boundary that is used by the product today.
 
 ## Dependency zones
@@ -14,7 +16,7 @@ An abstraction is useful here only when it removes mutable state, makes an inval
 
 `core` may depend downward. `wire` and `runtime` must never depend on Compose, Android Bluetooth, CoreBluetooth or product screens.
 
-The runtime module intentionally contains only concepts used by this PR. Mesh routing, serial links and passive observations are not pre-designed here; they belong to the PR that implements those features.
+The runtime module intentionally contains only concepts used by the product today. Mesh routing, serial links and passive observations are not pre-designed here; they belong to the PR that implements those features.
 
 ## Identity invariant
 
@@ -45,7 +47,7 @@ If the advertised candidate id and `DEVICE_INFO` disagree, the connection fails 
 
 Legacy BLE-address credential keys remain readable for migration. Stable credentials are persisted by verified node id once identity has been proven.
 
-## Request invariant — protocol v2
+## Request invariant — current wire format
 
 `DplsProtocol.Frame.sequence` is the **only** transaction id. `REQUEST/RESPONSE/EVENT/ERROR` flags describe correlation semantics independently from message type. A response or error echoes the request sequence.
 
@@ -94,7 +96,7 @@ It owns:
 - verified stable `NodeId` in `Online`;
 - recovering/failed lifecycle state.
 
-`FrameSequencer` owns only the next protocol-v2 frame sequence. It must never grow authentication or lifecycle fields.
+`FrameSequencer` owns only the next wire-frame sequence. It must never grow authentication or lifecycle fields.
 
 `DplsUiState.phase`, `authenticated`, `initialized` and `credentialsReady` are projections. `DplsClient` must never use those fields as protocol authority. Every UI mutation passes through `projectSession()`, which derives lifecycle presentation from `DeviceSession`.
 
@@ -137,7 +139,7 @@ A failed `hal.hardware.apply_mode()` forces both physical outputs and the logica
 
 ## Future mesh and RS-232
 
-`NodeId` is already independent from a BLE address, which is the only prerequisite this PR needs for future routing.
+`NodeId` is already independent from a BLE address, which is the only prerequisite this code needs for future routing.
 
 Do not add `PacketRouter`, `ByteLink`, serial endpoints, passive observers or topology types until a real mesh/RS-232 feature consumes them. The first feature PR should introduce the smallest boundary justified by actual behavior.
 
