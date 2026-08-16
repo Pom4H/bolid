@@ -64,11 +64,6 @@ class DplsClient(
     private val platform: DplsPlatformServices,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
 ) : DplsController, DplsTransportListener {
-    private data class ReconnectPolicy(
-        val reachedReady: Boolean = false,
-        val expectSetupReconnect: Boolean = false,
-    )
-
     private sealed interface Operation {
         val sequence: Int
 
@@ -99,11 +94,9 @@ class DplsClient(
     private val journal = JournalMachine()
 
     private var session: DeviceSession = DeviceSession.Offline
-    private var reconnectPolicy = ReconnectPolicy()
     private var identify = Identify()
     private var operation: Operation? = null
     private var cachedVerifier: ByteArray? = null
-    private var reconnectAttempt = 0
     private var timeSyncAttempted = false
     private var previousMode: DplsMode? = null
     private var lastOperatorAlert: String? = null
@@ -194,7 +187,6 @@ class DplsClient(
         cancelLinkJobs()
         frameSequencer.reset()
         clearOperation()
-        reconnectPolicy = ReconnectPolicy()
 
         val selected = state.devices.firstOrNull { it.address == address }
         val candidateNodeId = selected?.deviceId
@@ -208,7 +200,6 @@ class DplsClient(
         )
 
         timeSyncAttempted = false
-        reconnectAttempt = 0
         previousMode = null
         updateState {
             it.copy(
@@ -548,12 +539,9 @@ class DplsClient(
 
     override fun forgetSavedPassword() {
         if (cachedVerifier == null && !state.savedCredentials) return
-        credentialReadKeys().forEach { platform.writeDeviceVerifier(it, null) }
-        credentialWriteKeys().forEach { platform.writeDeviceVerifier(it, null) }
-        replaceCachedVerifier(null)
+        forgetSavedCredentials()
         updateState {
             it.copy(
-                savedCredentials = false,
                 settingsOp = SettingsOp.DONE,
                 settingsError = null,
                 settingsNotice = "Сохранённый пароль удалён",
@@ -619,7 +607,6 @@ class DplsClient(
     }
 
     override fun onBluetoothAvailable() {
-        reconnectAttempt = 0
         if (session.endpointOrNull != null && !transport.hasConnection()) {
             scheduleReconnect()
             return
@@ -636,7 +623,7 @@ class DplsClient(
         clearOperation()
         pauseJournalForReconnect()
         if (endpoint != null) {
-            setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
+            setSession(DeviceSession.Recovering(nodeId, endpoint))
         } else {
             setSession(DeviceSession.Offline)
         }
@@ -739,7 +726,7 @@ class DplsClient(
 
     override fun onWriteComplete(errorCode: Long?) {
         if (errorCode == null) return
-        if (reconnectPolicy.reachedReady) {
+        if (canRecoverLink()) {
             scheduleReconnect()
         } else {
             fail("Ошибка передачи BLE: $errorCode")
@@ -766,18 +753,13 @@ class DplsClient(
             onStaleBond()
             return
         }
-        if (reconnectPolicy.expectSetupReconnect) {
-            reconnectPolicy = reconnectPolicy.copy(expectSetupReconnect = false)
-            scheduleReconnect(immediate = true)
-            return
-        }
-        if (reconnectPolicy.reachedReady && session !is DeviceSession.Failed) {
-            scheduleReconnect()
-            return
-        }
         identify = Identify()
         if (state.identifyActive) {
             fail(error ?: "Связь с платой оборвалась до идентификации")
+            return
+        }
+        if (canRecoverLink()) {
+            scheduleReconnect()
             return
         }
         cancelLinkJobs()
@@ -786,7 +768,6 @@ class DplsClient(
         journal.fail()
         logLoadPending = false
         drainLog = false
-        reconnectPolicy = ReconnectPolicy()
         setSession(DeviceSession.Offline)
         platform.keepConnectionAlive(false)
         updateState {
@@ -808,10 +789,6 @@ class DplsClient(
     }
 
     override fun onStaleBond() {
-        reconnectPolicy = reconnectPolicy.copy(
-            reachedReady = false,
-            expectSetupReconnect = false,
-        )
         identify = Identify()
         val name = state.selectedDevice?.userName
             ?: state.selectedDevice?.advertisedName
@@ -904,16 +881,9 @@ class DplsClient(
             // The device reboots before DEVICE_INFO can prove NodeId. Persist only
             // against the physical BLE address; stable node keys are written later.
             persistCachedVerifier()
-            reconnectPolicy = reconnectPolicy.copy(expectSetupReconnect = true)
             val endpoint = session.endpointOrNull
                 ?: return fail("Потерян endpoint после первичной настройки")
-            setSession(
-                DeviceSession.Recovering(
-                    nodeId = session.nodeIdOrNull,
-                    endpoint = endpoint,
-                    attempt = reconnectAttempt,
-                ),
-            )
+            setSession(DeviceSession.Recovering(session.nodeIdOrNull, endpoint))
             updateState {
                 it.copy(
                     statusText = "Настройка сохранена. Повторное подключение…",
@@ -1085,8 +1055,6 @@ class DplsClient(
         val now = platform.nowMillis()
         val device = parseStateReport(payload, now)
             ?: return fail("Повреждённый STATE_REPORT")
-        reconnectPolicy = reconnectPolicy.copy(reachedReady = true)
-        reconnectAttempt = 0
         updateState {
             it.copy(
                 statusText = if (session is DeviceSession.Synchronizing) {
@@ -1424,19 +1392,29 @@ class DplsClient(
         }
     }
 
-    private fun scheduleReconnect(immediate: Boolean = false) {
-        val endpoint = session.endpointOrNull ?: return
-        val nodeId = session.nodeIdOrNull
+    private fun canRecoverLink(): Boolean =
+        session.endpointOrNull != null &&
+            (cachedVerifier != null || state.state != null || logLoadPending)
+
+    private fun scheduleReconnect() {
+        val current = session
+        val endpoint = current.endpointOrNull ?: return
+        val nodeId = current.nodeIdOrNull
         if (reconnectJob?.isActive == true) return
+        val reconnectImmediately = current is DeviceSession.Recovering &&
+            current.nodeId == null &&
+            cachedVerifier != null &&
+            state.state == null
+
         cancelLinkJobs()
         clearOperation()
         pauseJournalForReconnect()
         timeSyncAttempted = false
-        setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
+        setSession(DeviceSession.Recovering(nodeId, endpoint))
         platform.keepConnectionAlive(true)
         updateState {
             it.copy(
-                statusText = if (reconnectPolicy.reachedReady || logLoadPending) {
+                statusText = if (state.state != null || logLoadPending) {
                     "Восстановление связи…"
                 } else {
                     "Подключение…"
@@ -1447,16 +1425,9 @@ class DplsClient(
             )
         }
 
-        val delays = longArrayOf(500, 1_000, 2_000, 4_000, 5_000)
-        val wait = if (immediate) {
-            0L
-        } else {
-            delays[reconnectAttempt.coerceAtMost(delays.lastIndex)]
-        }
-        reconnectAttempt++
         val generation = linkGeneration
         reconnectJob = scope.launch {
-            if (wait > 0) delay(wait)
+            if (!reconnectImmediately) delay(RECONNECT_DELAY_MS)
             if (generation != linkGeneration) return@launch
             if (session.endpointOrNull != endpoint) return@launch
             if (!transport.reconnect()) {
@@ -1610,9 +1581,7 @@ class DplsClient(
         platform.keepConnectionAlive(false)
         frameSequencer.reset()
         setSession(DeviceSession.Offline)
-        reconnectPolicy = ReconnectPolicy()
         identify = Identify()
-        reconnectAttempt = 0
         previousMode = null
         lastOperatorAlert = null
         logLoadPending = false
@@ -1847,5 +1816,6 @@ class DplsClient(
         private const val SETTINGS_TIMEOUT_MS = 10_000L
         private const val ONE_SHOT_REQUEST_TIMEOUT_MS = 2_000L
         private const val RSSI_POLL_MS = 350L
+        private const val RECONNECT_DELAY_MS = 500L
     }
 }
