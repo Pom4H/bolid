@@ -56,9 +56,11 @@ jobs:
           mobile=false
           firmware=false
           replay=false
-          if grep -qE '^mobile/' /tmp/changed.txt; then mobile=true; fi
-          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk)\.sh)' /tmp/changed.txt; then firmware=true; fi
-          if grep -qE '^(tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
+          # `protocol/` is shared contract authority: changing it must exercise
+          # both implementations, not just the cheap textual contract smoke.
+          if grep -qE '^(mobile/|protocol/)' /tmp/changed.txt; then mobile=true; fi
+          if grep -qE '^(firmware/|protocol/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk)\.sh)' /tmp/changed.txt; then firmware=true; fi
+          if grep -qE '^(protocol/|tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
 
           echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
