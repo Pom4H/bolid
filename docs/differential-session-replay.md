@@ -57,3 +57,19 @@ The second pass changes the final captured `STATE_REPORT` from `NORMAL` to `SHOR
 DPLS_SIMULATOR=firmware/build/dpls_simulator \
   python3 tools/session_capture/test_differential_replay.py
 ```
+
+## Mutation probe
+
+`mutation_probe.py` measures the detector instead of trusting the self-test. It freezes one reference trace from a known-good simulator, then builds temporary mutant simulators from copied firmware sources and replays the unchanged trace against each mutant.
+
+```sh
+python3 tools/session_capture/mutation_probe.py firmware/build/dpls_simulator
+```
+
+The initial mutation set deliberately includes two BLE-observable defects and one hidden hardware defect:
+
+- `STATE_REPORT` always claims `NORMAL` even while `SHORT_1` is active — differential replay must kill this mutant;
+- PHY notify pacing changes from the measured 80 ms to 160 ms — differential replay must kill this mutant;
+- `SHORT_1` drives simulated `KZ2` instead of `KZ1` while BLE still reports `SHORT_1` — this mutant is expected to survive a BLE-only trace.
+
+The surviving GPIO mutation is intentional documentation of the method boundary: a phone ↔ BLE capture can validate only behavior visible through that capture. Physical GPIO/readback equivalence needs an additional hardware-side oracle such as UART breadcrumbs, electrical readback, or another captured channel.
