@@ -4,8 +4,8 @@ plugins {
 }
 
 kotlin {
-    androidTarget()
     jvm()
+    androidTarget()
     iosArm64()
     iosSimulatorArm64()
     sourceSets { commonTest.dependencies { implementation(kotlin("test")) } }

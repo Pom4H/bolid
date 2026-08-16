@@ -1,0 +1,58 @@
+name: zmu E2E
+
+on:
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "mobile/wire/**"
+      - "mobile/interop/**"
+      - "tools/zmu_e2e.sh"
+      - ".github/workflows/zmu-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZMU_SHA: 72feb753fea97babc00cc88f2c75e814efc1bfd2
+
+jobs:
+  cortex-m0-interop:
+    name: Kotlin wire ↔ ARM firmware under zmu
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Install ARM GCC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: Build pinned zmu Cortex-M0 emulator
+        run: |
+          rustup default stable
+          git clone --filter=blob:none https://github.com/jjkt/zmu.git "$RUNNER_TEMP/zmu"
+          git -C "$RUNNER_TEMP/zmu" checkout "$ZMU_SHA"
+          cargo build \
+            --manifest-path "$RUNNER_TEMP/zmu/Cargo.toml" \
+            --release \
+            --no-default-features \
+            --features cortex-m0 \
+            --bin zmu-cortex-m0
+      - name: Run cross-language ARM E2E
+        run: |
+          bash tools/zmu_e2e.sh "$RUNNER_TEMP/zmu/target/release/zmu-cortex-m0"
+      - name: Upload zmu trace artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: zmu-e2e
+          path: |
+            tmp/zmu-e2e/test-dpls-zmu.elf
+            tmp/zmu-e2e/zmu-output.txt
+            tmp/zmu-e2e/zmu_vectors.h
+          if-no-files-found: warn
