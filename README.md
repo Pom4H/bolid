@@ -2,59 +2,61 @@
 
 Firmware and mobile software for a BLE-controlled DPLS test device based on PHY6252 / PB-03F.
 
-The repository follows three ownership rules:
+The repository follows four ownership rules:
 
 1. **firmware owns hardware safety**;
-2. **Kotlin `commonMain` owns the product behavior shared by Android and iOS**;
-3. **platform code only adapts operating-system APIs and application entry points**.
+2. **`DeviceSession` owns mobile link/auth/verified-identity lifecycle**;
+3. **protocol v2 uses `Frame.sequence` as its only transaction id**;
+4. **shared Kotlin owns product behavior; platform code adapts OS APIs**.
+
+For developer documentation start at [`docs/developer/README.md`](docs/developer/README.md).
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
-| `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
-| `mobile/android/` | Android shell: permissions, Activity, debug E2E |
-| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap |
-| `docs/` | Architecture, bring-up and PHY6252 engineering references |
-| `tools/` | Build, flash, lint, coverage and one-command checks |
-| `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
+| `firmware/` | Portable C99 protocol/server/safety core, PHY6252 HAL/GATT adapter and target builds |
+| `mobile/wire/` | KMP frame/CRC/crypto/advertisement contract |
+| `mobile/runtime/` | KMP stable identity, endpoint and `DeviceSession` lifecycle |
+| `mobile/core/` | `DplsClient`, domain/parsers, journal, shared Compose UI and Android/iOS adapters |
+| `mobile/android/` | Android application shell, permissions and debug E2E |
+| `mobile/ios/` | Xcode product shell and minimal Swift bootstrap |
+| `docs/` | Developer handbook, architecture, bring-up and PHY6252 references |
+| `tools/` | Build, flash, lint, coverage, architecture and E2E checks |
+| `third_party/phy62x2/` | Vendored PHY62x2 utilities/reference material |
 
-The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
+The production PHY62XX SDK is not vendored. Target builds fetch the commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
 
-## Mobile architecture
-
-There is one application controller, one UI and one protocol implementation:
+## Architecture
 
 ```text
-                    Test-DPLS BLE wire contract
-                              │
-                    ┌─────────▼──────────┐
-                    │ mobile/core/       │
-                    │ commonMain         │
-                    │                    │
-                    │ DplsClient         │
-                    │ protocol + crypto  │
-                    │ domain + session   │
-                    │ message parsers    │
-                    │ DplsApp Compose UI │
-                    └─────────┬──────────┘
-                              │ DplsTransport
-                 ┌────────────┴────────────┐
-                 │                         │
-        Android platform edge              iOS platform edge
-        core/androidMain                  core/iosMain
-        AndroidBleTransport               IosBleTransport
-        AndroidPlatformServices           IosPlatformServices
-                 │                                 │
-        mobile/android/                    mobile/ios/
-        Activity + permissions             Xcode + one Swift bootstrap
-                 └────── same DplsClient + DplsApp ──────┘
+mobile
+
+:wire
+  frame / CRC / crypto / advertisement
+    ^
+    |
+:runtime
+  NodeId / endpoint / DeviceSession / sequence
+    ^
+    |
+:core
+  DplsClient / domain / journal / Compose / platform adapters
+    ^
+    |
+Android shell / iOS Xcode host
+
+                       BLE protocol v2
+                              |
+                              v
+firmware portable server -> dpls_safety -> PHY6252 hardware HAL
+                              |
+                    GPIO / ADC / reserve / outputs
 ```
 
-`commonMain` contains no Android or Apple framework APIs. Android and iOS implement only the `DplsTransport`/platform-services boundary. Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application.
+A BLE address is a route, not device identity. An advertised device id is an untrusted candidate. `DeviceSession.Online` is possible only after authenticated `DEVICE_INFO` proves a stable non-null `NodeId`.
 
-See [docs/architecture.md](docs/architecture.md) for the detailed ownership rules.
+See [`docs/developer/system-overview.md`](docs/developer/system-overview.md) and [`docs/runtime-architecture.md`](docs/runtime-architecture.md).
 
 ## Safety model
 
@@ -62,29 +64,30 @@ The phone is never the safety boundary. Firmware owns the final electrical state
 
 - boot and disconnect force `NORMAL`;
 - dangerous test modes have a hard timeout;
-- session timeout returns the device to `NORMAL`;
+- authenticated-session inactivity returns outputs to `NORMAL`;
 - low reserve and real-short isolation override requested modes;
 - output switching is break-before-make;
+- hardware apply failure collapses physical and logical state to `NORMAL`;
 - authentication lock can persist across reconnect/reboot;
 - ATT indications are serialized and advance only after confirmation.
 
-A mobile crash, reconnect bug or stale UI state must not be able to keep a dangerous output active indefinitely.
+A mobile crash, reconnect bug or stale UI state must not keep a dangerous output active indefinitely.
 
 ## Developer quick start
 
-Run the complete mobile loop from the repository root:
+Run the complete mobile loop:
 
 ```sh
 bash tools/check_mobile.sh
 ```
 
-Run all host-side repository checks:
+Run all host-side repository gates:
 
 ```sh
 bash tools/check_all.sh
 ```
 
-On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `DplsCore` and executes the Xcode integration smoke test. Physical BLE behavior still requires a real phone/device pair.
+`check_all.sh` includes repository layout, language-neutral wire CRC, architecture ownership, firmware host coverage/lint and the mobile checks.
 
 ### Firmware
 
@@ -92,6 +95,9 @@ On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `Dpls
 cmake -S firmware -B firmware/build
 cmake --build firmware/build
 ctest --test-dir firmware/build --output-on-failure
+
+bash tools/lint_firmware.sh
+bash tools/coverage_firmware.sh
 
 # PHY6252 target
 tools/build_firmware.sh keil tmp/test-dpls.hex
@@ -102,61 +108,62 @@ tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 
 ```sh
 cd mobile
-./gradlew :core:testDebugUnitTest
-./gradlew :core:lintDebug :android:lintDebug :android:assembleDebug
+./gradlew \
+  :wire:testDebugUnitTest \
+  :runtime:testDebugUnitTest \
+  :core:testDebugUnitTest \
+  :wire:lintDebug \
+  :runtime:lintDebug \
+  :core:lintDebug \
+  :android:lintDebug \
+  :android:assembleDebug
 ```
 
 On macOS:
 
 ```sh
 cd mobile
-./gradlew :core:iosSimulatorArm64Test
-./gradlew :core:linkDebugFrameworkIosSimulatorArm64
-cd ..
-xcodebuild test \
-  -project mobile/ios/TestDPLS.xcodeproj \
-  -scheme TestDPLS \
-  -destination 'platform=iOS Simulator,name=iPhone 16' \
-  CODE_SIGNING_ALLOWED=NO
+./gradlew \
+  :wire:iosSimulatorArm64Test \
+  :runtime:iosSimulatorArm64Test \
+  :core:iosSimulatorArm64Test \
+  :core:linkDebugFrameworkIosSimulatorArm64
 ```
+
+See [`docs/developer/build-test-flash.md`](docs/developer/build-test-flash.md) for target flashing and Xcode commands.
 
 ## Where to make changes
 
-- Shared screen/presentation behavior → `mobile/core/src/commonMain/.../app/`.
-- Protocol, auth or binary contract → `mobile/core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
-- Session secret/runtime rules → `mobile/core/src/commonMain/.../session/`.
-- Android Bluetooth/lifecycle quirk → `mobile/android/`.
-- iOS CoreBluetooth/lifecycle quirk → `mobile/core/src/iosMain/`.
-- Xcode signing/assets/capabilities → `mobile/ios/`.
+- frame/CRC/crypto/advertisement -> `mobile/wire/`;
+- lifecycle/identity/endpoint -> `mobile/runtime/`;
+- product orchestration, parsers, journal or shared UI -> `mobile/core/src/commonMain/`;
+- Android BLE/lifecycle quirk -> `mobile/core/src/androidMain/`;
+- iOS CoreBluetooth/lifecycle quirk -> `mobile/core/src/iosMain/`;
+- protocol/server/safety behavior -> portable `firmware/src` + `firmware/include`;
+- PHY6252 GPIO/ADC/GATT/SNV integration -> `firmware/phy6252/`;
+- Xcode signing/assets/capabilities -> `mobile/ios/`.
 
-An ordinary product feature should normally require **one shared Kotlin change**, not parallel Android + Swift implementations.
+An ordinary product feature should normally change shared Kotlin once, not add parallel Android and Swift product implementations.
 
-## Test strategy
+## Protocol v2
 
-Behavior-heavy checks live at the lowest reusable layer:
-
-- firmware host tests + coverage + cppcheck;
-- CRC known-answer and all-message frame round trips;
-- 10,000 randomized malformed decoder inputs;
-- 2,000 randomized valid frame round trips;
-- binary auth/command/state/device-info/journal contracts;
-- PBKDF2/HMAC/SHA-256 known-answer vectors;
-- shared `DplsClient` fake-transport tests including stale command-id rejection and reconnect safety;
-- the same KMP common tests on JVM and Kotlin/Native;
-- Android adapter lint/build;
-- native Xcode/KMP integration smoke test.
-
-The repository layout check also rejects reintroducing duplicate platform controllers, UI trees or protocol facades.
-
-## GATT
+GATT service:
 
 | Characteristic | UUID | Direction |
 |---|---|---|
 | Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` | — |
-| RX | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` | app → device (WRITE) |
-| TX | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` | device → app (INDICATE/NOTIFY) |
+| RX | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` | app -> device, WRITE |
+| TX | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` | device -> app, INDICATE/NOTIFY |
 
-Frame format: `version / type / flags / sequence / length / payload / CRC16-CCITT-FALSE`.
+Frame format:
+
+```text
+version / type / flags / sequence / length / payload / CRC16-CCITT-FALSE
+```
+
+`sequence` is the only v2 transaction id. A successful BLE write is not proof that hardware changed state; correlated firmware response and subsequent `STATE_REPORT` are required.
+
+Full contract: [`docs/developer/protocol-v2.md`](docs/developer/protocol-v2.md).
 
 ## Hardware revision 2
 
@@ -164,22 +171,22 @@ Frame format: `version / type / flags / sequence / length / payload / CRC16-CCIT
 |---|---|
 | ISO_1 / ISO_2 / ISO_T | P31 / P32 / P33 |
 | KZ_1 / KZ_2 / KZ_T | P14 / P16 / P17 |
-| ADC +1 / +2 / +Т / reserve | P20 / P15 / P24 / P23 |
-| RGB R / G / B | P7 / P11 / P18 |
+| ADC +1 / +2 / +T / reserve | P20 / P15 / P24 / P23 |
+| RGB R / G / B | P07 / P11 / P18 |
 | Factory reset | P34 |
 
-![PB-03F-Kit ↔ power-stage pinout](docs/hardware/pb03f-kit-power-pinout.png)
+Logic is 3.3 V active-high; all control outputs low is safe `NORMAL`.
 
-Logic is 3.3 V, active-high. All control outputs low is the safe `NORMAL` state.
+Source of truth: `firmware/phy6252/dpls_board.h`. Developer map: [`docs/developer/hardware-rev2.md`](docs/developer/hardware-rev2.md).
 
 ## Hardware bring-up
 
-Use [docs/bring-up-checklist.md](docs/bring-up-checklist.md) as the acceptance checklist. PHY6252-specific notes are collected in [docs/phy6252-programmer-reference.md](docs/phy6252-programmer-reference.md).
+Use [`docs/bring-up-checklist.md`](docs/bring-up-checklist.md) for real-device acceptance and [`docs/phy6252-programmer-reference.md`](docs/phy6252-programmer-reference.md) for SDK/ROM/linker details.
 
-To flash a PB-03F-Kit:
+To flash without clearing SNV:
 
 ```sh
 tools/flash_firmware.sh tmp/test-dpls.hex
 ```
 
-`--erase` also clears SNV (settings, bonds and journal), so it is intentionally not the default.
+`--erase` also clears SNV (settings, bonds, calibration, auth lock and journal), so it is intentionally destructive.
