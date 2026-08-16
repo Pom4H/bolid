@@ -1,30 +1,26 @@
 package ru.bolid.testdpls.core.app
 
+import ru.bolid.testdpls.core.protocol.DplsFrameStream
 import ru.bolid.testdpls.core.protocol.DplsProtocol
-import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.session.FrameSequencer
 
-/**
- * The complete mutable wire mechanic used by DplsClient.
- *
- * It owns frame sequencing and correlation watermarks, but no auth/session/product
- * state. STATE_GET is intentionally last-write-wins: if two polls are in flight,
- * an older STATE_REPORT cannot overwrite a newer telemetry snapshot.
- */
+/** Wire mechanics only: frame boundaries, sequence generation and correlation. */
 internal class DplsWire(
     private val transport: DplsTransport,
     private val fail: (String) -> Unit,
 ) {
+    private val incoming = DplsFrameStream()
     private val sequencer = FrameSequencer()
     private var latestStateSequence: Int? = null
 
     fun reset() {
+        incoming.reset()
         sequencer.reset()
         latestStateSequence = null
     }
 
-    fun decode(bytes: ByteArray): DplsProtocol.DecodeResult = decodeFrame(bytes)
+    fun receive(bytes: ByteArray): List<DplsProtocol.DecodeResult> = incoming.push(bytes)
 
     fun accepts(frame: DplsProtocol.Frame): Boolean =
         frame.type != DplsProtocol.Type.STATE_REPORT || frame.sequence == latestStateSequence
