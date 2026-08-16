@@ -105,7 +105,7 @@ class DplsClientV2Test {
     }
 
     @Test
-    fun setupDisconnectKeepsStableNodeCredentialAndReconnectIntent() {
+    fun setupDisconnectKeepsAddressCredentialUntilIdentityProof() {
         val transport = FakeTransport()
         val platform = FakePlatform()
         val client = newClient(transport, platform)
@@ -119,22 +119,27 @@ class DplsClientV2Test {
         val setup = transport.lastFrame()
         transport.reply(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(3, 0, 0), setup.sequence)
         assertEquals(ConnectionPhase.RECONNECTING, client.uiState.value.phase)
-        assertTrue(platform.hasVerifier("node:4660"))
+        assertTrue(platform.hasVerifier("addr:ble-1"))
+        assertFalse(platform.hasVerifier("node:4660"))
         transport.dropped()
         assertEquals(1, transport.reconnectCalls)
         client.close()
     }
 
     @Test
-    fun unrelatedErrorCannotBeMistakenForTimeSync() {
+    fun lateForeignErrorDoesNotKillCurrentTransaction() {
         val transport = FakeTransport()
         val client = authenticatedThroughState(transport, FakePlatform())
         val info = transport.lastFrame()
         transport.reply(DplsProtocol.Type.DEVICE_INFO_REPORT, deviceInfo(), info.sequence)
         val sync = transport.lastFrame()
         assertEquals(DplsProtocol.Type.TIME_SYNC, sync.type)
+
         transport.error(5, (sync.sequence + 1) and 0xffff)
-        assertEquals(ConnectionPhase.ERROR, client.uiState.value.phase)
+
+        assertEquals(ConnectionPhase.READY, client.uiState.value.phase)
+        assertTrue(client.uiState.value.authenticated)
+        transport.reply(DplsProtocol.Type.TIME_SYNC, byteArrayOf(), sync.sequence)
         client.close()
     }
 
@@ -208,6 +213,7 @@ class DplsClientV2Test {
         val client = authenticatedThroughState(transport, platform)
         val info = transport.lastFrame()
         transport.reply(DplsProtocol.Type.DEVICE_INFO_REPORT, deviceInfo(), info.sequence)
+        assertTrue(platform.hasVerifier("node:4660"))
         val sync = transport.lastFrame()
         assertEquals(0x78563412, readU32(sync.payload, 0))
         transport.reply(DplsProtocol.Type.TIME_SYNC, byteArrayOf(), sync.sequence)
