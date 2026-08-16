@@ -9,32 +9,47 @@ import kotlin.test.assertTrue
 
 class DeviceSessionTest {
     @Test
-    fun lifecycleOwnsChallengeAndAuthMaterial() {
+    fun authenticationDoesNotImplyVerifiedIdentity() {
         val endpoint = LinkEndpoint.Ble("ble-1")
-        val clientNonce = ByteArray(16) { it.toByte() }
+        val candidate = NodeId(0x1234)
         val challenge = SessionChallenge(
             sessionId = 0x78563412,
-            clientNonce = clientNonce,
+            clientNonce = ByteArray(16) { it.toByte() },
             deviceNonce = ByteArray(16) { (0x20 + it).toByte() },
             authSalt = ByteArray(16) { (0x40 + it).toByte() },
             initialized = true,
         )
 
-        val authenticating: DeviceSession = DeviceSession.Authenticating(endpoint, challenge)
+        val authenticating: DeviceSession = DeviceSession.Authenticating(
+            endpoint = endpoint,
+            challenge = challenge,
+            candidateNodeId = candidate,
+        )
         assertFalse(authenticating.isAuthenticated)
         assertTrue(authenticating.credentialsReady)
         assertEquals(challenge, authenticating.challengeOrNull)
-        assertNull(authenticating.authOrNull)
+        assertEquals(candidate, authenticating.candidateNodeIdOrNull)
+        assertNull(authenticating.nodeIdOrNull)
 
         val token = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
-        val online: DeviceSession = DeviceSession.Online(
-            nodeId = NodeId(0x1234),
+        val auth = AuthSession(challenge.sessionId, token, challenge.authSalt)
+        val synchronizing: DeviceSession = DeviceSession.Synchronizing(
             endpoint = endpoint,
-            auth = AuthSession(challenge.sessionId, token, challenge.authSalt),
+            auth = auth,
+            candidateNodeId = candidate,
+        )
+        assertTrue(synchronizing.isAuthenticated)
+        assertEquals(candidate, synchronizing.candidateNodeIdOrNull)
+        assertNull(synchronizing.nodeIdOrNull)
+
+        val online: DeviceSession = DeviceSession.Online(
+            nodeId = candidate,
+            endpoint = endpoint,
+            auth = auth,
         )
         assertTrue(online.isAuthenticated)
         assertNull(online.challengeOrNull)
-        assertEquals(NodeId(0x1234), online.nodeIdOrNull)
+        assertEquals(candidate, online.nodeIdOrNull)
 
         val payload = online.authOrNull!!.authenticatedPayload()
         assertEquals(12, payload.size)
@@ -42,9 +57,13 @@ class DeviceSessionTest {
     }
 
     @Test
-    fun recoveringDropsAuthenticationButRetainsIdentityAndRoute() {
+    fun recoveringDropsAuthenticationButRetainsVerifiedIdentityAndRoute() {
         val endpoint = LinkEndpoint.Routed(NodeId(0x10), NodeId(0x20))
-        val recovering: DeviceSession = DeviceSession.Recovering(NodeId(0x20), endpoint, attempt = 3)
+        val recovering: DeviceSession = DeviceSession.Recovering(
+            nodeId = NodeId(0x20),
+            endpoint = endpoint,
+            attempt = 3,
+        )
 
         assertFalse(recovering.isAuthenticated)
         assertEquals(NodeId(0x20), recovering.nodeIdOrNull)
