@@ -21,6 +21,11 @@ static uint8 tx_value;
 static gattCharCfg_t tx_cccd[GATT_MAX_NUM_CONN];
 static dpls_gatt_rx_cb_t app_rx;
 
+/* One indication is allowed in flight by the PHY6252 TX queue. Keep its ATT
+ * storage alive until the confirmation instead of handing the stack a pointer
+ * into a function-local object whose lifetime ends at return. */
+static attHandleValueInd_t tx_indication;
+
 static uint8 read_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 *len, uint16 offset, uint8 max_len);
 static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint16 len, uint16 offset);
 static void connection_cb(uint16 conn, uint8 change);
@@ -38,6 +43,7 @@ CONST gattServiceCBs_t callbacks = {read_cb, write_cb, NULL};
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback) {
     app_rx = rx_callback;
+    memset(&tx_indication, 0, sizeof(tx_indication));
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, tx_cccd);
     linkDB_Register(connection_cb);
     return GATTServApp_RegisterService(attrs, GATT_NUM_ATTRS(attrs), &callbacks);
@@ -73,6 +79,7 @@ static void connection_cb(uint16 conn, uint8 change) {
     if (conn != LOOPBACK_CONNHANDLE && (change == LINKDB_STATUS_UPDATE_REMOVED ||
         (change == LINKDB_STATUS_UPDATE_STATEFLAGS && !linkDB_Up(conn)))) {
         GATTServApp_InitCharCfg(conn, tx_cccd);
+        memset(&tx_indication, 0, sizeof(tx_indication));
     }
 }
 
@@ -86,11 +93,12 @@ bool dpls_gatt_subscribed(void) {
 }
 
 bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
-    attHandleValueInd_t ind;
     if (!(GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_INDICATE)) return bleNotConnected;
-    if (length + 3u > ATT_GetCurrentMTUSize(conn)) return ATT_ERR_INVALID_VALUE_SIZE;
-    ind.handle = attrs[DPLS_TX_VALUE_INDEX].handle;
-    ind.len = length;
-    osal_memcpy(ind.value, data, length);
-    return GATT_Indication(conn, &ind, FALSE, task_id);
+    if (length + 3u > ATT_GetCurrentMTUSize(conn) || length > sizeof(tx_indication.value)) {
+        return ATT_ERR_INVALID_VALUE_SIZE;
+    }
+    tx_indication.handle = attrs[DPLS_TX_VALUE_INDEX].handle;
+    tx_indication.len = length;
+    osal_memcpy(tx_indication.value, data, length);
+    return GATT_Indication(conn, &tx_indication, FALSE, task_id);
 }
