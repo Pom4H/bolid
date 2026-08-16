@@ -123,17 +123,13 @@ require_text(
     "connectGatt must deliver callbacks on the main Handler",
 )
 
-# Direct StateFlow replacement is allowed only for a freshly retained UI state
-# or through the session projection. All ordinary mutation goes through updateState.
+# Every direct StateFlow replacement must visibly re-apply the lifecycle
+# projection. Ordinary mutations go through updateState().
 for number, line in enumerate(text(CLIENT).splitlines(), start=1):
     stripped = line.strip()
     if "mutableState.value =" not in stripped:
         continue
-    if (
-        "projectSession(" in stripped
-        or "retainedUiState(" in stripped
-        or stripped.startswith("private val mutableState")
-    ):
+    if "projectSession(" in stripped or stripped.startswith("private val mutableState"):
         continue
     fail(CLIENT, f"line {number}: direct UI state replacement bypasses session projection")
 
