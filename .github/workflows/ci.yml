@@ -80,7 +80,7 @@ jobs:
           test -f docs/live-voltage-requirements.md
 
   android:
-    name: Shared core + Android adapter
+    name: Shared runtime/core + Android adapter
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -90,18 +90,18 @@ jobs:
           java-version: "17"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
-      - name: Shared controller/protocol tests
+      - name: Wire, runtime and controller tests
         working-directory: mobile
-        run: ./gradlew :core:testDebugUnitTest
+        run: ./gradlew :wire:testDebugUnitTest :runtime:testDebugUnitTest :core:testDebugUnitTest
       - name: Lint shared Android target + app adapter
         working-directory: mobile
-        run: ./gradlew :core:lintDebug :android:lintDebug
+        run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug
       - name: Assemble debug APK
         working-directory: mobile
         run: ./gradlew :android:assembleDebug
 
   ios:
-    name: Shared core + iOS adapter + Xcode host
+    name: Shared runtime/core + iOS adapter + Xcode host
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -113,7 +113,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
       - name: Run common tests on Kotlin/Native
         working-directory: mobile
-        run: ./gradlew :core:iosSimulatorArm64Test
+        run: ./gradlew :wire:iosSimulatorArm64Test :runtime:iosSimulatorArm64Test :core:iosSimulatorArm64Test
       - name: Compile DplsCore for iOS simulator
         working-directory: mobile
         run: ./gradlew :core:linkDebugFrameworkIosSimulatorArm64
