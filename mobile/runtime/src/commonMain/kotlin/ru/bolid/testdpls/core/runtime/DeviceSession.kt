@@ -34,12 +34,17 @@ data class AuthSession(
     }
 }
 
+enum class RecoveryReason {
+    LINK_LOSS,
+    SETUP_APPLIED,
+}
+
 /**
- * The only owner of link/auth lifecycle.
+ * The only owner of link/auth/recovery lifecycle.
  *
- * [candidateNodeId] is deliberately only a discovery hint. It can be used to find
- * cached credentials, but it becomes authoritative only after DEVICE_INFO and the
- * transition to [Online].
+ * [candidateNodeId] is an untrusted discovery hint. It is used only to check that
+ * authenticated DEVICE_INFO agrees with the advertisement; credentials are never
+ * selected by this value before identity proof.
  */
 sealed interface DeviceSession {
     data object Offline : DeviceSession
@@ -92,8 +97,11 @@ sealed interface DeviceSession {
     data class Recovering(
         val nodeId: NodeId?,
         val endpoint: LinkEndpoint,
-        val attempt: Int,
-    ) : DeviceSession
+        val attempt: Int = 0,
+        val reason: RecoveryReason = RecoveryReason.LINK_LOSS,
+    ) : DeviceSession {
+        init { require(attempt >= 0) }
+    }
 
     data class Failed(
         val endpoint: LinkEndpoint?,
@@ -154,7 +162,7 @@ val DeviceSession.nodeIdOrNull: NodeId?
         else -> null
     }
 
-/** Untrusted discovery hint used only for credential lookup before identity proof. */
+/** Untrusted discovery hint used only for identity consistency checks. */
 val DeviceSession.candidateNodeIdOrNull: NodeId?
     get() = when (this) {
         is DeviceSession.Connecting -> candidateNodeId
