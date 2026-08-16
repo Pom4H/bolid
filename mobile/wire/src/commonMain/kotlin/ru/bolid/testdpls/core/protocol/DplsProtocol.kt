@@ -5,6 +5,8 @@ object DplsProtocol {
     const val HEADER_SIZE = 7
     const val TRAILER_SIZE = 2
     const val OVERHEAD = HEADER_SIZE + TRAILER_SIZE
+    const val MAX_PAYLOAD = 235
+    const val MAX_FRAME = OVERHEAD + MAX_PAYLOAD
     const val TIME_MIN_UNIX_SECONDS = 1_577_836_800L
     const val TIME_MAX_UNIX_SECONDS = 4_102_444_799L
 
