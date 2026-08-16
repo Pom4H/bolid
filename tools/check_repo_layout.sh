@@ -72,8 +72,9 @@ test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTranspo
 test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
 test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
 
-# Platform adapters live next to each other in the product KMP module until the
-# ByteLink adapter migration is complete.
+# Platform BLE adapters are the implemented transport boundary in this PR.
+# Future mesh/serial boundaries must arrive with the feature that consumes them,
+# not as unused runtime scaffolding.
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsPlatformEffects.kt
 test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt
