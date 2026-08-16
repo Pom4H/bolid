@@ -70,6 +70,8 @@ jobs:
         run: bash tools/check_repo_layout.sh
       - name: Verify language-neutral wire contract
         run: python3 tools/test_dpls_protocol_crc.py
+      - name: Verify simulator transport parity
+        run: python3 tools/check_sim_transport_parity.py
       - name: Verify session capture smoke
         run: python3 tools/session_capture/test_session_capture.py
       - name: Verify architecture ownership
