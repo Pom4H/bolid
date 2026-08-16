@@ -89,7 +89,9 @@ export class NativeBle {
         "--fw",
         opts.firmware,
         "--status",
-        String(opts.status),
+        // Keep the test double no richer than the current PHY6252 target.
+        // The target reserves this byte but emits 0 until dynamic ADV status is implemented there.
+        "0",
       ],
         { stdin: "pipe", stdout: "pipe", stderr: "inherit" },
     );
