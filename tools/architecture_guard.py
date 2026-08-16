@@ -93,11 +93,11 @@ for path in (ROOT / "mobile").rglob("*.kt"):
     )
 
 # Cancellation is cleanup, not identity. Delayed operation work must compare the
-# exact frame sequence; connection/scan/log work must carry generation tokens.
+# physical-link epoch and exact frame sequence.
 require_text(
     CLIENT,
-    "if (operation?.sequence == sequence) action()",
-    "operation timeout must be correlated to the exact request sequence",
+    "if (generation == linkGeneration && operation?.sequence == sequence) action()",
+    "operation timeout must be correlated to link epoch and request sequence",
 )
 for generation in ("linkGeneration", "scanGeneration", "logTimeoutGeneration"):
     require_text(CLIENT, generation, f"missing stale-work generation guard: {generation}")
@@ -143,6 +143,6 @@ print("Architecture guard: OK")
 print("  lifecycle/auth owner: DeviceSession")
 print("  Online identity: verified NodeId")
 print("  transaction id: Frame.sequence")
-print("  delayed work: sequence/generation guarded")
+print("  delayed work: link epoch + sequence/generation guarded")
 print("  Android GATT state: main-looper confined")
 print("  wire/runtime dependency zones: clean")
