@@ -28,6 +28,7 @@ function(dpls_add_test name)
 endfunction()
 
 dpls_add_test(test_server_v2 tests/test_server_v2.c)
+dpls_add_test(test_identify_contract tests/test_identify_contract.c)
 dpls_add_test(test_led tests/test_led.c)
 dpls_add_test(test_calib tests/test_calib.c)
 dpls_add_test(test_protocol tests/test_protocol.c)
