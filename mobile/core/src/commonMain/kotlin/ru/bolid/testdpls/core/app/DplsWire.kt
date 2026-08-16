@@ -6,18 +6,28 @@ import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.session.FrameSequencer
 
 /**
- * The complete mutable wire mechanic used by DplsClient: one frame sequencer.
- * It owns no session/auth/product state.
+ * The complete mutable wire mechanic used by DplsClient.
+ *
+ * It owns frame sequencing and correlation watermarks, but no auth/session/product
+ * state. STATE_GET is intentionally last-write-wins: if two polls are in flight,
+ * an older STATE_REPORT cannot overwrite a newer telemetry snapshot.
  */
 internal class DplsWire(
     private val transport: DplsTransport,
     private val fail: (String) -> Unit,
 ) {
     private val sequencer = FrameSequencer()
+    private var latestStateSequence: Int? = null
 
-    fun reset() = sequencer.reset()
+    fun reset() {
+        sequencer.reset()
+        latestStateSequence = null
+    }
 
     fun decode(bytes: ByteArray): DplsProtocol.DecodeResult = decodeFrame(bytes)
+
+    fun accepts(frame: DplsProtocol.Frame): Boolean =
+        frame.type != DplsProtocol.Type.STATE_REPORT || frame.sequence == latestStateSequence
 
     fun request(
         type: DplsProtocol.Type,
@@ -26,9 +36,9 @@ internal class DplsWire(
         flush: Boolean = false,
     ): Int? {
         val sequence = sequencer.next()
-        return sequence.takeIf {
-            send(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush)
-        }
+        if (!send(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush)) return null
+        if (type == DplsProtocol.Type.STATE_GET) latestStateSequence = sequence
+        return sequence
     }
 
     fun oneWay(
