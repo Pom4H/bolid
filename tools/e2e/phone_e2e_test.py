@@ -27,6 +27,9 @@ from typing import Iterable
 ADB = os.environ.get("ADB") or os.path.expanduser("~/Library/Android/sdk/platform-tools/adb")
 
 def _adb_device() -> str:
+    env = os.environ.get("ANDROID_SERIAL")
+    if env:
+        return env
     out = subprocess.check_output([ADB, "devices", "-l"], text=True)
     for line in out.splitlines():
         if "device product:" in line:
@@ -42,6 +45,7 @@ ACTION_E2E_SET_PASSWORD = f"{PKG}.E2E_SET_PASSWORD"
 PASSWORD = "TestDpls01"
 WRONG_PASSWORD = "WrongPwd1"
 DEVICE_NAME = "Test-DPLS-E2E"
+SCAN_NAME = os.environ.get("DPLS_E2E_DEVICE", "Test-DPLS")
 DEVICE_NAME_NEW = "Test-DPLS-Renamed"
 PASSWORD_NEW = "TestDpls02"
 JOURNAL_CAPACITY = 200
@@ -295,15 +299,9 @@ def wait_identify_led(max_connect: float = 20.0, observe_sec: float | None = Non
         observe_sec = IDENTIFY_LED_OBSERVE_SEC
     deadline = time.time() + max_connect
     led_at: float | None = None
-    auth_submitted = False
     while time.time() < deadline:
         poll_pairing_dialog(duration=0)
         log = logcat_full()
-        if not auth_submitted and (
-            "E2E login ready" in log or "RX indication bytes=46" in log
-        ) and "E2E setup ready" not in log:
-            submit_password(PASSWORD)
-            auth_submitted = True
         if "E2E identify led live" in log:
             if led_at is None:
                 led_at = time.time()
@@ -362,8 +360,8 @@ def restart_app_for_fresh_login() -> None:
     clear_logcat()
     prepare_app(clear_data=False)
     wait_text("Устройства рядом", timeout=20)
-    wait_for_device("Test-DPLS")
-    tap_device("Test-DPLS")
+    wait_for_device()
+    tap_device()
     wait_identify_led(max_connect=25.0)
     confirm_identified_device()
 
@@ -437,12 +435,12 @@ def quick_submit_login_after_confirm(timeout: float = 8.0) -> None:
 def connect_and_pair(auto_login: bool = True) -> None:
     step("Подключение: scan")
     wait_text("Устройства рядом", timeout=15)
-    texts = wait_for_device("Test-DPLS")
+    texts = wait_for_device()
     log("UI: " + " | ".join(t for t in texts if t))
     assert_no_ff_address(texts)
 
     step("Подключение: identify")
-    tap_device("Test-DPLS")
+    tap_device()
     wait_identify_led(max_connect=25.0)
 
     step("Подключение: confirm device")
@@ -1335,7 +1333,7 @@ def dismiss_runtime_permissions() -> None:
         break
 
 
-def wait_for_device(name: str = "Test-DPLS", timeout: float = 20.0) -> list[str]:
+def wait_for_device(name: str = SCAN_NAME, timeout: float = 20.0) -> list[str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         dismiss_runtime_permissions()
@@ -1347,7 +1345,7 @@ def wait_for_device(name: str = "Test-DPLS", timeout: float = 20.0) -> list[str]
     raise TimeoutError(f"Device {name!r} not found in scan")
 
 
-def tap_device(name: str = "Test-DPLS") -> None:
+def tap_device(name: str = SCAN_NAME) -> None:
     nodes = dump_nodes()
     device_node = next((n for n in nodes if name in n.text), None)
     if device_node is None:

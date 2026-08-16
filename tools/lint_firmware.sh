@@ -22,8 +22,12 @@ cppcheck \
     --suppress=missingIncludeSystem \
     --suppress=assertWithSideEffect \
     --suppress=unmatchedSuppression \
-    -I "$ROOT/Firmware/include" \
-    "$ROOT/Firmware/src" \
-    "$ROOT/Firmware/include" \
-    "$ROOT/Firmware/tests" \
+    -I "$ROOT/firmware/include" \
+    -I "$ROOT/firmware/sim" \
+    -I "$ROOT/firmware/phy6252_emu" \
+    "$ROOT/firmware/src" \
+    "$ROOT/firmware/include" \
+    "$ROOT/firmware/sim" \
+    "$ROOT/firmware/phy6252_emu" \
+    "$ROOT/firmware/tests" \
     2> >(tee "$REPORT" >&2)

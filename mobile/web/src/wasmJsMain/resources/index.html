@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Test-DPLS</title>
+    <base href="/phone/" />
+    <style>
+      html, body, #phone { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0e10; }
+      #phone, #phone > div { width: 100%; height: 100%; }
+      #phone canvas { display: block; width: 100% !important; height: 100% !important; }
+    </style>
+  </head>
+  <body>
+    <div id="phone"></div>
+    <script>
+      (function () {
+        const host = document.getElementById("phone");
+        let started = false;
+        function start() {
+          if (started) return;
+          if (host.clientWidth < 8 || host.clientHeight < 8) return;
+          started = true;
+          const script = document.createElement("script");
+          script.src = "dplsApp.js";
+          document.body.appendChild(script);
+        }
+        const observer = new ResizeObserver(start);
+        observer.observe(host);
+        start();
+        requestAnimationFrame(start);
+      })();
+    </script>
+  </body>
+</html>

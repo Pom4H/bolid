@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Host-side CRC/framing smoke test shared by Android and iOS clients.
+"""Language-neutral CRC/framing smoke test for the Test-DPLS wire contract.
 
-Mirrors Firmware/src/dpls_protocol.c and TestDPLS DplsProtocol known-answers.
+The authoritative implementations are firmware/src/dpls_protocol.c and
+mobile/core. This script keeps a tiny dependency-free known-answer check useful
+from development environments that do not have the native/mobile toolchains.
 """
 from __future__ import annotations
 
 import struct
 import sys
-
 
 VERSION = 1
 OVERHEAD = 9
@@ -36,9 +37,9 @@ def main() -> int:
     assert len(frame) == OVERHEAD + 5
     assert frame[0] == VERSION
     assert frame[1] == 0x12
-    assert frame[3] == 0x34 and frame[4] == 0x12  # sequence LE
+    assert frame[3] == 0x34 and frame[4] == 0x12
 
-    hello = encode(0x01, 1, b"")
+    hello = encode(0x01, 1)
     assert len(hello) == OVERHEAD
     assert hello[3] == 1 and hello[4] == 0
 

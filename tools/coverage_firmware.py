@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Line-coverage gate for Firmware/src (portable DPLS core).
+"""Line-coverage gate for firmware/src (portable DPLS core).
 
 Reads gcov intermediate notes produced next to the instrumented objects and
-fails if the aggregated line coverage of Firmware/src is below the threshold.
+fails if the aggregated line coverage of firmware/src is below the threshold.
 """
 from __future__ import annotations
 
@@ -45,13 +45,11 @@ def find_gcov() -> list[str]:
 
 
 def parse_gcov_i(text: str) -> tuple[int, int]:
-    """Return (hit, total) executable lines from `gcov -i` / llvm-cov gcov -i."""
     hit = 0
     total = 0
     for line in text.splitlines():
         if not line.startswith("lcount:"):
             continue
-        # lcount:<line>,<count>
         _, rest = line.split(":", 1)
         parts = rest.split(",")
         if len(parts) < 2:
@@ -77,7 +75,6 @@ def collect(build_dir: Path) -> dict[str, tuple[int, int]]:
     tmp.mkdir(exist_ok=True)
     for gcda in gcda_files:
         name = gcda.stem
-        # CMake names objects dpls_server.c.gcda or dpls_server.gcda
         src = name.replace(".c", "") + ".c" if not name.endswith(".c") else name
         if src not in SRC_NAMES and name not in SRC_NAMES:
             continue
@@ -88,7 +85,6 @@ def collect(build_dir: Path) -> dict[str, tuple[int, int]]:
             capture_output=True,
             text=True,
         )
-        # llvm-cov gcov -i writes <file>.gcov in cwd
         gcov_notes = list(tmp.glob("*.gcov"))
         text = ""
         for note in gcov_notes:
@@ -98,7 +94,6 @@ def collect(build_dir: Path) -> dict[str, tuple[int, int]]:
             text = proc.stdout + proc.stderr
         hit, total = parse_gcov_i(text)
         if total == 0:
-            # Fallback: parse classic gcov
             classic = subprocess.run(
                 gcov + ["-o", str(gcda.parent), str(gcda)],
                 cwd=tmp,
@@ -145,7 +140,7 @@ def parse_classic_gcov(text: str) -> tuple[int, int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build-dir", default="Firmware/build-cov")
+    parser.add_argument("--build-dir", default="firmware/build-cov")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--report", default="tmp/firmware-coverage.txt")
     args = parser.parse_args()
@@ -154,7 +149,7 @@ def main() -> int:
     build_dir = (root / args.build_dir).resolve() if not os.path.isabs(args.build_dir) else Path(args.build_dir)
     results = collect(build_dir)
     if not results:
-        raise SystemExit("no coverage data for Firmware/src")
+        raise SystemExit("no coverage data for firmware/src")
 
     lines = []
     hit_sum = 0
@@ -167,7 +162,7 @@ def main() -> int:
         total_sum += total
     overall = (100.0 * hit_sum / total_sum) if total_sum else 0.0
     report = (
-        "Firmware/src line coverage\n"
+        "firmware/src line coverage\n"
         + "\n".join(lines)
         + f"\n  {'TOTAL':18} {hit_sum:4}/{total_sum:<4}  {overall:5.1f}%\n"
         + f"threshold: {args.threshold:.0f}%\n"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Прошивка PB-03F через pvvx rdwr_phy62x2.py.
+# Прошивка PB-03F через rdwr_phy62x2.py из third_party/phy62x2.
 #
 #   tools/flash_firmware.sh <файл.hex> [--erase]
 #
@@ -21,4 +21,4 @@ ARGS=(-p "$PORT" -r wh "$HEX")
 [ "${2:-}" = "--erase" ] && ARGS=(-p "$PORT" -a -r wh "$HEX")
 
 echo "Порт: $PORT — зажмите KEY1 и отпустите на строке «Turn on the power»"
-PYTHONPATH="$ROOT/.python-deps" exec python3 "$ROOT/pvvx-PHY62x2/Utils/rdwr_phy62x2.py" "${ARGS[@]}"
+PYTHONPATH="$ROOT/.python-deps" exec python3 "$ROOT/third_party/phy62x2/Utils/rdwr_phy62x2.py" "${ARGS[@]}"

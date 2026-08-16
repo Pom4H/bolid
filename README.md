@@ -1,114 +1,236 @@
-# Test-DPLS 1.2.1
+# Test-DPLS
 
-Безопасное BLE-управление испытательным устройством ДПЛС: прошивка PHY6252
-(плата PB-03F-Kit), Android- и iOS-клиенты.
+Firmware and mobile software for a BLE-controlled DPLS test device based on PHY6252 / PB-03F.
 
-Протокол и железо — [Firmware/README.md](Firmware/README.md). Клиенты —
-[TestDPLS/README.md](TestDPLS/README.md) и
-[TestDPLS-iOS/README.md](TestDPLS-iOS/README.md).
+The repository follows three ownership rules:
 
-## Что в 1.2.1
+1. **firmware owns hardware safety**;
+2. **Kotlin `commonMain` owns the product behavior shared by Android and iOS**;
+3. **platform code only adapts operating-system APIs and application entry points**.
 
-- Сборка без предупреждений (Keil/GCC `-Werror`, cppcheck, Android lint).
-- Покрытие host-тестов прошивки и Android `protocol`/`ble` не ниже 80%.
-- Меньше радио в «Норме»: опрос `STATE_GET` 1 Гц только в тесте или пока не READY.
-- Отключён: тик OSAL 5 с, ADC только PORT1 и VCAP.
-- iOS показывает напряжения четырёх клемм.
+## Repository layout
 
-## Что в 1.2.0
-
-- Распиновка revision 2: +1/+2/+Т/резерв (P20/P15/P24/P23), RGB на P7/P11/P18,
-  заводской сброс на P34.
-- Живые напряжения четырёх каналов в приложении (1 Гц).
-- Сон в «Норме», lock сна только на энергизованном режиме, LED без таймера,
-  когда гаснет.
-- Сборка одним скриптом: Keil/AC6 (релизный образ) и GCC.
-
-## Сборка прошивки
-
-```sh
-cmake -S Firmware -B Firmware/build && cmake --build Firmware/build
-ctest --test-dir Firmware/build --output-on-failure
-
-tools/build_firmware.sh keil tmp/test-dpls.hex   # Keil MDK Community / AC6
-tools/build_firmware.sh gcc  tmp/test-dpls.hex   # GNU Arm Embedded
-tools/flash_firmware.sh tmp/test-dpls.hex        # без --erase SNV сохраняется
-```
-
-CI (`firmware-target.yml`) собирает оба toolchain. Предупреждения компилятора
-и линкера в логе сборки считаются ошибкой.
-
-## Тесты и покрытие
-
-Порог **80%** по строкам. CI падает ниже.
-
-```sh
-bash tools/coverage_firmware.sh          # ctest + gcov, Firmware/src
-cd TestDPLS && ./gradlew koverVerifyDebug koverHtmlReportDebug
-# HTML: TestDPLS/app/build/reports/kover/htmlDebug
-```
-
-Android: пакеты `protocol` и `ble` без `BleClient` (GATT/Android API).
-iOS: `xcodebuild test -scheme TestDPLS` (протокол и модели).
-
-## Линтеры
-
-```sh
-bash tools/lint_firmware.sh          # cppcheck: src, include, tests
-cd TestDPLS && ./gradlew lintDebug   # Android lint, warnings as errors
-```
-
-Хост-сборка прошивки (`Firmware/CMakeLists.txt`) и наш код в GCC/Keil
-идут с `-Wall -Wextra -Werror`. Vendor SDK собирается с `-w`. `tools/build_firmware.sh`
-считает любой warning в логе ошибкой.
-
-## Структура
-
-| Каталог | Содержимое |
+| Path | Purpose |
 |---|---|
-| `Firmware/` | Ядро сервера (C99) + адаптер PHY62XX SDK 3.1.2 |
-| `Firmware/targets/phy6252/` | Keil CMSIS-solution и GCC Makefile |
-| `TestDPLS/` | Android (Kotlin, Compose, minSdk 33) |
-| `TestDPLS-iOS/` | iPhone (SwiftUI, iOS 16+) |
-| `tools/` | Сборка, прошивка, UART, E2E |
-| `docs/hardware/` | Схема PB-03F-Kit и распиновка |
-| `pvvx-PHY62x2/` | UART-флешер PHY62xx |
+| `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
+| `firmware/zmu/` | Cortex-M0 E2E harness for the [zmu](https://github.com/jjkt/zmu) emulator |
+| `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
+| `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.0**) |
+| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.0**) |
+| `mobile/web/` | Compose wasm phone for the host lab (`LabBleTransport` over WebSocket) |
+| `docs/` | Architecture, bring-up and PHY6252 engineering references |
+| `tools/` | Build, flash, lint, coverage, lab and one-command checks |
+| `tools/dpls-lab/` | Host lab: N simulators, native BLE central/peripheral, wasm phone |
+| `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
 
-## Распиновка
+The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
 
-![Распиновка PB-03F-Kit ↔ силовая часть](docs/hardware/pb03f-kit-power-pinout.png)
+## Mobile architecture
 
-Логика 3,3 В, активный «1». Ноль на всех управляющих выходах — «Норма».
+There is one application controller, one UI and one protocol implementation:
 
-| Функция | GPIO |
+```text
+                    Test-DPLS BLE wire contract
+                              │
+                    ┌─────────▼──────────┐
+                    │ mobile/core/       │
+                    │ commonMain         │
+                    │                    │
+                    │ DplsClient         │
+                    │ protocol + crypto  │
+                    │ domain + session   │
+                    │ message parsers    │
+                    │ DplsApp Compose UI │
+                    └─────────┬──────────┘
+                              │ DplsTransport
+                 ┌────────────┴────────────┐
+                 │                         │
+        Android platform edge              iOS platform edge
+        core/androidMain                  core/iosMain
+        AndroidBleTransport               IosBleTransport
+        AndroidPlatformServices           IosPlatformServices
+                 │                                 │
+        mobile/android/                    mobile/ios/
+        Activity + permissions             Xcode + one Swift bootstrap
+                 └────── same DplsClient + DplsApp ──────┘
+```
+
+`commonMain` contains no Android or Apple framework APIs. Android and iOS implement only the `DplsTransport`/platform-services boundary. Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application.
+
+See [docs/architecture.md](docs/architecture.md) for the detailed ownership rules.
+
+## Safety model
+
+The phone is never the safety boundary. Firmware owns the final electrical state.
+
+- boot and disconnect force `NORMAL`;
+- dangerous test modes have a hard timeout;
+- session timeout returns the device to `NORMAL`;
+- low reserve and real-short isolation override requested modes;
+- output switching is break-before-make;
+- authentication lock can persist across reconnect/reboot;
+- ATT indications are serialized and advance only after confirmation.
+
+A mobile crash, reconnect bug or stale UI state must not be able to keep a dangerous output active indefinitely.
+
+## Developer quick start
+
+Run the complete mobile loop from the repository root:
+
+```sh
+bash tools/check_mobile.sh
+```
+
+Run all host-side repository checks:
+
+```sh
+bash tools/check_all.sh
+```
+
+On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `DplsCore` and executes the Xcode integration smoke test. Physical BLE behavior still requires a real phone/device pair.
+
+### Device-free firmware ↔ mobile E2E (zmu)
+
+Run the portable firmware core on a Cortex-M0 emulator and verify the responses with Kotlin wire encoders — no PB-03F or phone required:
+
+```sh
+# needs: rustc/cargo, arm-none-eabi-gcc, JDK 17+
+bash tools/fetch_zmu.sh          # clones https://github.com/jjkt/zmu and builds zmu-cortex-m0
+bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
+# covers: all firmware/tests/* on Cortex-M0 + phone-E2E protocol matrix (modes/settings/journal)
+```
+
+### Soft-BLE product stack (host simulator)
+
+Exercise real `DplsClient` against host `dpls_simulator` over a stdio “soft-BLE” transport — no phone and no PHY6252 radio:
+
+```sh
+# needs: cmake, JDK 17+
+bash tools/soft_ble_e2e.sh
+# covers: connect/auth, all test modes, rename, journal, identify LED, real-short reject, low reserve
+```
+
+This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
+
+### Host lab (simulator + wasm phone + laptop BLE)
+
+```sh
+bash tools/dpls_lab.sh
+# http://127.0.0.1:8787
+```
+
+The iframe on the right is the same Compose `DplsApp` as Android/iOS (`mobile/web`). The laptop can advertise a sim (`BLE сервер`) or scan real boards (`Найти плату`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
+
+Current firmware and phone version is **1.4.0** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
+
+### Capture real phone↔board sessions (for simulator fidelity)
+
+Record live logcat (BLE frames + client `STATE`/`E2E` markers) and optionally UART, then parse/replay into `dpls_simulator`:
+
+```sh
+python3 tools/session_capture/record_session.py --name lab
+python3 tools/session_capture/parse_session.py tmp/sessions/session-*-lab.log
+python3 tools/session_capture/test_session_capture.py   # offline smoke
+```
+
+See `tools/session_capture/README.md`.
+
+### Firmware
+
+```sh
+cmake -S firmware -B firmware/build
+cmake --build firmware/build
+ctest --test-dir firmware/build --output-on-failure
+# phy6252_emu is the reusable PHY6252 ATT/OSAL host model; DPLS sim/zmu sit on top of it.
+
+# PHY6252 target
+tools/build_firmware.sh keil tmp/test-dpls.hex
+tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
+```
+
+### Mobile
+
+```sh
+cd mobile
+./gradlew :core:testDebugUnitTest
+./gradlew :core:lintDebug :android:lintDebug :android:assembleDebug
+```
+
+On macOS:
+
+```sh
+cd mobile
+./gradlew :core:iosSimulatorArm64Test
+./gradlew :core:linkDebugFrameworkIosSimulatorArm64
+cd ..
+xcodebuild test \
+  -project mobile/ios/TestDPLS.xcodeproj \
+  -scheme TestDPLS \
+  -destination 'platform=iOS Simulator,name=iPhone 16' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+## Where to make changes
+
+- Shared screen/presentation behavior → `mobile/core/src/commonMain/.../app/`.
+- Protocol, auth or binary contract → `mobile/core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
+- Session secret/runtime rules → `mobile/core/src/commonMain/.../session/`.
+- Android Bluetooth/lifecycle quirk → `mobile/android/`.
+- iOS CoreBluetooth/lifecycle quirk → `mobile/core/src/iosMain/`.
+- Xcode signing/assets/capabilities → `mobile/ios/`.
+
+An ordinary product feature should normally require **one shared Kotlin change**, not parallel Android + Swift implementations.
+
+## Test strategy
+
+Behavior-heavy checks live at the lowest reusable layer:
+
+- firmware host tests + coverage + cppcheck;
+- zmu Cortex-M0 E2E (Kotlin request vectors → ARM firmware server → Kotlin response checks);
+- CRC known-answer and all-message frame round trips;
+- 10,000 randomized malformed decoder inputs;
+- 2,000 randomized valid frame round trips;
+- binary auth/command/state/device-info/journal contracts;
+- PBKDF2/HMAC/SHA-256 known-answer vectors;
+- shared `DplsClient` fake-transport tests including stale command-id rejection and reconnect safety;
+- the same KMP common tests on JVM and Kotlin/Native;
+- Android adapter lint/build;
+- native Xcode/KMP integration smoke test.
+
+The repository layout check also rejects reintroducing duplicate platform controllers, UI trees or protocol facades.
+
+## GATT
+
+| Characteristic | UUID | Direction |
+|---|---|---|
+| Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` | — |
+| RX | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` | app → device (WRITE) |
+| TX | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` | device → app (INDICATE/NOTIFY) |
+
+Frame format: `version / type / flags / sequence / length / payload / CRC16-CCITT-FALSE`.
+
+## Hardware revision 2
+
+| Function | GPIO |
 |---|---|
 | ISO_1 / ISO_2 / ISO_T | P31 / P32 / P33 |
 | KZ_1 / KZ_2 / KZ_T | P14 / P16 / P17 |
-| ADC +1 / +2 / +Т / резерв | P20 / P15 / P24 / P23 |
+| ADC +1 / +2 / +Т / reserve | P20 / P15 / P24 / P23 |
 | RGB R / G / B | P7 / P11 / P18 |
-| Заводской сброс | P34 |
+| Factory reset | P34 |
 
-P16/P17 свободны: сборка использует внутренний RC 32 кГц, не кварц.
+![PB-03F-Kit ↔ power-stage pinout](docs/hardware/pb03f-kit-power-pinout.png)
 
-## Клиенты
+Logic is 3.3 V, active-high. All control outputs low is the safe `NORMAL` state.
+
+## Hardware bring-up
+
+Use [docs/bring-up-checklist.md](docs/bring-up-checklist.md) as the acceptance checklist. PHY6252-specific notes are collected in [docs/phy6252-programmer-reference.md](docs/phy6252-programmer-reference.md).
+
+To flash a PB-03F-Kit:
 
 ```sh
-cd TestDPLS && ./gradlew installDebug
-open TestDPLS-iOS/TestDPLS.xcodeproj
+tools/flash_firmware.sh tmp/test-dpls.hex
 ```
 
-## E2E
-
-```sh
-python3 tools/e2e/phone_e2e_test.py
-```
-
-Приёмка на железе — [docs/bring-up-checklist.md](docs/bring-up-checklist.md).
-
-## PB-03F-Kit
-
-- **KEY1** отключает питание чипа. Вход в загрузчик: зажать KEY1, запустить
-  `flash_firmware.sh`, отпустить на «Turn on the power». RTS/DTR не разведены.
-- Заводской сброс пароля — перемычка **P34↔GND** на 5 с. Не ставить на P24
-  (это «+Т»). KEY2 кита (P15) занят измерением «+2».
-- Watchdog 2 с взводится до OSAL: длинный init кормит `hal_watchdog_feed()`.
+`--erase` also clears SNV (settings, bonds and journal), so it is intentionally not the default.
