@@ -2,7 +2,13 @@ package ru.bolid.testdpls.core.app
 
 import ru.bolid.testdpls.core.domain.UiTheme
 
-/** OS-neutral BLE transport boundary used by the shared Test-DPLS client. */
+/**
+ * OS-neutral BLE transport boundary used by the shared Test-DPLS client.
+ *
+ * Platform implementations must serialize listener callbacks onto their UI/main
+ * event loop. DplsClient deliberately relies on that confinement instead of adding
+ * locks around every lifecycle transition.
+ */
 interface DplsTransport {
     fun setListener(listener: DplsTransportListener)
     fun startScan(): Boolean
