@@ -24,7 +24,12 @@ import android.os.ParcelUuid
 import android.util.Log
 import java.util.UUID
 
-/** Android-only BluetoothGatt adapter. Product semantics live in common DplsClient. */
+/**
+ * Android-only BluetoothGatt adapter.
+ *
+ * All mutable GATT state is confined to [handler]'s main looper. Product
+ * semantics live in common DplsClient; this class only serializes Android BLE.
+ */
 @SuppressLint("MissingPermission")
 class AndroidBleTransport(context: Context) : DplsTransport {
     private val appContext = context.applicationContext
@@ -58,10 +63,15 @@ class AndroidBleTransport(context: Context) : DplsTransport {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = acceptScan(result)
-        override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::acceptScan)
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>) =
+            results.forEach(::acceptScan)
+
         override fun onScanFailed(errorCode: Int) {
-            scanning = false
-            emit { onTransportError("Ошибка BLE-сканирования: $errorCode") }
+            handler.post {
+                scanning = false
+                listener?.onTransportError("Ошибка BLE-сканирования: $errorCode")
+            }
         }
     }
 
@@ -95,7 +105,8 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
                 ) {
                     BluetoothAdapter.STATE_TURNING_OFF,
-                    BluetoothAdapter.STATE_OFF -> {
+                    BluetoothAdapter.STATE_OFF,
+                    -> {
                         suppressDisconnectEvent = true
                         releaseGatt()
                         rx = null
@@ -122,7 +133,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     }
 
     private fun emit(block: DplsTransportListener.() -> Unit) {
-        handler.post { listener?.block() }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            listener?.block()
+        } else {
+            handler.post { listener?.block() }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -131,8 +146,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         if (!adapter.isEnabled) return false
         stopScan()
         scanning = true
-        val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build())
-        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        val filters = listOf(
+            ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build(),
+        )
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
         scanner.startScan(filters, settings, scanCallback)
         return true
     }
@@ -189,9 +208,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             pairing = false
             subscribed = false
             resetWrites()
-            if (clearSelection) {
-                selectedAddress = null
-            }
+            if (clearSelection) selectedAddress = null
         }
     }
 
@@ -325,7 +342,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (gatt !== this@AndroidBleTransport.gatt) return
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
-            if (!gatt.discoverServices()) emit { onTransportError("Не удалось запустить поиск BLE-службы") }
+            if (!gatt.discoverServices()) {
+                emit { onTransportError("Не удалось запустить поиск BLE-службы") }
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -378,8 +397,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             value: ByteArray,
         ) {
             if (gatt !== this@AndroidBleTransport.gatt || characteristic.uuid != TX_UUID) return
-            val copy = value.copyOf()
-            emit { onBytes(copy) }
+            emit { onBytes(value.copyOf()) }
         }
 
         override fun onCharacteristicWrite(
@@ -388,7 +406,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             status: Int,
         ) {
             if (gatt !== this@AndroidBleTransport.gatt || characteristic.uuid != RX_UUID) return
-            handler.post { completeWrite(status) }
+            completeWrite(status)
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
@@ -407,7 +425,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 if (gatt !== current) return@postDelayed
                 if (!current.requestMtu(PREFERRED_MTU)) {
                     negotiatedMtu = 23
-                    if (!current.discoverServices()) emit { onTransportError("Не удалось запустить поиск BLE-службы") }
+                    if (!current.discoverServices()) {
+                        emit { onTransportError("Не удалось запустить поиск BLE-службы") }
+                    }
                 }
             },
             POST_BOND_SETTLE_MS,
@@ -484,7 +504,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
         pendingWrite = bytes
-        val result = current.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        val result = current.writeCharacteristic(
+            characteristic,
+            bytes,
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+        )
         if (result != BluetoothStatusCodes.SUCCESS) {
             writeInProgress = false
             completeWrite(result)
@@ -502,7 +526,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         }
         val retry = pendingWrite
         pendingWrite = null
-        if (retry != null && status in TRANSIENT_WRITE_STATUSES && writeRetryCount < MAX_WRITE_RETRIES) {
+        if (retry != null &&
+            status in TRANSIENT_WRITE_STATUSES &&
+            writeRetryCount < MAX_WRITE_RETRIES
+        ) {
             writeRetryCount++
             writeQueue.addFirst(retry)
             handler.postDelayed(::drainWriteQueue, WRITE_RETRY_BASE_MS * writeRetryCount)
@@ -533,9 +560,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             }
         }.also { handler.postDelayed(it, PAIRING_POLL_MS) }
         pairingTimeout = Runnable {
-            if (pairing) {
-                failPairingNotConfirmed()
-            }
+            if (pairing) failPairingNotConfirmed()
         }.also { handler.postDelayed(it, PAIRING_TIMEOUT_MS) }
     }
 
@@ -595,7 +620,14 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         cccdRetryCount = 0
         pairingFailed = false
         Log.i(TAG, "connectGatt $address attempt=$connectAttempts")
-        gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        gatt = device.connectGatt(
+            appContext,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE,
+            BluetoothDevice.PHY_LE_1M_MASK,
+            handler,
+        )
         if (gatt == null) {
             suppressDisconnectEvent = false
             emit { onTransportError("Не удалось открыть BLE-соединение") }
@@ -669,7 +701,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private const val PAIRING_NOT_CONFIRMED =
             "Сопряжение не подтверждено. Повторите попытку и подтвердите системный диалог Bluetooth"
         private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 17, 143, 201)
-        private val CCCD_AUTH_STATUSES = setOf(GATT_INSUFFICIENT_AUTHENTICATION, GATT_INSUFFICIENT_ENCRYPTION)
+        private val CCCD_AUTH_STATUSES = setOf(
+            GATT_INSUFFICIENT_AUTHENTICATION,
+            GATT_INSUFFICIENT_ENCRYPTION,
+        )
         private val TRANSIENT_CCCD_STATUSES = setOf(
             GATT_CONN_TIMEOUT,
             GATT_ERROR,
