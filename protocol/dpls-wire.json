@@ -41,6 +41,13 @@
     "KEEP_ALIVE": 48,
     "ERROR": 127
   },
+  "auth": {
+    "pbkdf2_iterations": 10000,
+    "nonce_size": 16,
+    "salt_size": 16,
+    "proof_size": 32,
+    "token_size": 8
+  },
   "modes": {
     "NORMAL": { "wire": 0, "output": null },
     "OPEN_T": { "wire": 1, "output": "ISO_T" },
