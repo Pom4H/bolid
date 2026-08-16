@@ -38,9 +38,40 @@ The controller intentionally allows one transactional `Operation` at a time. Do 
 
 Journal paging is separately serialized by `JournalMachine`; it does not require a request map.
 
-## Session invariant
+## Session invariant — one truth
 
-`DeviceSession` is a sum type. Runtime code must not represent states such as `READY && !authenticated`. Link-scoped work is cancelled as a group instead of maintaining a list of resettable feature flags.
+`DeviceSession` is the only mutable source of truth for link/auth lifecycle.
+
+It owns:
+
+- current `LinkEndpoint`;
+- pre-auth client nonce;
+- challenge `sessionId`, device nonce and auth salt;
+- authenticated session id/token/salt;
+- stable `NodeId` once known;
+- recovering/failed lifecycle state.
+
+`FrameSequencer` owns only the next protocol-v2 frame sequence. It must never grow authentication or lifecycle fields.
+
+`DplsUiState.authenticated`, `initialized` and `credentialsReady` are **projections**, not independent facts. `DplsClient` must never use those UI fields to decide whether a protocol command is legal. Protocol decisions read `DeviceSession` directly, and every UI mutation is passed through `projectSession()`.
+
+This direction is intentional:
+
+```text
+transport / decoded frame
+          ↓
+     DeviceSession        ← authoritative
+          ↓
+       DplsClient
+          ↓
+     projectSession()
+          ↓
+      DplsUiState         ← read-only presentation snapshot
+          ↓
+        Compose
+```
+
+The reverse dependency is forbidden: UI lifecycle fields must not drive runtime behavior.
 
 ## Journal invariant
 
@@ -69,10 +100,26 @@ A writable serial connection may implement `ByteLink`. A passive tap implements 
 
 `dpls_safety` is the single owner of dangerous-mode state, deadline math, revision and forced-return precedence. BLE, journal export, authentication proof and wall-clock time must not be added to it.
 
+## Architecture analysis
+
+Do not optimize architecture against a home-grown numeric complexity score. Formatting must not be able to improve the reported architecture.
+
+`tools/architecture_guard.py` is a hard repository contract instead. It fails CI when a known invalid structure becomes representable again, including:
+
+- a second session/auth owner in `DplsClient`;
+- controller decisions based on UI auth projections;
+- a second transaction id such as `commandId` outside legacy decode compatibility;
+- session secrets creeping back into `FrameSequencer`;
+- product/UI dependencies leaking into `:runtime` or `:wire`;
+- UI state replacement that bypasses the session projection.
+
+Generic cognitive/cyclomatic complexity, when needed, should come from AST-aware language tooling rather than regex/line-count proxies. It is diagnostic evidence, not an architecture score.
+
 ## Delete rules
 
 Reject changes that introduce any of these without deleting equivalent state elsewhere:
 
+- a second session/auth owner;
 - a second transaction id;
 - `awaitingX` / `xPending` booleans;
 - transport-type branches above the link/router boundary;
