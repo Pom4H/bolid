@@ -14,7 +14,9 @@ mkdir -p "$OUT"
 
 (
     cd "$ROOT/mobile"
-    ./gradlew :interop:run --args="generate $OUT/zmu_vectors.h"
+    DPLS_ZMU_GENERATE="$OUT/zmu_vectors.h" \
+        ./gradlew :interop:jvmTest --rerun-tasks \
+        --tests ru.bolid.testdpls.interop.ZmuInteropTest.generateVectorsWhenRequested
 )
 
 STARTUP=""
@@ -58,7 +60,9 @@ grep -q '^ZMU_E2E_OK ' "$OUT/zmu-output.txt"
 
 (
     cd "$ROOT/mobile"
-    ./gradlew :interop:run --args="verify $OUT/zmu-output.txt"
+    DPLS_ZMU_VERIFY="$OUT/zmu-output.txt" \
+        ./gradlew :interop:jvmTest --rerun-tasks \
+        --tests ru.bolid.testdpls.interop.ZmuInteropTest.verifyOutputWhenRequested
 )
 
 echo "zmu E2E passed"
