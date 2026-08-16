@@ -77,6 +77,22 @@ jobs:
             tmp/zmu-firmware-tests/*.log
           if-no-files-found: warn
 
+  soft-ble-e2e:
+    name: Soft-BLE DplsClient ↔ dpls_simulator (no device)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+      - name: Install cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: Run soft-BLE phone-E2E scenarios
+        run: bash tools/soft_ble_e2e.sh
+
   firmware-pinout-contract:
     name: Revision 2 pinout contract
     runs-on: ubuntu-latest

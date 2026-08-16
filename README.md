@@ -98,6 +98,18 @@ bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
 # covers: all firmware/tests/* on Cortex-M0 + phone-E2E protocol matrix (modes/settings/journal)
 ```
 
+### Soft-BLE product stack (host simulator)
+
+Exercise real `DplsClient` against host `dpls_simulator` over a stdio “soft-BLE” transport — no phone and no PHY6252 radio:
+
+```sh
+# needs: cmake, JDK 17+
+bash tools/soft_ble_e2e.sh
+# covers: connect/auth, all test modes, rename, journal, identify LED, real-short reject, low reserve
+```
+
+This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
+
 ### Firmware
 
 ```sh

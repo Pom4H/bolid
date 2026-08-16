@@ -49,6 +49,12 @@ bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
 This runs every `firmware/tests/*` binary on the emulator plus the phone-E2E protocol
 matrix (identify/auth, all five modes, keep-alive, name/password, journal chunk).
 
+Soft-BLE against the same host `dpls_simulator` (real `DplsClient`, no radio):
+
+```sh
+bash tools/soft_ble_e2e.sh
+```
+
 Project-owned C code is compiled with warnings treated as errors. `cppcheck` covers `src/`, `include/` and `tests/`. Host line coverage has an 80% floor; safety behavior is additionally exercised by explicit edge-case tests rather than relying on the percentage alone.
 
 ## PHY6252 target builds
