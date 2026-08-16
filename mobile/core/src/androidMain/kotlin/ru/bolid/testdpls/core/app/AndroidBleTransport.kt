@@ -342,6 +342,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (gatt !== this@AndroidBleTransport.gatt) return
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
+            Log.i(TAG, "MTU changed mtu=$negotiatedMtu status=$status")
             if (!gatt.discoverServices()) {
                 emit { onTransportError("Не удалось запустить поиск BLE-службы") }
             }
@@ -357,6 +358,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 emit { onTransportError("Служба Test-DPLS не найдена") }
                 return
             }
+            Log.i(TAG, "Services discovered")
             writeCccd()
         }
 
@@ -370,6 +372,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 cccdRetryCount = 0
                 subscribed = true
+                Log.i(TAG, "CCCD written")
                 emit { onSubscribed((negotiatedMtu - ATT_HEADER_BYTES).coerceAtLeast(20)) }
                 return
             }
@@ -397,6 +400,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             value: ByteArray,
         ) {
             if (gatt !== this@AndroidBleTransport.gatt || characteristic.uuid != TX_UUID) return
+            Log.i(TAG, "RX indication bytes=${value.size} hex=${value.toHexUpper()}")
             emit { onBytes(value.copyOf()) }
         }
 
@@ -504,6 +508,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val bytes = writeQueue.removeFirstOrNull() ?: return
         writeInProgress = true
         pendingWrite = bytes
+        Log.i(TAG, "TX write bytes=${bytes.size} hex=${bytes.toHexUpper()}")
         val result = current.writeCharacteristic(
             characteristic,
             bytes,
@@ -732,4 +737,8 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val TX_UUID: UUID = UUID.fromString(DplsBle.TX_UUID)
         private val CCCD_UUID: UUID = UUID.fromString(DplsBle.CCCD_UUID)
     }
+}
+
+private fun ByteArray.toHexUpper(): String = joinToString("") { byte ->
+    "%02X".format(byte.toInt() and 0xff)
 }

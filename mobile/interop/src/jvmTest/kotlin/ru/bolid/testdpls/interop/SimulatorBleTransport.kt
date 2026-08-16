@@ -214,7 +214,10 @@ class SimulatorBleTransport(
                     line.startsWith("LED ") ||
                     line.startsWith("DIAG ") ||
                     line.startsWith("STATE ") ||
-                    line.startsWith("ERROR ") -> Unit
+                    line.startsWith("ERROR ") -> {
+                    // Host-side hardware breadcrumbs for session capture parity.
+                    System.err.println("TestDplsSim: $line")
+                }
                 else -> error("unexpected simulator output: $line (after $command)")
             }
         }

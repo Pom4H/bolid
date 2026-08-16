@@ -24,10 +24,16 @@ tools/flash_firmware.sh tmp/test-dpls.hex --erase
 
 # boot UART capture
 python3 tools/serial_capture.py 20 --no-reset
+
+# live phone↔board session capture (BLE frames + STATE breadcrumbs)
+python3 tools/session_capture/record_session.py --name bringup
+# optional: add --serial /dev/ttyUSB0
+python3 tools/session_capture/parse_session.py tmp/sessions/session-*-bringup.log
 ```
 
 - [ ] Плата стартует без watchdog reset-loop; UART показывает нормальный boot.
 - [ ] Реклама `Test-DPLS-XXXX` видна; мобильный клиент подключается и проходит аутентификацию.
+- [ ] `tmp/sessions/*.ndjson` содержит `ble_tx`/`ble_rx`/`STATE` для последующей доработки симулятора.
 
 ## 1. Силовые выходы режимов
 

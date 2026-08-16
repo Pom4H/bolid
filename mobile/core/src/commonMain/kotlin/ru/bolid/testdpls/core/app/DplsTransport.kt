@@ -63,6 +63,13 @@ interface DplsPlatformServices {
     fun canOpenSystemBluetoothSettings(): Boolean = false
     fun keepConnectionAlive(active: Boolean) = Unit
     fun notifyOperator(title: String, body: String) = Unit
+
+    /**
+     * Optional real-time session breadcrumb for capture tools.
+     * Default is silent; Android mirrors selected messages to logcat for
+     * `tools/session_capture` and phone E2E timelines.
+     */
+    fun sessionTrace(message: String) = Unit
 }
 
 internal fun looksLikeStaleBondError(message: String?): Boolean {

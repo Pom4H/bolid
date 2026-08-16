@@ -815,7 +815,16 @@ class DplsClient(
             DplsProtocol.Type.IDENTIFY_STOP,
             DplsProtocol.Type.KEEP_ALIVE,
             -> Unit
-            DplsProtocol.Type.LOG_INFO -> applyJournalEffect(journal.info(frame.payload))
+            DplsProtocol.Type.LOG_INFO -> {
+                val events = if (frame.payload.size >= 10) {
+                    (frame.payload[8].toInt() and 0xff) or
+                        ((frame.payload[9].toInt() and 0xff) shl 8)
+                } else {
+                    -1
+                }
+                platform.sessionTrace("LOG_INFO events=$events")
+                applyJournalEffect(journal.info(frame.payload))
+            }
             DplsProtocol.Type.LOG_CHUNK -> applyJournalEffect(journal.chunk(frame.payload))
             DplsProtocol.Type.LOG_RESULT -> applyJournalEffect(journal.finish())
             DplsProtocol.Type.LOG_HIST_REPORT -> handleHistogram(frame)
@@ -862,6 +871,11 @@ class DplsClient(
                 setupRepeatPassword = "",
             )
         }
+        when {
+            !wireChallenge.initialized -> platform.sessionTrace("E2E setup ready")
+            autoAuth -> platform.sessionTrace("E2E auth auto")
+            else -> platform.sessionTrace("E2E login ready")
+        }
         if (autoAuth) credentials.currentOrNull()?.let(::sendAuthProof)
     }
 
@@ -894,6 +908,11 @@ class DplsClient(
         if (result.status != 0) {
             forgetSavedCredentials()
             updateState { it.copy(awaitingUserPassword = true) }
+            if (result.retryAfterSeconds > 0) {
+                platform.sessionTrace("E2E auth blocked retry_after=${result.retryAfterSeconds}")
+            } else {
+                platform.sessionTrace("E2E auth wrong")
+            }
             fail(
                 if (result.retryAfterSeconds > 0) {
                     "Аутентификация заблокирована на ${result.retryAfterSeconds} с"
@@ -915,6 +934,7 @@ class DplsClient(
                 candidateNodeId = candidateNodeId,
             ),
         )
+        platform.sessionTrace("E2E auth done")
         updateState {
             it.copy(
                 awaitingUserPassword = false,
@@ -1019,6 +1039,7 @@ class DplsClient(
                             deviceInfo = it.deviceInfo?.copy(userName = pending.value),
                         )
                     }
+                    platform.sessionTrace("E2E settings saved name=${pending.value}")
                     requestDeviceInfoInternal()
                 } else {
                     settingsFailure("Устройство отклонило изменение (код ${result.status})")
@@ -1037,6 +1058,7 @@ class DplsClient(
                             settingsNotice = "Пароль изменён",
                         )
                     }
+                    platform.sessionTrace("E2E settings saved password")
                 } else {
                     pending.verifier.fill(0)
                     settingsFailure("Устройство отклонило изменение (код ${result.status})")
@@ -1068,6 +1090,17 @@ class DplsClient(
                 error = null,
             )
         }
+
+        platform.sessionTrace(
+            "STATE mode=${device.mode.wire} power=${device.powerSource.name} " +
+                "reserve_low=${if (device.reserveLow) 1 else 0} " +
+                "real_short=${if (device.realShort) 1 else 0} " +
+                "line_mv=${device.voltages.lineMv ?: -1} " +
+                "port1_mv=${device.voltages.port1Mv ?: -1} " +
+                "port2_mv=${device.voltages.port2Mv ?: -1} " +
+                "port_t_mv=${device.voltages.branchMv ?: -1} " +
+                "reserve_mv=${device.voltages.reserveMv ?: -1}",
+        )
 
         if (previousMode?.dangerous == true && device.mode == DplsMode.NORMAL) {
             platform.notifyOperator(
@@ -1106,6 +1139,7 @@ class DplsClient(
                 linkRssi = it.linkRssi ?: it.selectedDevice?.rssi,
             )
         }
+        platform.sessionTrace("E2E identify led live")
         scheduleRssiPoll()
     }
 
@@ -1225,9 +1259,20 @@ class DplsClient(
                 request(DplsProtocol.Type.LOG_ACK, authenticatedPayload() + suffix)
                 armLogTimeout()
             }
-            JournalMachine.Effect.Pause,
-            JournalMachine.Effect.Complete,
-            -> finishJournalPage()
+            JournalMachine.Effect.Pause -> finishJournalPage()
+            JournalMachine.Effect.Complete -> {
+                val snap = journal.snapshot()
+                platform.sessionTrace("LOG_DONE records=${snap.records.size}")
+                if (snap.records.isNotEmpty()) {
+                    val seqMin = snap.records.minOf { it.sequence }
+                    val seqMax = snap.records.maxOf { it.sequence }
+                    platform.sessionTrace(
+                        "E2E journal ready records=${snap.records.size} " +
+                            "seq_min=$seqMin seq_max=$seqMax",
+                    )
+                }
+                finishJournalPage()
+            }
             is JournalMachine.Effect.Error -> failLog(effect.message)
             JournalMachine.Effect.None -> Unit
         }

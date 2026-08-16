@@ -124,6 +124,19 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
             .notify(body.hashCode(), notification)
     }
 
+    override fun sessionTrace(message: String) {
+        android.util.Log.i(SESSION_TAG, message)
+        // Phone E2E and session_capture multiplex these tags from logcat.
+        if (
+            message.startsWith("E2E ") ||
+            message.startsWith("LOG_") ||
+            message.startsWith("STATE ") ||
+            message.startsWith("FRAME ")
+        ) {
+            android.util.Log.i(BLE_TAG, message)
+        }
+    }
+
     private fun ensureChannels() {
         val manager = appContext.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
@@ -135,6 +148,8 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
     private companion object {
         const val PREFS = "testdpls"
         const val ALERT_CHANNEL_ID = "dpls_alerts"
+        const val SESSION_TAG = "TestDplsSession"
+        const val BLE_TAG = "TestDplsBle"
         val dateTimeFormat = SimpleDateFormat("d MMMM yyyy, HH:mm:ss", Locale.forLanguageTag("ru"))
     }
 }

@@ -29,5 +29,9 @@ class SoftBlePlatform : DplsPlatformServices {
         keepAlive = active
     }
 
+    override fun sessionTrace(message: String) {
+        System.err.println("TestDplsSession: $message")
+    }
+
     fun hasVerifier(key: String): Boolean = key in verifiers
 }

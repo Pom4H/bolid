@@ -110,6 +110,18 @@ bash tools/soft_ble_e2e.sh
 
 This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
 
+### Capture real phone↔board sessions (for simulator fidelity)
+
+Record live logcat (BLE frames + client `STATE`/`E2E` markers) and optionally UART, then parse/replay into `dpls_simulator`:
+
+```sh
+python3 tools/session_capture/record_session.py --name lab
+python3 tools/session_capture/parse_session.py tmp/sessions/session-*-lab.log
+python3 tools/session_capture/test_session_capture.py   # offline smoke
+```
+
+See `tools/session_capture/README.md`.
+
 ### Firmware
 
 ```sh
