@@ -139,11 +139,19 @@ def check_advertisement(contract: dict[str, object]) -> None:
             "0x01, 0x0b,\n    0x00,\n    DPLS_FW_VERSION_MAJOR",
             "PHY6252 ADV status is no longer reserved-zero; update protocol contract intentionally",
         )
-        hub = text("tools/dpls-lab/hub.ts")
-        require(hub, "function advStatusFromBoard(_board: BoardSnapshot): number {", "lab ADV parity helper missing")
-        require(hub, "return 0; // target scan response reserves the status byte but currently emits zero", "simulator advertises richer status than PHY6252")
-        for richer in ("board.real_short", "board.power", "board.reserve_low"):
-            forbid(hub, richer + " === 1", f"simulator ADV derives unsupported target state: {richer}")
+        native = text("tools/dpls-lab/native-ble.ts")
+        require(
+            native,
+            '"--status",\n        // Keep the test double no richer than the current PHY6252 target.',
+            "native simulator BLE parity guard missing",
+        )
+        require(native, '\n        "0",\n      ],', "simulator peripheral advertises unsupported dynamic status")
+        web = text("mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt")
+        require(
+            web,
+            'val status = if (kind == "sim") 0 else jsonInt(json, "advStatus") ?: 0',
+            "soft-BLE simulator exposes richer ADV status than PHY6252",
+        )
 
 
 def check_modes_and_pins(contract: dict[str, object]) -> None:
