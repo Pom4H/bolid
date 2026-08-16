@@ -15,6 +15,11 @@ CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/Dp
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
 ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
+SIM_BOARD = ROOT / "firmware/sim/dpls_sim_board.c"
+SIM_CLI = ROOT / "firmware/sim/dpls_simulator.c"
+FIRMWARE_CMAKE = ROOT / "firmware/CMakeLists.txt"
+WIRE_CONTRACT = ROOT / "protocol/dpls-wire.json"
+LAB_ROOT = ROOT / "tools/dpls-lab"
 
 violations: list[str] = []
 
@@ -41,6 +46,9 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
     if re.search(pattern, text(path), flags=re.MULTILINE):
         fail(path, message)
 
+
+if not WIRE_CONTRACT.is_file():
+    fail(WIRE_CONTRACT, "machine-readable DPLS wire contract is required")
 
 # DeviceSession is the only owner of link/auth lifecycle. Authentication and
 # identity proof are distinct states; Online cannot represent an unknown node.
@@ -81,8 +89,9 @@ require_text(SEQUENCER, "class FrameSequencer", "wire helper must be FrameSequen
 for secret in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt"):
     forbid_text(SEQUENCER, secret, f"FrameSequencer must not own session secret {secret}")
 
-# Protocol v2 has exactly one transaction id: Frame.sequence. Legacy v1 decode
-# compatibility and its direct tests are the only places where the old name may remain.
+# The current wire format has exactly one transaction id: Frame.sequence.
+# Legacy decoder compatibility and its direct tests are the only places where
+# the old command-id name may remain.
 legacy_command_id_paths = {
     "DplsControlMessages.kt",
     "DplsControlMessagesTest.kt",
@@ -93,7 +102,7 @@ for path in (ROOT / "mobile").rglob("*.kt"):
     forbid_regex(
         path,
         r"\bcommandId\b",
-        "second transaction id commandId is forbidden outside v1 decode compatibility",
+        "second transaction id commandId is forbidden outside legacy decode compatibility",
     )
 
 # Cancellation is cleanup, not identity. Delayed operation work must compare the
@@ -118,6 +127,35 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
     for forbidden in ("kotlinx.coroutines", "android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
         if forbidden in source:
             fail(path, f"wire dependency leak: {forbidden}")
+
+# `firmware/sim` is a HAL/test-double zone around the real portable firmware.
+# It may model hardware inputs, GPIO, persistence, PHY6252 queues/faults and a
+# stdio control surface. It may not grow another DPLS frame codec or message
+# dispatcher. Product behavior must stay in firmware/src.
+require_text(
+    FIRMWARE_CMAKE,
+    "target_link_libraries(dpls_simulator PRIVATE test_dpls_server phy6252_emu)",
+    "dpls_simulator must link the production portable server and PHY model",
+)
+require_text(SIM_BOARD, "dpls_server_receive", "simulator board must delegate RX to dpls_server")
+require_text(SIM_BOARD, "phy6252_emu_", "simulator board must delegate radio behavior to phy6252_emu")
+for path in (SIM_BOARD, SIM_CLI):
+    forbid_regex(path, r"\bDPLS_MSG_[A-Z0-9_]+\b", "simulator must not own DPLS message dispatch/constants")
+    forbid_regex(path, r"\bdpls_frame_(?:encode|decode)\b", "simulator must not own a DPLS frame codec")
+    for handler in ("handle_hello", "handle_auth", "handle_mode", "send_auth_result", "send_state"):
+        forbid_regex(path, rf"\b{handler}\s*\(", f"simulator duplicates product handler {handler}")
+
+# The lab is orchestration/UI around the C simulator and shared Compose phone.
+# Scan every TS/TSX file so moving a duplicate protocol table to another filename
+# cannot bypass the guard.
+for path in list(LAB_ROOT.rglob("*.ts")) + list(LAB_ROOT.rglob("*.tsx")):
+    for symbol in ("PROTOCOL_VERSION", "FLAG_REQUEST", "FLAG_RESPONSE"):
+        forbid_regex(path, rf"\b{symbol}\b\s*=", f"lab duplicates wire constant {symbol}")
+    forbid_regex(
+        path,
+        r"\b(?:HELLO|AUTH_CHALLENGE|AUTH_PROOF|AUTH_RESULT|STATE_GET|STATE_REPORT|MODE_SET|COMMAND_RESULT)\s*:\s*0x",
+        "lab contains a second DPLS message table",
+    )
 
 # Android's GATT callback state must be confined to the same main Handler that
 # serializes product callbacks. This avoids relying on BLE-stack callback threads.
@@ -159,7 +197,7 @@ require_text(
     "PHY6252 emu tick must not nested-pump TX; notify pace is a timer, TX is its own turn",
 )
 require_text(
-    ROOT / "firmware/sim/dpls_sim_board.c",
+    SIM_BOARD,
     "phy6252_emu_tick(&board->radio, board->now_ms);\n    dpls_sim_board_process_tx(board);",
     "DPLS board must use phy6252_emu for ATT pacing, then TX as a separate turn",
 )
@@ -212,3 +250,5 @@ print("  transaction id: Frame.sequence")
 print("  delayed work: link epoch + sequence/generation guarded")
 print("  Android GATT state: main-looper confined")
 print("  wire/runtime dependency zones: clean")
+print("  simulator boundary: HAL/test-double only")
+print("  lab boundary: no duplicate DPLS protocol")
