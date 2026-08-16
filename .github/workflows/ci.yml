@@ -1,16 +1,69 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.png"
+      - "**/*.jpg"
+      - "**/*.pdf"
+      - "**/*.docx"
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  repository-contract:
-    name: Repository layout + wire + architecture contract
+  smoke:
+    name: Cheap PR smoke
     runs-on: ubuntu-latest
+    outputs:
+      mobile: ${{ steps.changes.outputs.mobile }}
+      firmware: ${{ steps.changes.outputs.firmware }}
+      replay: ${{ steps.changes.outputs.replay }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed areas
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "mobile=true" >> "$GITHUB_OUTPUT"
+            echo "firmware=true" >> "$GITHUB_OUTPUT"
+            echo "replay=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git diff --name-only "$BASE_SHA" HEAD > /tmp/changed.txt
+          cat /tmp/changed.txt
+
+          mobile=false
+          firmware=false
+          replay=false
+          if grep -qE '^mobile/' /tmp/changed.txt; then mobile=true; fi
+          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk)\.sh)' /tmp/changed.txt; then firmware=true; fi
+          if grep -qE '^(tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
+
+          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
+          echo "replay=$replay" >> "$GITHUB_OUTPUT"
+
       - name: Verify repository layout
         run: bash tools/check_repo_layout.sh
       - name: Verify language-neutral wire contract
@@ -20,87 +73,7 @@ jobs:
       - name: Verify architecture ownership
         run: python3 tools/architecture_guard.py
 
-  firmware-host-tests:
-    name: Firmware host tests + lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install cppcheck
-        run: sudo apt-get update && sudo apt-get install -y cppcheck
-      - name: Tests + coverage
-        run: bash tools/coverage_firmware.sh
-      - name: Upload firmware coverage
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: firmware-coverage
-          path: tmp/firmware-coverage.txt
-          if-no-files-found: warn
-      - name: cppcheck
-        run: bash tools/lint_firmware.sh
-      - name: Upload cppcheck report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: firmware-cppcheck
-          path: tmp/cppcheck.txt
-          if-no-files-found: warn
-
-  firmware-zmu-e2e:
-    name: Firmware ↔ mobile zmu E2E (no device)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
-      - name: Install ARM GCC + Rust
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build zmu-cortex-m0
-        run: bash tools/fetch_zmu.sh tmp/zmu
-      - name: Run all zmu scenarios
-        run: bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
-      - name: Upload zmu E2E artifacts
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: zmu-e2e
-          path: |
-            tmp/zmu-e2e/zmu-output.txt
-            tmp/zmu-e2e/zmu_vectors.h
-            tmp/zmu-e2e/test-dpls-zmu.elf
-            tmp/zmu-firmware-tests/*.log
-          if-no-files-found: warn
-
-  soft-ble-e2e:
-    name: Soft-BLE DplsClient ↔ dpls_simulator (no device)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
-      - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake
-      - name: Run soft-BLE phone-E2E scenarios
-        run: bash tools/soft_ble_e2e.sh
-
-  firmware-pinout-contract:
-    name: Revision 2 pinout contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Verify rev2 pin assignment and four-channel scanning
+      - name: Verify revision 2 pinout contract
         shell: bash
         run: |
           set -euo pipefail
@@ -130,8 +103,28 @@ jobs:
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DplsDomain.kt
           test -f docs/live-voltage-requirements.md
 
+      - name: Fast firmware host tests
+        if: steps.changes.outputs.firmware == 'true' || steps.changes.outputs.replay == 'true'
+        run: |
+          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build firmware/build --parallel 2
+          ctest --test-dir firmware/build --output-on-failure
+
+      - name: Differential captured-session replay
+        if: steps.changes.outputs.replay == 'true'
+        shell: bash
+        run: |
+          if [[ -f tools/session_capture/test_differential_replay.py ]]; then
+            DPLS_SIMULATOR="$PWD/firmware/build/dpls_simulator" \
+              python3 tools/session_capture/test_differential_replay.py
+          else
+            echo "differential replay test not present on this branch"
+          fi
+
   android:
-    name: Shared runtime/core + Android adapter
+    name: Android unit tests
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.mobile == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -139,20 +132,131 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
-      - name: Wire, runtime and controller tests
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Shared runtime/core tests
         working-directory: mobile
         run: ./gradlew :wire:testDebugUnitTest :runtime:testDebugUnitTest :core:testDebugUnitTest
-      - name: Lint shared Android target + app adapter
+      - name: Full Android lint + APK
+        if: github.event_name != 'pull_request'
         working-directory: mobile
-        run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug
-      - name: Assemble debug APK
-        working-directory: mobile
-        run: ./gradlew :android:assembleDebug
+        run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
+
+  firmware-quality:
+    name: Firmware coverage + cppcheck
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Tests + coverage
+        run: bash tools/coverage_firmware.sh
+      - name: cppcheck
+        run: bash tools/lint_firmware.sh
+
+  soft-ble-e2e:
+    name: Soft-BLE DplsClient ↔ simulator
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Run soft-BLE phone E2E scenarios
+        run: bash tools/soft_ble_e2e.sh
+
+  firmware-zmu-e2e:
+    name: Firmware ↔ mobile ZMU E2E
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Install ARM GCC + Rust
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build zmu-cortex-m0
+        run: bash tools/fetch_zmu.sh tmp/zmu
+      - name: Run all ZMU scenarios
+        run: bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
+
+  firmware-gcc:
+    name: PHY6252 GNU Arm GCC
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install GNU Arm Embedded
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+      - name: Build
+        run: |
+          set -o pipefail
+          mkdir -p tmp
+          bash tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex 2>&1 | tee tmp/gcc-build.log
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-gcc
+          path: |
+            tmp/test-dpls-gcc.hex
+            firmware/targets/phy6252/build/test-dpls.elf
+            firmware/targets/phy6252/build/test-dpls.map
+          if-no-files-found: error
+          retention-days: 3
+
+  firmware-keil:
+    name: PHY6252 Keil MDK / AC6
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install AC6 runtime dependencies
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y libpython3.9 libtinfo5
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+      - name: Activate CMSIS Toolbox and Arm Compiler 6
+        uses: ARM-software/cmsis-actions/vcpkg@v1
+        with:
+          config: firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+      - name: Activate Arm Community license
+        uses: ARM-software/cmsis-actions/armlm@v1
+      - name: Build
+        run: |
+          set -o pipefail
+          mkdir -p tmp
+          bash tools/build_firmware.sh keil tmp/test-dpls.hex 2>&1 | tee tmp/keil-build.log
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-keil
+          path: |
+            tmp/test-dpls.hex
+            tmp/test-dpls.axf
+            tmp/test-dpls.map
+          if-no-files-found: error
+          retention-days: 3
 
   ios:
-    name: Shared runtime/core + iOS adapter + Xcode host
+    name: iOS adapter + Xcode host
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -160,8 +264,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v5
       - name: Run common tests on Kotlin/Native
         working-directory: mobile
         run: ./gradlew :wire:iosSimulatorArm64Test :runtime:iosSimulatorArm64Test :core:iosSimulatorArm64Test
