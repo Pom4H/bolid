@@ -11,7 +11,10 @@ object DplsBle {
     const val MANUFACTURER_ID = DplsAdvertisement.COMPANY_ID
     const val PREFERRED_MTU = 247
     const val ATT_HEADER_BYTES = 3
-    val CCCD_ENABLE_INDICATE_NOTIFY = byteArrayOf(0x03, 0x00)
+
+    // Protocol v2 uses one confirmed TX path. Keep the legacy property name until
+    // platform adapters are renamed together; the value intentionally enables indication only.
+    val CCCD_ENABLE_INDICATE_NOTIFY = byteArrayOf(0x02, 0x00)
 
     fun displayName(advertisedName: String?, peripheralName: String?, deviceId: Long?): String {
         advertisedName?.takeIf { it.isNotBlank() }?.let { return it }
