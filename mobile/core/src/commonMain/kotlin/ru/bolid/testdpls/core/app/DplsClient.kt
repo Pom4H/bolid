@@ -111,7 +111,7 @@ class DplsClient(
     private var drainLog = false
     private var timeAnchors: List<JournalTimeAnchor> = emptyList()
 
-    /** Invalidates delayed work belonging to an older explicit connection. */
+    /** Invalidates delayed work belonging to an older physical link attempt. */
     private var linkGeneration = 0L
     private var scanGeneration = 0L
     private var logTimeoutGeneration = 0L
@@ -195,7 +195,6 @@ class DplsClient(
         frameSequencer.reset()
         clearOperation()
         reconnectPolicy = ReconnectPolicy()
-        linkGeneration++
 
         val selected = state.devices.firstOrNull { it.address == address }
         val candidateNodeId = selected?.deviceId
@@ -227,7 +226,6 @@ class DplsClient(
             )
         }
         loadCachedVerifier()
-        loadTimeAnchors()
         if (!transport.connect(address)) {
             fail("Устройство недоступно. Запустите поиск снова.")
             return
@@ -360,7 +358,7 @@ class DplsClient(
             return
         }
 
-        val sequence = request(DplsProtocol.Type.MODE_SET, payload)
+        val sequence = request(DplsProtocol.Type.MODE_SET, payload) ?: return
         val pending = Operation.Mode(sequence)
         operation = pending
         updateState {
@@ -371,6 +369,8 @@ class DplsClient(
             )
         }
         armOperationTimeout(COMMAND_TIMEOUT_MS, pending) {
+            clearOperation()
+            updateState { it.copy(commandInProgress = false) }
             if (session.isAuthenticated) {
                 request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
                 updateState { it.copy(statusText = "Запрос состояния устройства…") }
@@ -419,7 +419,7 @@ class DplsClient(
         val sequence = request(
             DplsProtocol.Type.LOG_HIST_GET,
             authenticatedPayload() + byteArrayOf(24),
-        )
+        ) ?: return
         val pending = Operation.Histogram(sequence)
         operation = pending
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS, pending) {
@@ -483,7 +483,7 @@ class DplsClient(
 
         val bytes = utf8Truncate(trimmed, 31)
         val payload = authenticatedPayload() + byteArrayOf(bytes.size.toByte()) + bytes
-        val sequence = request(DplsProtocol.Type.NAME_SET, payload)
+        val sequence = request(DplsProtocol.Type.NAME_SET, payload) ?: return
         val pending = Operation.Name(sequence, trimmed)
         operation = pending
         updateState {
@@ -515,7 +515,10 @@ class DplsClient(
         val verifier = DplsCrypto.deriveVerifier(newPassword, salt)
         val payload = auth.authenticatedPayload() + salt + verifier
         salt.fill(0)
-        val sequence = request(DplsProtocol.Type.PASSWORD_SET, payload)
+        val sequence = request(DplsProtocol.Type.PASSWORD_SET, payload) ?: run {
+            verifier.fill(0)
+            return
+        }
         val pending = Operation.Password(sequence, verifier)
         operation = pending
         updateState {
@@ -545,7 +548,9 @@ class DplsClient(
 
     override fun forgetSavedPassword() {
         if (cachedVerifier == null && !state.savedCredentials) return
-        forgetCachedVerifier()
+        credentialReadKeys().forEach { platform.writeDeviceVerifier(it, null) }
+        credentialWriteKeys().forEach { platform.writeDeviceVerifier(it, null) }
+        replaceCachedVerifier(null)
         updateState {
             it.copy(
                 savedCredentials = false,
@@ -629,6 +634,7 @@ class DplsClient(
         val nodeId = session.nodeIdOrNull
         cancelLinkJobs()
         clearOperation()
+        pauseJournalForReconnect()
         if (endpoint != null) {
             setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
         } else {
@@ -684,11 +690,13 @@ class DplsClient(
     }
 
     override fun onConnected() {
-        val connecting = session as? DeviceSession.Connecting ?: return
+        val current = session
+        if (current !is DeviceSession.Connecting && current !is DeviceSession.Recovering) return
+        val endpoint = current.endpointOrNull ?: return
         setSession(
             DeviceSession.Discovering(
-                endpoint = connecting.endpoint,
-                candidateNodeId = connecting.candidateNodeId,
+                endpoint = endpoint,
+                candidateNodeId = current.candidateNodeIdOrNull,
             ),
         )
         updateState {
@@ -710,7 +718,7 @@ class DplsClient(
         val clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
         setSession(DeviceSession.Linked(endpoint, clientNonce, candidateNodeId))
         if (identify.afterConnect) {
-            val sequence = request(DplsProtocol.Type.IDENTIFY_START)
+            val sequence = request(DplsProtocol.Type.IDENTIFY_START) ?: return
             identify = Identify(
                 responseSequence = sequence,
                 sentAtMillis = platform.nowMillis(),
@@ -772,6 +780,12 @@ class DplsClient(
             fail(error ?: "Связь с платой оборвалась до идентификации")
             return
         }
+        cancelLinkJobs()
+        clearOperation()
+        cancelLogTimeout()
+        journal.fail()
+        logLoadPending = false
+        drainLog = false
         reconnectPolicy = ReconnectPolicy()
         setSession(DeviceSession.Offline)
         platform.keepConnectionAlive(false)
@@ -783,6 +797,8 @@ class DplsClient(
                 identifyLedLive = false,
                 identifyLedPhaseOffsetMs = 0,
                 browsingDevices = false,
+                commandInProgress = false,
+                logProgress = null,
             )
         }
     }
@@ -885,6 +901,8 @@ class DplsClient(
             ?: return fail("Повреждённый AUTH_RESULT")
 
         if (result.status == 3) {
+            // The device reboots before DEVICE_INFO can prove NodeId. Persist only
+            // against the physical BLE address; stable node keys are written later.
             persistCachedVerifier()
             reconnectPolicy = reconnectPolicy.copy(expectSetupReconnect = true)
             val endpoint = session.endpointOrNull
@@ -909,7 +927,7 @@ class DplsClient(
         }
 
         if (result.status != 0) {
-            forgetCachedVerifier()
+            forgetSavedCredentials()
             updateState { it.copy(awaitingUserPassword = true) }
             fail(
                 if (result.retryAfterSeconds > 0) {
@@ -921,7 +939,6 @@ class DplsClient(
             return
         }
 
-        persistCachedVerifier()
         val token = result.sessionToken ?: return fail("AUTH_RESULT без session token")
         val endpoint = session.endpointOrNull
             ?: return fail("Потерян endpoint после аутентификации")
@@ -980,15 +997,6 @@ class DplsClient(
             ?.let(::NodeId)
             ?: return fail("Устройство прислало некорректный ID")
 
-        updateState {
-            it.copy(
-                deviceInfo = info,
-                selectedDevice = it.selectedDevice?.copy(
-                    userName = info.userName.ifBlank { it.selectedDevice.userName },
-                ),
-            )
-        }
-
         when (val current = session) {
             is DeviceSession.Synchronizing -> {
                 val candidate = current.candidateNodeId
@@ -1016,6 +1024,14 @@ class DplsClient(
             }
         }
 
+        updateState {
+            it.copy(
+                deviceInfo = info,
+                selectedDevice = it.selectedDevice?.copy(
+                    userName = info.userName.ifBlank { it.selectedDevice.userName },
+                ),
+            )
+        }
         persistCachedVerifier()
         loadTimeAnchors()
         persistTimeAnchors()
@@ -1105,7 +1121,7 @@ class DplsClient(
                 attemptTimeSync()
         }
         if (logLoadPending && !journal.isActive && operation == null) {
-            loadEventLog()
+            refreshEventLog()
         }
     }
 
@@ -1154,7 +1170,8 @@ class DplsClient(
         val code = frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
         val pending = operation
         if (pending != null && pending.sequence != frame.sequence) {
-            fail("Ошибка чужой транзакции: $code")
+            // A late response belongs to an expired operation. Positive responses
+            // are ignored the same way; an old error must not kill the new one.
             return
         }
         when (pending) {
@@ -1203,7 +1220,7 @@ class DplsClient(
 
     private fun requestDeviceInfoInternal() {
         if (operation != null || !session.isAuthenticated || !transport.hasConnection()) return
-        val sequence = request(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload())
+        val sequence = request(DplsProtocol.Type.DEVICE_INFO_GET, authenticatedPayload()) ?: return
         val pending = Operation.DeviceInfo(sequence)
         operation = pending
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS, pending) {
@@ -1229,7 +1246,7 @@ class DplsClient(
             platform.nowMillis() / 1000L,
         ) ?: return
         timeSyncAttempted = true
-        val sequence = request(DplsProtocol.Type.TIME_SYNC, payload)
+        val sequence = request(DplsProtocol.Type.TIME_SYNC, payload) ?: return
         val pending = Operation.TimeSync(sequence)
         operation = pending
         armOperationTimeout(ONE_SHOT_REQUEST_TIMEOUT_MS, pending) {
@@ -1305,6 +1322,14 @@ class DplsClient(
         startSessionLoop()
     }
 
+    private fun pauseJournalForReconnect() {
+        if (journal.isActive) {
+            journal.fail()
+            logLoadPending = true
+        }
+        cancelLogTimeout()
+    }
+
     private fun sendAuthProof(verifier: ByteArray) {
         val challenge = session.challengeOrNull ?: return fail("Нет активного challenge")
         val signed = DplsAuth.proofMessage(
@@ -1323,17 +1348,22 @@ class DplsClient(
         payload: ByteArray = byteArrayOf(),
         priority: Boolean = false,
         flush: Boolean = false,
-    ): Int {
+    ): Int? {
         val sequence = frameSequencer.next()
-        sendFrame(
-            type,
-            sequence,
-            DplsProtocol.Flags.REQUEST,
-            payload,
-            priority,
-            flush,
-        )
-        return sequence
+        return if (
+            sendFrame(
+                type,
+                sequence,
+                DplsProtocol.Flags.REQUEST,
+                payload,
+                priority,
+                flush,
+            )
+        ) {
+            sequence
+        } else {
+            null
+        }
     }
 
     private fun oneWay(
@@ -1350,11 +1380,13 @@ class DplsClient(
         payload: ByteArray,
         priority: Boolean,
         flush: Boolean,
-    ) {
+    ): Boolean {
         val bytes = encodeFrame(DplsProtocol.Frame(type, sequence, flags, payload))
         if (!transport.send(bytes, priority, flush)) {
             fail("Кадр ${bytes.size} байт не помещается в BLE write limit")
+            return false
         }
+        return true
     }
 
     private fun startSessionLoop() {
@@ -1398,6 +1430,7 @@ class DplsClient(
         if (reconnectJob?.isActive == true) return
         cancelLinkJobs()
         clearOperation()
+        pauseJournalForReconnect()
         timeSyncAttempted = false
         setSession(DeviceSession.Recovering(nodeId, endpoint, reconnectAttempt))
         platform.keepConnectionAlive(true)
@@ -1433,8 +1466,9 @@ class DplsClient(
     }
 
     /**
-     * Timeout identity is the frame sequence itself. A canceled timeout that has
-     * already become runnable still cannot touch a newer operation.
+     * Timeout identity is both the physical-link generation and frame sequence.
+     * A canceled timeout that already became runnable cannot touch another link
+     * or a newer operation that happened to reuse the same 16-bit sequence.
      */
     private fun armOperationTimeout(
         delayMs: Long,
@@ -1442,10 +1476,11 @@ class DplsClient(
         action: () -> Unit,
     ) {
         operationJob?.cancel()
+        val generation = linkGeneration
         val sequence = expected.sequence
         operationJob = scope.launch {
             delay(delayMs)
-            if (operation?.sequence == sequence) action()
+            if (generation == linkGeneration && operation?.sequence == sequence) action()
         }
     }
 
@@ -1526,7 +1561,9 @@ class DplsClient(
         }
     }
 
+    /** Cancelling a physical-link scope also invalidates every captured epoch. */
     private fun cancelLinkJobs() {
+        linkGeneration++
         reconnectJob?.cancel()
         sessionLoopJob?.cancel()
         operationJob?.cancel()
@@ -1564,7 +1601,6 @@ class DplsClient(
         clearSelection: Boolean,
         clearVerifier: Boolean,
     ) {
-        linkGeneration++
         invalidateScanDeadline()
         cancelLinkJobs()
         cancelLogTimeout()
@@ -1594,26 +1630,26 @@ class DplsClient(
     private fun currentBleAddress(): String? =
         (session.endpointOrNull as? LinkEndpoint.Ble)?.address
 
-    /** Candidate identity is allowed only while locating saved credentials. */
-    private fun credentialNodeId(): NodeId? =
-        session.nodeIdOrNull ?: session.candidateNodeIdOrNull
-
-    private fun credentialKeys(): List<String> = buildList {
-        val id = credentialNodeId()
-        if (id != null) {
-            add(credentialKey(id))
-            add("id:${id.value}")
-        }
+    private fun addressCredentialKeys(): List<String> =
         currentBleAddress()
             ?.takeIf { it.isNotBlank() }
-            ?.let {
-                add("legacy-addr:$it")
-                add("addr:$it")
-            }
+            ?.let { listOf("legacy-addr:$it", "addr:$it") }
+            .orEmpty()
+
+    /** Reads are allowed from the verified node or the current physical address. */
+    private fun credentialReadKeys(): List<String> = buildList {
+        session.nodeIdOrNull?.let {
+            add(credentialKey(it))
+            add("id:${it.value}")
+        }
+        addAll(addressCredentialKeys())
     }
 
+    /** Writes never trust advertised candidateNodeId. */
+    private fun credentialWriteKeys(): List<String> = credentialReadKeys()
+
     private fun loadCachedVerifier() {
-        val stored = credentialKeys().firstNotNullOfOrNull { key ->
+        val stored = credentialReadKeys().firstNotNullOfOrNull { key ->
             platform.readDeviceVerifier(key)
                 ?.takeIf { bytes -> bytes.size == DplsAuth.VERIFIER_SIZE }
         }
@@ -1623,13 +1659,16 @@ class DplsClient(
 
     private fun persistCachedVerifier() {
         val stored = cachedVerifier
-        credentialKeys().forEach { platform.writeDeviceVerifier(it, stored) }
+        credentialWriteKeys().forEach { platform.writeDeviceVerifier(it, stored) }
         updateState { it.copy(savedCredentials = stored != null) }
     }
 
-    private fun forgetCachedVerifier() {
+    private fun forgetSavedCredentials() {
+        (credentialReadKeys() + credentialWriteKeys())
+            .distinct()
+            .forEach { platform.writeDeviceVerifier(it, null) }
         replaceCachedVerifier(null)
-        persistCachedVerifier()
+        updateState { it.copy(savedCredentials = false) }
     }
 
     private fun replaceCachedVerifier(value: ByteArray?) {
@@ -1653,7 +1692,7 @@ class DplsClient(
 
     private fun loadTimeAnchors() {
         var merged = timeAnchors
-        credentialKeys().forEach { key ->
+        credentialWriteKeys().forEach { key ->
             decodeJournalTimeAnchors(platform.readDeviceString("time.$key")).forEach { anchor ->
                 merged = mergeJournalTimeAnchor(merged, anchor)
             }
@@ -1664,7 +1703,7 @@ class DplsClient(
 
     private fun persistTimeAnchors() {
         val encoded = encodeJournalTimeAnchors(timeAnchors)
-        credentialKeys().forEach { platform.writeDeviceString("time.$it", encoded) }
+        credentialWriteKeys().forEach { platform.writeDeviceString("time.$it", encoded) }
     }
 
     private fun retainedUiState(
@@ -1684,6 +1723,8 @@ class DplsClient(
         clearOperation()
         journal.fail()
         cancelLogTimeout()
+        logLoadPending = false
+        drainLog = false
         platform.keepConnectionAlive(false)
         setSession(DeviceSession.Failed(endpoint, LinkFailure.Platform(message)))
         updateState {
