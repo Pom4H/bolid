@@ -61,10 +61,12 @@ for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "sele
 for ui_truth in ("state.phase", "state.authenticated", "state.credentialsReady"):
     forbid_text(CLIENT, ui_truth, f"controller must not branch on UI lifecycle projection {ui_truth}")
 
-# No handler may assign a lifecycle phase directly. The only permitted phase
-# assignment is the projection itself.
+# A named argument/property assignment `phase = ...` may exist only in the
+# projection. Local variables such as `val phase = ...` are unrelated.
 for number, line in enumerate(text(CLIENT).splitlines(), start=1):
-    if "phase =" in line and "phase = connectionPhase(ui)" not in line:
+    if not re.match(r"^\s*phase\s*=", line):
+        continue
+    if "phase = connectionPhase(ui)" not in line:
         fail(CLIENT, f"line {number}: lifecycle phase must be projected, not assigned")
 
 for field in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt", "authenticated"):
@@ -114,8 +116,7 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
             fail(path, f"wire dependency leak: {forbidden}")
 
 # Android's GATT callback state must be confined to the same main Handler that
-# serializes product callbacks. This avoids relying on undocumented callback
-# threading from the BLE stack.
+# serializes product callbacks. This avoids relying on BLE-stack callback threads.
 require_text(
     ANDROID_BLE,
     "BluetoothDevice.PHY_LE_1M_MASK,\n            handler,",
