@@ -15,6 +15,12 @@ kotlin {
             allWarningsAsErrors.set(true)
         }
     }
+    jvm {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+            allWarningsAsErrors.set(true)
+        }
+    }
 
     iosArm64()
     iosSimulatorArm64()
