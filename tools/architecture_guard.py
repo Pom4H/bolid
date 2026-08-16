@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Fail CI on architectural ownership violations.
+"""Fail CI on a small set of repository-specific ownership violations.
 
-This is deliberately not a complexity score. It enforces repository-specific
-invariants that must be true regardless of formatting: one session owner, one
-transaction id, and strict dependency zones.
+This is deliberately not a complexity analyzer and not a parser. Keep rules here
+only when the invariant is narrow enough to detect reliably with source text.
+Types, module dependencies and behavioral tests remain the primary architecture.
 """
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
+ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
 
 violations: list[str] = []
 
@@ -23,38 +23,49 @@ def fail(path: Path, message: str) -> None:
     violations.append(f"{path.relative_to(ROOT)}: {message}")
 
 
+def text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
 def require_text(path: Path, needle: str, message: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    if needle not in text:
+    if needle not in text(path):
         fail(path, message)
 
 
 def forbid_text(path: Path, needle: str, message: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    if needle in text:
+    if needle in text(path):
         fail(path, message)
 
 
 def forbid_regex(path: Path, pattern: str, message: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    if re.search(pattern, text, flags=re.MULTILINE):
+    if re.search(pattern, text(path), flags=re.MULTILINE):
         fail(path, message)
 
 
-# Session/auth truth lives only in DeviceSession. The controller may project it
-# into immutable UI snapshots, but must never use those projection fields for
-# protocol decisions.
+# DeviceSession is the only owner of link/auth lifecycle. Authentication and
+# identity proof are distinct states; Online cannot represent an unknown node.
 require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must own lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
+require_text(SESSION, "data class Synchronizing(", "authentication must not imply verified identity")
+require_text(SESSION, "data class Online(\n        val nodeId: NodeId,", "Online must require a verified non-null NodeId")
+forbid_text(SESSION, "data class Online(\n        val nodeId: NodeId?", "Online may not contain an unknown identity")
+
 require_text(CLIENT, "private var session: DeviceSession", "controller must have exactly one lifecycle owner")
-require_text(CLIENT, "private fun projectSession", "UI lifecycle fields must be a projection of DeviceSession")
+require_text(CLIENT, "private fun projectSession", "UI lifecycle fields must be projected from DeviceSession")
+require_text(CLIENT, "phase = connectionPhase(ui)", "UI phase must be derived from DeviceSession")
 
 for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "selectedAddress"):
     forbid_text(CLIENT, stale_owner, f"second session/route owner is forbidden: {stale_owner}")
 
-for ui_truth in ("state.authenticated", "state.credentialsReady"):
-    forbid_text(CLIENT, ui_truth, f"controller must not branch on UI projection {ui_truth}")
+for ui_truth in ("state.phase", "state.authenticated", "state.credentialsReady"):
+    forbid_text(CLIENT, ui_truth, f"controller must not branch on UI lifecycle projection {ui_truth}")
+
+# No handler may assign a lifecycle phase directly. The only permitted phase
+# assignment is the projection itself.
+for number, line in enumerate(text(CLIENT).splitlines(), start=1):
+    if "phase =" in line and "phase = connectionPhase(ui)" not in line:
+        fail(CLIENT, f"line {number}: lifecycle phase must be projected, not assigned")
 
 for field in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt", "authenticated"):
     forbid_regex(
@@ -63,39 +74,65 @@ for field in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSa
         f"{field} may not be stored independently in DplsClient",
     )
 
-# The old session object is now intentionally a sequence generator only.
+# The wire session helper is intentionally only a sequence generator.
 require_text(SEQUENCER, "class FrameSequencer", "wire helper must be FrameSequencer only")
 for secret in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt"):
     forbid_text(SEQUENCER, secret, f"FrameSequencer must not own session secret {secret}")
 
-# Protocol v2 has exactly one transaction id: Frame.sequence. Legacy decoding
-# fields are allowed only in the compatibility parser.
+# Protocol v2 has exactly one transaction id: Frame.sequence. Legacy v1 decode
+# compatibility is the only place where the old name may remain.
 for path in (ROOT / "mobile").rglob("*.kt"):
     if path.name == "DplsControlMessages.kt":
         continue
-    forbid_regex(path, r"\bcommandId\b", "second transaction id commandId is forbidden outside v1 decode compatibility")
+    forbid_regex(
+        path,
+        r"\bcommandId\b",
+        "second transaction id commandId is forbidden outside v1 decode compatibility",
+    )
+
+# Cancellation is cleanup, not identity. Delayed operation work must compare the
+# exact frame sequence; connection/scan/log work must carry generation tokens.
+require_text(
+    CLIENT,
+    "if (operation?.sequence == sequence) action()",
+    "operation timeout must be correlated to the exact request sequence",
+)
+for generation in ("linkGeneration", "scanGeneration", "logTimeoutGeneration"):
+    require_text(CLIENT, generation, f"missing stale-work generation guard: {generation}")
 
 # Runtime and wire are dependency zones, not product/UI modules.
 for path in (ROOT / "mobile/runtime/src/commonMain").rglob("*.kt"):
-    text = path.read_text(encoding="utf-8")
+    source = text(path)
     for forbidden in ("android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
-        if forbidden in text:
+        if forbidden in source:
             fail(path, f"runtime dependency leak: {forbidden}")
 
 for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
-    text = path.read_text(encoding="utf-8")
+    source = text(path)
     for forbidden in ("kotlinx.coroutines", "android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
-        if forbidden in text:
+        if forbidden in source:
             fail(path, f"wire dependency leak: {forbidden}")
 
-# Direct StateFlow replacement is allowed only for a fresh retained UI state or
-# through the session projection. This prevents a new mutable lifecycle truth
-# from bypassing projectSession().
-for number, line in enumerate(CLIENT.read_text(encoding="utf-8").splitlines(), start=1):
+# Android's GATT callback state must be confined to the same main Handler that
+# serializes product callbacks. This avoids relying on undocumented callback
+# threading from the BLE stack.
+require_text(
+    ANDROID_BLE,
+    "BluetoothDevice.PHY_LE_1M_MASK,\n            handler,",
+    "connectGatt must deliver callbacks on the main Handler",
+)
+
+# Direct StateFlow replacement is allowed only for a freshly retained UI state
+# or through the session projection. All ordinary mutation goes through updateState.
+for number, line in enumerate(text(CLIENT).splitlines(), start=1):
     stripped = line.strip()
     if "mutableState.value =" not in stripped:
         continue
-    if "projectSession(" in stripped or "retainedUiState(" in stripped or stripped.startswith("private val mutableState"):
+    if (
+        "projectSession(" in stripped
+        or "retainedUiState(" in stripped
+        or stripped.startswith("private val mutableState")
+    ):
         continue
     fail(CLIENT, f"line {number}: direct UI state replacement bypasses session projection")
 
@@ -106,7 +143,9 @@ if violations:
     raise SystemExit(1)
 
 print("Architecture guard: OK")
-print("  session owners: 1 (DeviceSession)")
-print("  transaction ids: 1 (Frame.sequence)")
-print("  UI lifecycle state: projection only")
+print("  lifecycle/auth owner: DeviceSession")
+print("  Online identity: verified NodeId")
+print("  transaction id: Frame.sequence")
+print("  delayed work: sequence/generation guarded")
+print("  Android GATT state: main-looper confined")
 print("  wire/runtime dependency zones: clean")
