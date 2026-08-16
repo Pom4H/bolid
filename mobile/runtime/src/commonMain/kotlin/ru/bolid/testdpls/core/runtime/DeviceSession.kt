@@ -35,21 +35,30 @@ data class AuthSession(
 }
 
 /**
- * Single source of truth for link/auth lifecycle.
+ * The only owner of link/auth lifecycle.
  *
- * UI fields are projections of this state and must never drive protocol decisions.
+ * [candidateNodeId] is deliberately only a discovery hint. It can be used to find
+ * cached credentials, but it becomes authoritative only after DEVICE_INFO and the
+ * transition to [Online].
  */
 sealed interface DeviceSession {
     data object Offline : DeviceSession
 
     data class Connecting(
         val endpoint: LinkEndpoint,
+        val candidateNodeId: NodeId? = null,
+    ) : DeviceSession
+
+    data class Discovering(
+        val endpoint: LinkEndpoint,
+        val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
     /** Link is usable and owns the nonce that will start HELLO/auth. */
     data class Linked(
         val endpoint: LinkEndpoint,
         val clientNonce: ByteArray,
+        val candidateNodeId: NodeId? = null,
     ) : DeviceSession {
         init { require(clientNonce.size == 16) }
     }
@@ -57,16 +66,25 @@ sealed interface DeviceSession {
     data class Commissioning(
         val endpoint: LinkEndpoint,
         val challenge: SessionChallenge,
+        val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
     data class Authenticating(
         val endpoint: LinkEndpoint,
         val challenge: SessionChallenge,
+        val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
-    /** Authentication is complete. Node identity may arrive a moment later in DEVICE_INFO. */
+    /** Authentication succeeded; DEVICE_INFO must still prove the stable identity. */
+    data class Synchronizing(
+        val endpoint: LinkEndpoint,
+        val auth: AuthSession,
+        val candidateNodeId: NodeId? = null,
+    ) : DeviceSession
+
+    /** Fully usable session. A valid stable node identity is mandatory here. */
     data class Online(
-        val nodeId: NodeId?,
+        val nodeId: NodeId,
         val endpoint: LinkEndpoint,
         val auth: AuthSession,
     ) : DeviceSession
@@ -83,18 +101,20 @@ sealed interface DeviceSession {
     ) : DeviceSession
 }
 
-val DeviceSession.isAuthenticated: Boolean get() = this is DeviceSession.Online
+val DeviceSession.isAuthenticated: Boolean
+    get() = this is DeviceSession.Synchronizing || this is DeviceSession.Online
 
 val DeviceSession.credentialsReady: Boolean
     get() = this is DeviceSession.Commissioning ||
         this is DeviceSession.Authenticating ||
+        this is DeviceSession.Synchronizing ||
         this is DeviceSession.Online
 
 val DeviceSession.initializedOrNull: Boolean?
     get() = when (this) {
         is DeviceSession.Commissioning -> challenge.initialized
         is DeviceSession.Authenticating -> challenge.initialized
-        is DeviceSession.Online -> true
+        is DeviceSession.Synchronizing, is DeviceSession.Online -> true
         else -> null
     }
 
@@ -106,23 +126,44 @@ val DeviceSession.challengeOrNull: SessionChallenge?
     }
 
 val DeviceSession.authOrNull: AuthSession?
-    get() = (this as? DeviceSession.Online)?.auth
+    get() = when (this) {
+        is DeviceSession.Synchronizing -> auth
+        is DeviceSession.Online -> auth
+        else -> null
+    }
 
 val DeviceSession.endpointOrNull: LinkEndpoint?
     get() = when (this) {
         DeviceSession.Offline -> null
         is DeviceSession.Connecting -> endpoint
+        is DeviceSession.Discovering -> endpoint
         is DeviceSession.Linked -> endpoint
         is DeviceSession.Commissioning -> endpoint
         is DeviceSession.Authenticating -> endpoint
+        is DeviceSession.Synchronizing -> endpoint
         is DeviceSession.Online -> endpoint
         is DeviceSession.Recovering -> endpoint
         is DeviceSession.Failed -> endpoint
     }
 
+/** Verified identity only. Never falls back to discovery/UI state. */
 val DeviceSession.nodeIdOrNull: NodeId?
     get() = when (this) {
         is DeviceSession.Online -> nodeId
         is DeviceSession.Recovering -> nodeId
         else -> null
+    }
+
+/** Untrusted discovery hint used only for credential lookup before identity proof. */
+val DeviceSession.candidateNodeIdOrNull: NodeId?
+    get() = when (this) {
+        is DeviceSession.Connecting -> candidateNodeId
+        is DeviceSession.Discovering -> candidateNodeId
+        is DeviceSession.Linked -> candidateNodeId
+        is DeviceSession.Commissioning -> candidateNodeId
+        is DeviceSession.Authenticating -> candidateNodeId
+        is DeviceSession.Synchronizing -> candidateNodeId
+        is DeviceSession.Online -> nodeId
+        is DeviceSession.Recovering -> nodeId
+        DeviceSession.Offline, is DeviceSession.Failed -> null
     }
