@@ -5,6 +5,7 @@ package ru.bolid.testdpls.web
 import ru.bolid.testdpls.core.app.DplsTransport
 import ru.bolid.testdpls.core.app.DplsTransportDevice
 import ru.bolid.testdpls.core.app.DplsTransportListener
+import ru.bolid.testdpls.core.protocol.DplsProtocol
 
 /**
  * Maps [DplsTransport] onto the lab WebSocket.
@@ -126,7 +127,7 @@ class LabBleTransport : DplsTransport {
     }
 
     companion object {
-        const val WRITE_LIMIT = 244
+        const val WRITE_LIMIT = DplsProtocol.MAX_FRAME
         const val RSSI = -42
     }
 }
