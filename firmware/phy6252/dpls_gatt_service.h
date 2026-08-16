@@ -17,4 +17,10 @@ bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback);
 bStatus_t dpls_gatt_send_indication(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
 bool dpls_gatt_subscribed(void);
 
+/* IDENTIFY uses the confirmation of its semantic ACK as the physical phase-zero
+ * boundary. The task suppresses LED rendering while this specific indication is
+ * in flight, then consumes the marker on ATT_HANDLE_VALUE_CFM. */
+bool dpls_gatt_identify_ack_pending(void);
+bool dpls_gatt_take_identify_ack_confirmation(void);
+
 #endif
