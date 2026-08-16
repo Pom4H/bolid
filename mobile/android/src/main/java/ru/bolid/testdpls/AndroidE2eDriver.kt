@@ -7,6 +7,7 @@ import android.util.Log
 import java.io.File
 import ru.bolid.testdpls.core.app.AndroidBleTransport
 import ru.bolid.testdpls.core.app.DplsClient
+import ru.bolid.testdpls.core.app.title
 import ru.bolid.testdpls.core.domain.DplsMode
 
 /** Debug-only ADB/broadcast driver. Product behavior remains in shared [DplsClient]. */

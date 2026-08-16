@@ -1,5 +1,7 @@
 package ru.bolid.testdpls.core.runtime
 
+import kotlin.jvm.JvmInline
+
 /** Stable device identity. It is deliberately not a BLE address. */
 @JvmInline
 value class NodeId(val value: Long) {

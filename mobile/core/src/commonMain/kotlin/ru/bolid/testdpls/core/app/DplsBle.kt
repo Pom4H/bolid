@@ -39,13 +39,6 @@ object DplsBle {
     }
 }
 
-object DplsOperatorAlerts {
-    const val ERROR_TITLE = "Ошибка Test-DPLS"
-    const val NORMAL_TITLE = "Test-DPLS: режим Норма"
-    const val NORMAL_BODY = "Устройство вернулось в безопасный режим."
-    const val KEEP_ALIVE_TEXT = "Соединение Test-DPLS"
-}
-
 internal object DplsPlatformPrefs {
     const val THEME = "ui_theme"
     const val KEEP_SCREEN_ON = "keep_screen_on"

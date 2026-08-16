@@ -1,5 +1,7 @@
 package ru.bolid.testdpls.core.domain
 
+import kotlin.jvm.JvmInline
+
 enum class DplsMode(val wire: Int, val dangerous: Boolean) {
     NORMAL(0, false),
     OPEN_T(1, true),

@@ -27,6 +27,7 @@ class DplsControlMessagesTest {
     }
 
     @Test
+    @Suppress("DEPRECATION")
     fun challengeAndCommandLayoutsMatchWireContract() {
         val challenge = ByteArray(37)
         putU32(challenge, 0, 0x78563412)

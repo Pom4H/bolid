@@ -82,9 +82,13 @@ for secret in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authS
     forbid_text(SEQUENCER, secret, f"FrameSequencer must not own session secret {secret}")
 
 # Protocol v2 has exactly one transaction id: Frame.sequence. Legacy v1 decode
-# compatibility is the only place where the old name may remain.
+# compatibility and its direct tests are the only places where the old name may remain.
+legacy_command_id_paths = {
+    "DplsControlMessages.kt",
+    "DplsControlMessagesTest.kt",
+}
 for path in (ROOT / "mobile").rglob("*.kt"):
-    if path.name == "DplsControlMessages.kt":
+    if path.name in legacy_command_id_paths:
         continue
     forbid_regex(
         path,
