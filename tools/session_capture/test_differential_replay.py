@@ -15,7 +15,6 @@ from differential_replay import (
     AUTH_RESULT,
     COMMAND_RESULT,
     DEFAULT_PASSWORD,
-    HELLO,
     MODE_SET,
     STATE_GET,
     STATE_REPORT,
@@ -24,6 +23,7 @@ from differential_replay import (
 )
 from dpls_wire import Frame, decode_frame, encode_frame
 
+HELLO = 0x01
 SHORT_1 = 3
 NORMAL = 0
 
