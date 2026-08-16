@@ -11,6 +11,7 @@ import kotlin.concurrent.withLock
 import ru.bolid.testdpls.core.app.DplsTransport
 import ru.bolid.testdpls.core.app.DplsTransportDevice
 import ru.bolid.testdpls.core.app.DplsTransportListener
+import ru.bolid.testdpls.core.protocol.DplsProtocol
 
 /**
  * Soft-BLE adapter: maps [DplsTransport] onto the host `dpls_simulator` stdio protocol.
@@ -254,7 +255,7 @@ class SimulatorBleTransport(
         const val ADDRESS = "sim:dpls"
         const val DEVICE_NAME = "Test-DPLS-SIM"
         const val DEVICE_ID = 0x1234L
-        const val WRITE_LIMIT = 244
+        const val WRITE_LIMIT = DplsProtocol.MAX_FRAME
 
         fun resolveBinary(): String {
             val fromEnv = System.getenv("DPLS_SIMULATOR")
