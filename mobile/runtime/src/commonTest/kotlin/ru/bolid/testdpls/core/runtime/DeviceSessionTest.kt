@@ -58,7 +58,7 @@ class DeviceSessionTest {
 
     @Test
     fun recoveringDropsAuthenticationButRetainsVerifiedIdentityAndRoute() {
-        val endpoint = LinkEndpoint.Routed(NodeId(0x10), NodeId(0x20))
+        val endpoint = LinkEndpoint.Ble("ble-1")
         val recovering: DeviceSession = DeviceSession.Recovering(
             nodeId = NodeId(0x20),
             endpoint = endpoint,
