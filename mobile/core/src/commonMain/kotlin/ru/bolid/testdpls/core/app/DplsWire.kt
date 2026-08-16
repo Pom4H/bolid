@@ -1,26 +1,24 @@
 package ru.bolid.testdpls.core.app
 
-import ru.bolid.testdpls.core.protocol.DplsFrameStream
 import ru.bolid.testdpls.core.protocol.DplsProtocol
+import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.session.FrameSequencer
 
-/** Wire mechanics only: frame boundaries, sequence generation and correlation. */
+/** Wire mechanics only: frame sequence, codec and correlation watermark. */
 internal class DplsWire(
     private val transport: DplsTransport,
     private val fail: (String) -> Unit,
 ) {
-    private val incoming = DplsFrameStream()
     private val sequencer = FrameSequencer()
     private var latestStateSequence: Int? = null
 
     fun reset() {
-        incoming.reset()
         sequencer.reset()
         latestStateSequence = null
     }
 
-    fun receive(bytes: ByteArray): List<DplsProtocol.DecodeResult> = incoming.push(bytes)
+    fun decode(bytes: ByteArray): DplsProtocol.DecodeResult = decodeFrame(bytes)
 
     fun accepts(frame: DplsProtocol.Frame): Boolean =
         frame.type != DplsProtocol.Type.STATE_REPORT || frame.sequence == latestStateSequence
