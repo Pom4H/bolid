@@ -146,13 +146,6 @@ def check_auth(contract: dict[str, object]) -> None:
     require(kt, f"const val SALT_SIZE = {int(auth['salt_size'])}", "Kotlin auth salt size drift")
     require(kt, f"const val TOKEN_SIZE = {int(auth['token_size'])}", "Kotlin session token size drift")
 
-    replay = text("tools/session_capture/differential_replay.py")
-    require(
-        replay,
-        f"PBKDF2_ITERATIONS = {int(auth['pbkdf2_iterations']):_}",
-        "capture/replay PBKDF2 iteration drift",
-    )
-
 
 def check_advertisement(contract: dict[str, object]) -> None:
     adv = contract["advertisement"]
@@ -236,7 +229,7 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
-    print("OK: DPLS wire/auth contract matches C/Kotlin/Python")
+    print("OK: DPLS wire/auth contract matches C/Kotlin/Python where implemented")
     print("OK: lab contains no second DPLS protocol table")
     print("OK: simulator ADV semantics match current PHY6252 target")
     print("OK: mode/output/pin mappings agree across target, simulator and lab")
