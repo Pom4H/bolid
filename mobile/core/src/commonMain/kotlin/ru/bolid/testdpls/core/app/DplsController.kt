@@ -6,6 +6,13 @@ import ru.bolid.testdpls.core.domain.DplsUiState
 import ru.bolid.testdpls.core.domain.EventRecord
 import ru.bolid.testdpls.core.domain.UiTheme
 
+/**
+ * UI -> product boundary shared by Compose on Android and iOS.
+ *
+ * This is deliberately a command surface, not a second state model. Implementations
+ * must expose the single read-only [uiState] projection and keep lifecycle authority
+ * inside the product runtime.
+ */
 interface DplsController {
     val uiState: StateFlow<DplsUiState>
 
