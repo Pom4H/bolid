@@ -115,7 +115,7 @@ SDK_SOURCES := \
 	$(SDK)/components/profiles/Roles/gapbondmgr.c \
 	$(SDK)/components/profiles/Roles/gapgattserver.c \
 	$(SDK)/components/profiles/Roles/peripheral.c \
-	$(SDK)/components/profiles/GATT/gattservapp.c \
+	$(SDK)/components/profiles/Roles/gattservapp.c \
 	$(SDK)/misc/jump_table.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/OSAL_SimpleBLEPeripheral.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/SimpleBLEPeripheral_Main.c \
@@ -169,8 +169,10 @@ $(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 # Vendor adc.h declares static helpers that are defined in adc.c; GCC still
 # emits -Wunused-function at end of this TU even with -isystem.
 $(BUILD)/dpls_phy6252_app.o: APP_CFLAGS += -Wno-unused-function
-# Do not turn our memcpy/memset loops back into libc calls.
-$(BUILD)/system_gcc.o: APP_CFLAGS += -fno-builtin
+# GCC recognizes the byte loop as a memset pattern even with -fno-builtin and
+# otherwise lowers memset() back into a call to itself. Disable that transform
+# for the freestanding libc shim so the emitted Cortex-M0 code remains a loop.
+$(BUILD)/system_gcc.o: APP_CFLAGS += -fno-builtin -fno-tree-loop-distribute-patterns
 
 $(BUILD)/startup_phy6252.o: startup_phy6252.S | $(BUILD)
 	$(CC) $(ARCH) -x assembler-with-cpp -MMD -MP -c $< -o $@
