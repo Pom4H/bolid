@@ -1,0 +1,52 @@
+name: PHY6252 emulator probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phy6252-emulator-probe.yml
+      - firmware/targets/phy6252/**
+
+permissions:
+  contents: read
+
+jobs:
+  gcc:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install GNU Arm Embedded
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+      - name: Build Test-DPLS GCC image
+        run: |
+          set -o pipefail
+          mkdir -p tmp
+          bash tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex 2>&1 | tee tmp/gcc-build.log
+          arm-none-eabi-objdump -d firmware/targets/phy6252/build/test-dpls.elf > tmp/test-dpls-gcc.dis
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('tmp/test-dpls-gcc.dis').read_text(errors='replace')
+          m = re.search(r'<memset>:\n(?P<body>.*?)(?=\n\n|\Z)', text, re.S)
+          if not m:
+              raise SystemExit('memset symbol not found')
+          body = m.group('body')
+          if re.search(r'\bbl\s+.*<memset>', body):
+              raise SystemExit('freestanding memset recursively calls itself')
+          print(body)
+          PY
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-gcc-emulator-probe
+          path: |
+            tmp/test-dpls-gcc.hex
+            tmp/test-dpls-gcc.dis
+            tmp/gcc-build.log
+            firmware/targets/phy6252/build/test-dpls.elf
+            firmware/targets/phy6252/build/test-dpls.map
+          if-no-files-found: error
+          retention-days: 1
