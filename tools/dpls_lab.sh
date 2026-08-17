@@ -17,9 +17,5 @@ if [[ ! -x "$NATIVE/dpls-ble" || "$NATIVE/DplsBle.swift" -nt "$NATIVE/dpls-ble" 
     -o "$NATIVE/dpls-ble" "$NATIVE/DplsBle.swift"
 fi
 "$ROOT/mobile/gradlew" -p "$ROOT/mobile" :web:wasmJsBrowserDistribution
-cd "$ROOT/tools/dpls-lab"
-if [[ ! -d node_modules ]]; then
-  bun install
-fi
 export DPLS_SIMULATOR="$SIM"
-exec bun run server.ts
+exec bun run "$ROOT/tools/dpls-lab/server.ts"

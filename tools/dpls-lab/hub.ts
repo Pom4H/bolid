@@ -68,6 +68,7 @@ export class DeviceHub {
   private readonly radio: NativeBle;
   private airSimId: string | null = null;
   private airSubscribed = false;
+  private airAutostarted = false;
   private centralReady = false;
 
   constructor(binary: string, labRoot: string) {
@@ -619,6 +620,10 @@ export class DeviceHub {
           advertising: this.airSimId === sim.id,
         });
         this.broadcastRoster();
+        if (!this.airAutostarted && this.airSimId === null) {
+          this.airAutostarted = true;
+          this.startAdvertise(sim.id);
+        }
       } catch {
         return;
       }

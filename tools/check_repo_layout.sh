@@ -134,12 +134,19 @@ for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
 done
 
 test -f tools/dpls_lab.sh
-test -f tools/dpls_board.sh
-test -f tools/dpls_bench.sh
+test ! -e tools/dpls_board.sh
+test ! -e tools/dpls_bench.sh
+test ! -e tools/run_phy6252_zmu.sh
 test -f tools/dpls-lab/hub.ts
-test -f tools/dpls-lab/cli.ts
-test -f tools/dpls-lab/bench.ts
+test -f tools/dpls-lab/server.ts
+test ! -e tools/dpls-lab/cli.ts
+test ! -e tools/dpls-lab/bench.ts
 test -f mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt
+test ! -e tools/dpls-lab/src/App.tsx
+test ! -e tools/dpls-lab/src/main.tsx
+test ! -e tools/dpls-lab/src/session.ts
+test ! -e tools/dpls-lab/src/boardView.ts
+test ! -e tools/dpls-lab/index.html
 test ! -e tools/dpls-lab/src/protocol.ts
 test ! -e tools/dpls-lab/src/crypto.ts
 test ! -e tools/dpls-lab/src/ble.ts

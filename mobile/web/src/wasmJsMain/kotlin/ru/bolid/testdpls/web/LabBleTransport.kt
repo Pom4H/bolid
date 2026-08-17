@@ -7,7 +7,7 @@ import ru.bolid.testdpls.core.app.DplsTransportDevice
 import ru.bolid.testdpls.core.app.DplsTransportListener
 
 /**
- * Maps [DplsTransport] onto the lab WebSocket.
+ * Maps [DplsTransport] onto the host hub WebSocket.
  *
  * Virtual simulators and laptop Bluetooth both appear as [onDiscovered]
  * rows. Connect/FRAME are addressed so several devices can live at once.

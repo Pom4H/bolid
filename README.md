@@ -17,10 +17,10 @@ The repository follows three ownership rules:
 | `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
 | `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.1**) |
 | `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.1**) |
-| `mobile/web/` | Compose wasm phone for the host lab (`LabBleTransport` over WebSocket) |
+| `mobile/web/` | Compose wasm phone (`LabBleTransport` over WebSocket) |
 | `docs/` | Architecture, bring-up and PHY6252 engineering references |
 | `tools/` | Build, flash, lint, coverage, lab and one-command checks |
-| `tools/dpls-lab/` | Host lab: N simulators, native BLE central/peripheral, wasm phone |
+| `tools/dpls-lab/` | Hub: `dpls_lab.sh` starts `dpls_simulator` + wasm phone |
 | `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
 | `third_party/phy6252-emu/` | Guest PHY6252 hex emulator ([Pom4H/phy6252-emu](https://github.com/Pom4H/phy6252-emu)) |
 
@@ -113,23 +113,16 @@ bash tools/soft_ble_e2e.sh
 
 This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
 
-### Host lab (simulator + wasm phone + laptop BLE)
+### Host wasm phone (simulator + laptop BLE)
 
 ```sh
 bash tools/dpls_lab.sh
 # http://127.0.0.1:8787
 ```
 
-The iframe on the right is the same Compose `DplsApp` as Android/iOS (`mobile/web`). The laptop can advertise a sim (`BLE сервер`) or scan real boards (`Найти плату`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
+Same Compose `DplsApp` as Android/iOS (`mobile/web`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
 
-PHY6252 / AI-Thinker PB-03F-Kit inspector (hex GPIO pads, jumper bench, laptop GATT):
-
-```sh
-bash tools/dpls_board.sh
-bash tools/dpls_bench.sh TIE P20 12V   # провода в тот же TUI (или --listen)
-```
-
-The chip emulator is a git submodule (`third_party/phy6252-emu`). Kit TUI talks stdin lines via `DPLS_ZMU`; see [docs/chip-emulator.md](docs/chip-emulator.md). Product lab stays `bash tools/dpls_lab.sh`.
+The chip hex runner is a git submodule (`third_party/phy6252-emu`); Bolid does not launch it. See [docs/chip-emulator.md](docs/chip-emulator.md).
 
 Current firmware and phone version is **1.4.1** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
 

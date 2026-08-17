@@ -12,7 +12,7 @@ Test-DPLS has one Kotlin Multiplatform application for Android and iOS.
 | `core/src/iosMain/` | `IosBleTransport`, Apple clock/random/alerts and Compose `UIViewController` entry point |
 | `android/` | permissions/Activity shell and debug E2E driver |
 | `ios/` | Xcode project, plist/assets and one minimal Swift bootstrap |
-| `web/` | wasm Compose host for `tools/dpls-lab` (`LabBleTransport`) |
+| `web/` | wasm Compose host (`LabBleTransport`) |
 
 Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`), matching firmware `DPLS_FW_VERSION_*`.
 
@@ -92,7 +92,7 @@ The reusable layer carries the behavior-heavy tests:
 
 The same common tests execute for JVM/Android and Kotlin/Native. Platform validation focuses on Bluetooth/framework integration rather than re-testing protocol rules twice.
 
-Without a physical phone, `bash tools/soft_ble_e2e.sh` runs the product `DplsClient` against `dpls_simulator`. The lab wasm phone is the same UI over WebSocket; it is not a second client.
+Without a physical phone, `bash tools/soft_ble_e2e.sh` runs the product `DplsClient` against `dpls_simulator`. The wasm phone is the same UI over WebSocket; it is not a second client.
 
 ## BLE service
 

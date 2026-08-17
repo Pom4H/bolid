@@ -3,16 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run server.ts",
-    "board": "bun run cli.ts",
-    "bench": "bun run bench.ts"
-  },
-  "dependencies": {
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1"
-  },
-  "devDependencies": {
-    "@types/react": "^19.1.12",
-    "@types/react-dom": "^19.1.9"
+    "start": "bun run server.ts"
   }
 }
