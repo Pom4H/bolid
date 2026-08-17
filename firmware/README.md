@@ -1,6 +1,6 @@
 # Test-DPLS firmware
 
-PHY6252 firmware for the Test-DPLS device, version **1.4.0** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
+PHY6252 firmware for the Test-DPLS device, version **1.4.1** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
 
 ## Layout
 
@@ -9,7 +9,7 @@ PHY6252 firmware for the Test-DPLS device, version **1.4.0** (`DPLS_FW_VERSION_*
 | `src/` + `include/` | Portable protocol, server, LED, HMAC and calibration |
 | `phy6252_emu/` | Reusable PHY6252 ATT/OSAL/SNV host model (no DPLS types). Copy into other PHY6252 projects |
 | `sim/` | DPLS board on top of `phy6252_emu`: HMAC verify, LED scenes, lab voltages |
-| `zmu/` | Cortex-M0 image that runs that board model under [zmu](https://github.com/jjkt/zmu) |
+| `zmu/` | Cortex-M0 image that runs that board model under [zmu](https://github.com/jjkt/zmu). Product E2E — not `third_party/phy6252-emu`. |
 | `tests/` | Host-side behavioral and edge-case tests |
 | `phy6252/` | HAL/GATT adapter, ADC, persistence and board mapping |
 | `targets/phy6252/` | Keil CMSIS solution and GNU Arm target build |

@@ -5,7 +5,8 @@ export type FirmwareRelease = {
 
 /** Shipped Test-DPLS firmware versions from git tags and current tree. */
 export const FIRMWARE_RELEASES: readonly FirmwareRelease[] = [
-  { version: "1.4.0", label: "1.4.0 · текущая" },
+  { version: "1.4.1", label: "1.4.1 · текущая" },
+  { version: "1.4.0", label: "1.4.0 · релиз" },
   { version: "1.3.0", label: "1.3.0 · v1.3.0-rc.1" },
   { version: "1.2.1", label: "1.2.1 · релиз" },
   { version: "1.2.0", label: "1.2.0 · релиз" },
@@ -16,7 +17,7 @@ export const FIRMWARE_RELEASES: readonly FirmwareRelease[] = [
 ];
 
 /** Must match `DPLS_FW_VERSION_*` in `firmware/include/dpls_server.h`. */
-export const DEFAULT_FIRMWARE = "1.4.0";
+export const DEFAULT_FIRMWARE = "1.4.1";
 
 export function firmwareChoices(seen: Array<string | null>): FirmwareRelease[] {
   const known = new Set(FIRMWARE_RELEASES.map((item) => item.version));

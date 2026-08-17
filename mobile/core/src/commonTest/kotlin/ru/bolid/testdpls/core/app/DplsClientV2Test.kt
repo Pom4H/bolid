@@ -183,6 +183,13 @@ class DplsClientV2Test {
         platform.now = 100_080
         transport.reply(DplsProtocol.Type.IDENTIFY_START, byteArrayOf(), identify.sequence)
         assertTrue(client.uiState.value.identifyLedLive)
+        transport.emitRssi(-55)
+        assertEquals(-55, client.uiState.value.linkRssi)
+        client.confirmIdentifiedDevice()
+        assertFalse(client.uiState.value.identifyLedLive)
+        assertEquals(-55, client.uiState.value.linkRssi)
+        transport.emitRssi(-72)
+        assertEquals(-72, client.uiState.value.linkRssi)
         client.close()
     }
 
@@ -326,6 +333,9 @@ class DplsClientV2Test {
         private var connected = false
         var reconnectCalls = 0
             private set
+        var rssiReads = 0
+            private set
+        var nextRssi = -40
 
         override fun setListener(listener: DplsTransportListener) {
             this.listener = listener
@@ -349,7 +359,12 @@ class DplsClientV2Test {
             return true
         }
 
-        override fun readRssi() = true
+        override fun readRssi(): Boolean {
+            if (!connected) return false
+            rssiReads++
+            listener.onRssi(nextRssi)
+            return true
+        }
 
         override fun disconnect(clearSelection: Boolean) {
             connected = false
@@ -366,6 +381,11 @@ class DplsClientV2Test {
         fun subscribed() {
             connected = true
             listener.onSubscribed(244)
+        }
+
+        fun emitRssi(rssi: Int) {
+            nextRssi = rssi
+            listener.onRssi(rssi)
         }
 
         fun dropped() {

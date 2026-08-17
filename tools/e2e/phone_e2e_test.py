@@ -1074,7 +1074,7 @@ def clear_logcat() -> None:
 
 
 def logcat_full(tag: str = "TestDplsBle") -> str:
-    return adb("logcat", "-d", "-s", tag, check=False)
+    return adb("logcat", "-d", "-s", tag, "TestDplsE2e", check=False)
 
 
 def logcat_snippet(tag: str = "TestDplsBle") -> str:

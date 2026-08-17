@@ -655,6 +655,15 @@ export class DeviceHub {
       }
     }
   }
+
+  shutdown(): void {
+    this.disconnectPhone();
+    this.stopAdvertise();
+    this.radio.stopCentral();
+    for (const id of [...this.sims.keys()]) {
+      this.kill(id);
+    }
+  }
 }
 
 function defaultName(deviceId: number): string {

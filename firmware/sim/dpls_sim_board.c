@@ -219,7 +219,7 @@ static void device_info(void *context, dpls_device_info_t *out)
     out->fw_minor = board->config.fw_minor;
     out->fw_patch = board->config.fw_patch;
     out->hw_revision = DPLS_SIM_HW_REVISION;
-    out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT;
+    out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT | DPLS_CAP_HOST_SIM;
 }
 
 static dpls_settings_state_t settings_state(void *context)
