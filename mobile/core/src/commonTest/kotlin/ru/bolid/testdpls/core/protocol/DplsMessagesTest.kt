@@ -47,6 +47,18 @@ class DplsMessagesTest {
     }
 
     @Test
+    fun deviceInfoParsesHostSimCapability() {
+        val raw = ByteArray(12)
+        raw[5] = 1
+        raw[6] = 4
+        raw[7] = 1
+        raw[9] = (1 shl 6).toByte()
+        val info = assertNotNull(parseDeviceInfoReport(raw))
+        assertEquals("1.4.1", info.firmwareVersion)
+        assertTrue(info.hostSim)
+    }
+
+    @Test
     fun logChunkRequiresExactRecordLength() {
         val valid = ByteArray(13)
         putU16(valid, 0, 7)

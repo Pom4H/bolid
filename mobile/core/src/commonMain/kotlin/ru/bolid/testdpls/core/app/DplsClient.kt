@@ -242,13 +242,11 @@ class DplsClient(
 
     override fun stopIdentify() {
         identify = Identify()
-        stopRssiPoll()
         updateState {
             it.copy(
                 identifyActive = false,
                 identifyLedLive = false,
                 identifyLedPhaseOffsetMs = 0,
-                linkRssi = null,
             )
         }
         if (transport.hasConnection()) {
@@ -712,6 +710,7 @@ class DplsClient(
         val candidateNodeId = current.candidateNodeIdOrNull
         val clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
         setSession(DeviceSession.Linked(endpoint, clientNonce, candidateNodeId))
+        scheduleRssiPoll()
         if (identify.afterConnect) {
             val sequence = request(DplsProtocol.Type.IDENTIFY_START) ?: return
             identify = Identify(
@@ -1596,11 +1595,10 @@ class DplsClient(
             while (
                 isActive &&
                 generation == linkGeneration &&
-                state.identifyLedLive &&
                 transport.hasConnection()
             ) {
                 transport.readRssi()
-                delay(RSSI_POLL_MS)
+                delay(if (state.identifyLedLive) RSSI_IDENTIFY_POLL_MS else RSSI_SESSION_POLL_MS)
             }
         }
     }
@@ -1834,7 +1832,8 @@ class DplsClient(
         private const val LOG_CHUNK_TIMEOUT_MS = 15_000L
         private const val SETTINGS_TIMEOUT_MS = 10_000L
         private const val ONE_SHOT_REQUEST_TIMEOUT_MS = 2_000L
-        private const val RSSI_POLL_MS = 350L
+        private const val RSSI_IDENTIFY_POLL_MS = 350L
+        private const val RSSI_SESSION_POLL_MS = 1_000L
         private const val RECONNECT_DELAY_MS = 500L
     }
 }

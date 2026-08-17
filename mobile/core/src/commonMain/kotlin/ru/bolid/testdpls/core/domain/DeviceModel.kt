@@ -26,6 +26,7 @@ value class DeviceCapabilities(val bits: Int) {
     val multiVoltageReport: Boolean get() = has(MULTI_VOLTAGE)
     val mesh: Boolean get() = has(MESH)
     val serialMonitor: Boolean get() = has(SERIAL_MONITOR)
+    val hostSim: Boolean get() = has(HOST_SIM)
 
     companion object {
         const val ADC_PRESENT = 1 shl 0
@@ -34,6 +35,7 @@ value class DeviceCapabilities(val bits: Int) {
         const val MULTI_VOLTAGE = 1 shl 3
         const val MESH = 1 shl 4
         const val SERIAL_MONITOR = 1 shl 5
+        const val HOST_SIM = 1 shl 6
     }
 }
 
@@ -120,5 +122,6 @@ data class DeviceInfo(
     val hardwareReadback: Boolean get() = capabilities.hardwareReadback
     val adcCalibrated: Boolean get() = capabilities.adcCalibrated
     val multiVoltageReport: Boolean get() = capabilities.multiVoltageReport
+    val hostSim: Boolean get() = capabilities.hostSim
     val shortId: String get() = "DPLS-${deviceId.toString(16).uppercase().padStart(8, '0')}"
 }

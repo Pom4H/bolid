@@ -2090,6 +2090,7 @@ private fun DeviceAbout(state: DplsUiState) {
     Spacer(Modifier.height(10.dp))
     if (info != null) {
         SettingsFact("Прошивка", info.firmwareVersion)
+        SettingsFact("Источник", if (info.hostSim) "хост-стенд" else "плата")
         SettingsFact("Протокол", "${info.protocolVersion}")
         SettingsFact("Ревизия", "HW ${info.hardwareRevision}")
         SettingsFact(

@@ -499,7 +499,7 @@ if mode == "central" {
     let deviceId = UInt32(idText.replacingOccurrences(of: "0x", with: ""), radix: 16)
         ?? UInt32(idText) ?? 0x1234
     let status = UInt8(argValue(args, "--status") ?? "0") ?? 0
-    let fw = parseFw(argValue(args, "--fw") ?? "1.4.0")
+    let fw = parseFw(argValue(args, "--fw") ?? "1.4.1")
     let peripheral = PeripheralRole(name: name, deviceId: deviceId, status: status, fw: fw)
     reader.onLine = { line in DispatchQueue.main.async { peripheral.handle(line) } }
     peripheral.start()
