@@ -115,7 +115,7 @@ SDK_SOURCES := \
 	$(SDK)/components/profiles/Roles/gapbondmgr.c \
 	$(SDK)/components/profiles/Roles/gapgattserver.c \
 	$(SDK)/components/profiles/Roles/peripheral.c \
-	$(SDK)/components/profiles/Roles/gattservapp.c \
+	$(SDK)/components/profiles/GATT/gattservapp.c \
 	$(SDK)/misc/jump_table.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/OSAL_SimpleBLEPeripheral.c \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/source/SimpleBLEPeripheral_Main.c \
