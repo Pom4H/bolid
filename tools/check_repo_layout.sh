@@ -134,8 +134,16 @@ for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
 done
 
 test -f tools/dpls_lab.sh
+test -f tools/dpls_board.sh
+test -f tools/dpls_bench.sh
 test -f tools/dpls-lab/hub.ts
+test -f tools/dpls-lab/cli.ts
+test -f tools/dpls-lab/bench.ts
 test -f mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt
 test ! -e tools/dpls-lab/src/protocol.ts
 test ! -e tools/dpls-lab/src/crypto.ts
 test ! -e tools/dpls-lab/src/ble.ts
+# Hex runner is the phy6252-emu submodule, not a second in-tree copy.
+test ! -e firmware/phy6252-zmu
+test ! -e tools/phy6252-zmu
+test -f third_party/phy6252-emu/Cargo.toml

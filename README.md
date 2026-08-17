@@ -13,15 +13,16 @@ The repository follows three ownership rules:
 | Path | Purpose |
 |---|---|
 | `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
-| `firmware/zmu/` | Cortex-M0 E2E harness for the [zmu](https://github.com/jjkt/zmu) emulator |
+| `firmware/zmu/` | Cortex-M0 E2E of the **portable** board (`sim/`), not phy6252-emu |
 | `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
-| `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.0**) |
-| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.0**) |
+| `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.1**) |
+| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.1**) |
 | `mobile/web/` | Compose wasm phone for the host lab (`LabBleTransport` over WebSocket) |
 | `docs/` | Architecture, bring-up and PHY6252 engineering references |
 | `tools/` | Build, flash, lint, coverage, lab and one-command checks |
 | `tools/dpls-lab/` | Host lab: N simulators, native BLE central/peripheral, wasm phone |
 | `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
+| `third_party/phy6252-emu/` | Guest PHY6252 hex emulator ([Pom4H/phy6252-emu](https://github.com/Pom4H/phy6252-emu)) |
 
 The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
 
@@ -121,7 +122,16 @@ bash tools/dpls_lab.sh
 
 The iframe on the right is the same Compose `DplsApp` as Android/iOS (`mobile/web`). The laptop can advertise a sim (`BLE сервер`) or scan real boards (`Найти плату`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
 
-Current firmware and phone version is **1.4.0** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
+PHY6252 / AI-Thinker PB-03F-Kit inspector (hex GPIO pads, jumper bench, laptop GATT):
+
+```sh
+bash tools/dpls_board.sh
+bash tools/dpls_bench.sh TIE P20 12V   # провода в тот же TUI (или --listen)
+```
+
+The chip emulator is a git submodule (`third_party/phy6252-emu`). Kit TUI talks stdin lines via `DPLS_ZMU`; see [docs/chip-emulator.md](docs/chip-emulator.md). Product lab stays `bash tools/dpls_lab.sh`.
+
+Current firmware and phone version is **1.4.1** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
 
 ### Capture real phone↔board sessions (for simulator fidelity)
 

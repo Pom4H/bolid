@@ -173,3 +173,5 @@ An ordinary product feature should normally touch **one shared Kotlin area**, no
 Use `bash tools/check_mobile.sh` for the mobile loop and `bash tools/check_all.sh` for all host-side repository gates.
 
 The PHY62XX SDK remains independently pinned in `firmware/sdk/phy6252-sdk.env`; changing the SDK is not part of ordinary application work.
+
+The PHY6252 hex runner is not a product module. Bolid may launch `phy6252` from `third_party/phy6252-emu` (`DPLS_ZMU`) and speak its stdin line protocol; it must not import MMIO or kit firmware. See [chip-emulator.md](chip-emulator.md). `firmware/zmu/` stays the portable Cortex-M0 E2E harness.

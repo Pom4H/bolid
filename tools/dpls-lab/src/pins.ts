@@ -1,3 +1,5 @@
+import type { BenchNet } from "./benchNet";
+import { padVolts } from "./benchNet";
 import type { BoardSnapshot } from "./types";
 
 export type PinKind = "gpio" | "adc" | "power" | "gnd" | "uart" | "swd" | "nc" | "reset";
@@ -81,6 +83,80 @@ export type Drive = {
   warm: boolean;
 };
 
+export type HexGpio = {
+  dr: number;
+  ddr: number;
+};
+
+/** `gpio_pin_e` bit in `AP_GPIO->swporta_dr`, not the silkscreen number. */
+const GPIO_BIT = {
+  P0: 0,
+  P2: 2,
+  P3: 3,
+  P7: 4,
+  P11: 7,
+  P14: 8,
+  P15: 9,
+  P16: 10,
+  P17: 11,
+  P18: 12,
+  P20: 13,
+  P23: 14,
+  P24: 15,
+  P31: 19,
+  P32: 20,
+  P33: 21,
+  P34: 22,
+} as const;
+
+export function gpioBit(label: string): number | null {
+  switch (label) {
+    case "P0":
+      return GPIO_BIT.P0;
+    case "P2":
+      return GPIO_BIT.P2;
+    case "P3":
+      return GPIO_BIT.P3;
+    case "P7":
+      return GPIO_BIT.P7;
+    case "P11":
+      return GPIO_BIT.P11;
+    case "P14":
+      return GPIO_BIT.P14;
+    case "P15":
+      return GPIO_BIT.P15;
+    case "P16":
+      return GPIO_BIT.P16;
+    case "P17":
+      return GPIO_BIT.P17;
+    case "P18":
+      return GPIO_BIT.P18;
+    case "P20":
+      return GPIO_BIT.P20;
+    case "P23":
+      return GPIO_BIT.P23;
+    case "P24":
+      return GPIO_BIT.P24;
+    case "P31":
+      return GPIO_BIT.P31;
+    case "P32":
+      return GPIO_BIT.P32;
+    case "P33":
+      return GPIO_BIT.P33;
+    case "P34":
+      return GPIO_BIT.P34;
+    default:
+      return null;
+  }
+}
+
+export function padDriven(hex: HexGpio, label: string): boolean | null {
+  const bit = gpioBit(label);
+  if (bit === null) return null;
+  if (((hex.ddr >> bit) & 1) === 0) return null;
+  return ((hex.dr >> bit) & 1) === 1;
+}
+
 export function driveFromBoard(board: BoardSnapshot): Drive {
   return {
     iso1: board.gpio.iso1 === 1,
@@ -97,6 +173,23 @@ export function driveFromBoard(board: BoardSnapshot): Drive {
   };
 }
 
+export function driveFromHex(hex: HexGpio): Drive {
+  const high = (label: string): boolean => padDriven(hex, label) === true;
+  return {
+    iso1: high("P31"),
+    iso2: high("P32"),
+    isoT: high("P33"),
+    kz1: high("P14"),
+    kz2: high("P16"),
+    kzT: high("P17"),
+    ledR: high("P7"),
+    ledG: high("P11"),
+    ledB: high("P18"),
+    cool: high("P34"),
+    warm: high("P0"),
+  };
+}
+
 function gpio(high: boolean): Pick<LivePin, "volts" | "high" | "detail"> {
   return {
     volts: high ? 3.3 : 0,
@@ -105,8 +198,36 @@ function gpio(high: boolean): Pick<LivePin, "volts" | "high" | "detail"> {
   };
 }
 
-function liveOne(pin: HeaderPin, board: BoardSnapshot, drive: Drive): LivePin {
+function liveOne(
+  pin: HeaderPin,
+  board: BoardSnapshot,
+  drive: Drive,
+  hex: HexGpio | null,
+  net: BenchNet | null,
+): LivePin {
   const base = { ...pin, volts: null as number | null, high: null as boolean | null, detail: pin.role };
+  const bench = net !== null ? padVolts(net, pin.label) : null;
+  if (hex !== null && (pin.kind === "gpio" || pin.kind === "reset")) {
+    const driven = padDriven(hex, pin.label);
+    if (driven !== null) {
+      const fight = bench !== null ? "  бой с bench" : "";
+      if (pin.label === "P7") return { ...base, ...gpio(driven), detail: `${driven ? "LED R ON" : "LED R off"}${fight}` };
+      if (pin.label === "P11") return { ...base, ...gpio(driven), detail: `${driven ? "LED G ON" : "LED G off"}${fight}` };
+      if (pin.label === "P18") return { ...base, ...gpio(driven), detail: `${driven ? "LED B ON" : "LED B off"}${fight}` };
+      return { ...base, ...gpio(driven), detail: fight.length > 0 ? `${pin.role}${fight}` : pin.role };
+    }
+  }
+  if (net !== null && pin.kind === "adc") {
+    const volts = padVolts(net, pin.label) ?? 0;
+    const rail = net.ties.get(pin.label);
+    const tag = rail !== undefined ? rail : pin.role;
+    return { ...base, volts, high: null, detail: `${volts.toFixed(2)} В ${tag}` };
+  }
+  if (bench !== null && (pin.kind === "gpio" || pin.kind === "reset")) {
+    const rail = net?.ties.get(pin.label);
+    const detail = rail !== undefined ? `${bench.toFixed(2)} В ${rail}` : `${bench.toFixed(2)} В`;
+    return { ...base, volts: bench, high: bench >= 1.5, detail };
+  }
   switch (pin.label) {
     case "GND":
       return { ...base, volts: 0, high: false, detail: "0 В" };
@@ -143,7 +264,7 @@ function liveOne(pin: HeaderPin, board: BoardSnapshot, drive: Drive): LivePin {
     case "P18":
       return { ...base, ...gpio(drive.ledB), detail: drive.ledB ? "LED B ON" : "LED B off" };
     case "P34":
-      return { ...base, volts: 3.3, high: true, detail: "вход Reset, Cool off" };
+      return { ...base, volts: 0, high: false, detail: "вход Reset, pull-down" };
     case "P0":
       return { ...base, ...gpio(drive.warm), detail: "Warm LED, прошивка не трогает" };
     case "RX0":
@@ -158,12 +279,16 @@ function liveOne(pin: HeaderPin, board: BoardSnapshot, drive: Drive): LivePin {
   }
 }
 
-export function livePins(board: BoardSnapshot): { j3: LivePin[]; j2: LivePin[]; j1: LivePin[] } {
-  const drive = driveFromBoard(board);
+export function livePins(
+  board: BoardSnapshot,
+  hex: HexGpio | null = null,
+  net: BenchNet | null = null,
+): { j3: LivePin[]; j2: LivePin[]; j1: LivePin[] } {
+  const drive = hex !== null ? driveFromHex(hex) : driveFromBoard(board);
   return {
-    j3: J3_PINS.map((pin) => liveOne(pin, board, drive)),
-    j2: J2_PINS.map((pin) => liveOne(pin, board, drive)),
-    j1: J1_PINS.map((pin) => liveOne(pin, board, drive)),
+    j3: J3_PINS.map((pin) => liveOne(pin, board, drive, hex, net)),
+    j2: J2_PINS.map((pin) => liveOne(pin, board, drive, hex, net)),
+    j1: J1_PINS.map((pin) => liveOne(pin, board, drive, hex, net)),
   };
 }
 
