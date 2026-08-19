@@ -19,6 +19,8 @@ ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/
 PHY = ROOT / "firmware/phy6252"
 RUNTIME = PHY / "dpls_phy6252_runtime.c"
 STORAGE = PHY / "dpls_phy6252_storage.c"
+STORAGE_BLE = PHY / "dpls_phy6252_storage_ble.c"
+STORAGE_FILES = {STORAGE, STORAGE_BLE}
 TRANSPORT = PHY / "dpls_phy6252_transport.c"
 MEASUREMENTS = PHY / "dpls_phy6252_measurements.c"
 OUTPUTS = PHY / "dpls_phy6252_outputs.c"
@@ -107,16 +109,16 @@ require_text(ANDROID_BLE,
 old_app = PHY / "dpls_phy6252_app.c"
 if old_app.exists():
     fail(old_app, "monolithic PHY6252 app is forbidden; use runtime + adapters")
-for required in (RUNTIME, STORAGE, TRANSPORT, MEASUREMENTS, OUTPUTS, SUPERVISOR, AUTH):
+for required in (RUNTIME, STORAGE, STORAGE_BLE, TRANSPORT, MEASUREMENTS, OUTPUTS, SUPERVISOR, AUTH):
     if not required.exists():
         fail(required, "required PHY6252 runtime module is missing")
 
-# Flash/SNV writes have exactly one physical owner. Reads may occur in storage only
-# as well, so protocol/ADC/BLE code cannot accidentally introduce blocking flash IO.
+# SNV has one layer. It may span translation units (settings/journal and BLE key
+# copies), but protocol/ADC/BLE/identity code cannot perform hidden SNV IO.
 for path in PHY.glob("*.c"):
-    if path != STORAGE:
-        forbid_text(path, "osal_snv_write", "SNV writes belong only to storage")
-        forbid_text(path, "osal_snv_read", "SNV reads belong only to storage")
+    if path not in STORAGE_FILES:
+        forbid_text(path, "osal_snv_write", "SNV writes belong only to storage layer")
+        forbid_text(path, "osal_snv_read", "SNV reads belong only to storage layer")
 
 # Watchdog policy has one adapter. No random feed calls in domain/driver modules.
 for path in PHY.glob("*.c"):
@@ -208,7 +210,7 @@ if violations:
 print("Architecture guard: OK")
 print("  mobile lifecycle owner: DeviceSession")
 print("  PHY6252 coordinator: runtime")
-print("  flash/SNV owner: storage")
+print("  flash/SNV owner: storage layer")
 print("  ADC owner: measurements")
 print("  BLE queue/security owner: transport")
 print("  watchdog policy owner: supervisor")
