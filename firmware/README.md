@@ -1,20 +1,19 @@
 # Firmware Test-DPLS
 
-PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter, чтобы protocol/safety logic можно было быстро тестировать на host, а реальный target HEX — отдельно в Firmverse.
+PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. Быстрый host simulator живёт в `sim/`, а реальный target HEX исполняется внешним Firmverse.
 
 ## Структура
 
 | Путь | Назначение |
 |---|---|
-| `src/`, `include/` | protocol, server, LED, HMAC, calibration |
-| `phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; production HEX не исполняет |
-| `sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE |
+| `src/`, `include/` | protocol, server, safety, LED, HMAC, calibration |
+| `sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE; private ATT transport внутри этого каталога |
 | `tests/` | host behavioral/edge-case tests |
 | `phy6252/` | HAL/GATT/ADC/persistence/board mapping |
 | `targets/phy6252/` | Keil и GNU Arm target builds |
 | `sdk/phy6252-sdk.env` | pin PHY62XX SDK 3.1.2 |
 
-Полный vendor SDK не хранится в репозитории. Собственный ZMU/guest HEX runner также не хранится: target emulation выполняет внешний [Firmverse](https://github.com/Pom4H/firmverse).
+Полный vendor SDK не хранится в репозитории. Собственного PHY6252/ZMU emulator stack также нет: production target emulation выполняет [Firmverse](https://github.com/Pom4H/firmverse).
 
 ## Safety invariants
 
@@ -44,8 +43,6 @@ Soft-BLE продуктовый сценарий:
 bash tools/soft_ble_e2e.sh
 ```
 
-Project-owned C собирается с warnings-as-errors; vendor warnings не определяют policy проекта.
-
 ## PHY6252 target builds
 
 ```sh
@@ -53,9 +50,7 @@ tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 ```
 
-- Keil: Arm Compiler 6 / CMSIS-Toolbox;
-- GCC: GNU Arm Embedded;
-- оба target используют одни project sources и pinned SDK 3.1.2.
+Относительный output path всегда нормализуется относительно корня репозитория, поэтому `make -C firmware/targets/phy6252` не может случайно положить HEX внутрь target build directory.
 
 ## Firmverse в CI
 
@@ -69,7 +64,7 @@ tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
     strict: 'true'
 ```
 
-Firmverse владеет Rust/zmu/MMIO эмуляцией. Bolid больше не содержит `firmware/zmu`, `tools/zmu_*` или vendored guest HEX emulator.
+Bolid больше не содержит standalone `firmware/phy6252_emu`, `firmware/zmu`, `tools/zmu_*` или vendored guest emulator. `firmware/sim` остаётся только быстрым продуктовым mock для UI/protocol сценариев и не считается PHY6252 acceptance gate.
 
 Текущая проверка не подменяет production provisioning: factory identity находится в отдельном flash sector и пока не передаётся в Action. Подробно: [`../docs/chip-emulator.md`](../docs/chip-emulator.md).
 
@@ -89,15 +84,7 @@ CCCD защищён `GATT_PERMIT_ENCRYPT_WRITE`. Advertising содержит Se
 
 Серийный прибор обязан иметь валидный record в `0x1103F000..0x1103FFFF`.
 
-Record содержит:
-
-- `serial_number`;
-- hardware revision;
-- IRK/CSRK;
-- при необходимости static-random BLE address;
-- CRC.
-
-Без record firmware не начинает advertising. Runtime fallback на SNV MAC или случайную identity отсутствует.
+Record содержит serial, hardware revision, IRK/CSRK, optional static-random BLE address и CRC. Без record firmware не начинает advertising. Runtime fallback на SNV MAC или случайную identity отсутствует.
 
 Подробнее: [`../docs/factory-identity.md`](../docs/factory-identity.md).
 
@@ -123,8 +110,6 @@ Linker/scatter не позволяют application image занять SNV/factor
 | `0x84` | authentication lock |
 | `0x90..0xA3` | event journal |
 
-Identity keys и device address больше не хранятся в `0x82`.
-
 ## Provisioning
 
 ```sh
@@ -138,9 +123,7 @@ tools/flash_firmware.sh tmp/test-dpls.hex
 tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-`flash_factory_identity.sh` пишет ровно 64 байта через raw `we 0x3F000`. Не использовать `rdwr_phy62x2.py wh` для отдельного factory HEX: `wh` строит application segment table.
-
-Полный chip erase удаляет SNV и factory identity. `tools/flash_firmware.sh --erase` поэтому требует `DPLS_ALLOW_FACTORY_ERASE=1`, а после erase provisioning обязателен заново.
+`flash_factory_identity.sh` пишет ровно 64 байта через raw `we 0x3F000`. Полный chip erase удаляет SNV и factory identity; после erase provisioning обязателен заново.
 
 ## Hardware revision 2
 
@@ -155,13 +138,3 @@ Source of truth: `phy6252/dpls_board.h`.
 | Factory reset | P34 |
 
 Все control outputs = 0 соответствует `NORMAL`.
-
-## PHY6252 integration
-
-- SRAM0+SRAM1+SRAM2 остаются retained в текущей sleep-конфигурации;
-- filesystem должен монтироваться через `hal_fs_init(0x1103C000, 3)` до SNV;
-- watchdog feed из IRQ path сам по себе не доказывает liveness application task;
-- sleep блокируется, пока активен опасный режим;
-- floating-point ADC calibration оставлена в XIP, чтобы не расходовать retained SRAM.
-
-Аппаратная приёмка: [`../docs/bring-up-checklist.md`](../docs/bring-up-checklist.md).

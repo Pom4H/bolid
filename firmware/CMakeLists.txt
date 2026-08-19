@@ -5,7 +5,6 @@ set(CMAKE_C_STANDARD 99)
 option(ENABLE_COVERAGE "Instrument firmware/src for line coverage" OFF)
 
 enable_testing()
-add_subdirectory(phy6252_emu)
 
 add_library(test_dpls_server
     src/dpls_protocol.c
@@ -18,9 +17,13 @@ add_library(test_dpls_server
 target_include_directories(test_dpls_server PUBLIC include)
 target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
 
-add_executable(dpls_simulator sim/dpls_simulator.c sim/dpls_sim_board.c)
+add_executable(dpls_simulator
+    sim/dpls_simulator.c
+    sim/dpls_sim_board.c
+    sim/dpls_sim_transport.c
+)
 target_include_directories(dpls_simulator PRIVATE sim)
-target_link_libraries(dpls_simulator PRIVATE test_dpls_server phy6252_emu)
+target_link_libraries(dpls_simulator PRIVATE test_dpls_server)
 target_compile_options(dpls_simulator PRIVATE -Wall -Wextra -Werror)
 
 function(dpls_add_test name)
@@ -42,9 +45,13 @@ dpls_add_test(test_protocol tests/test_protocol.c)
 dpls_add_test(test_safety tests/test_safety.c)
 dpls_add_test(test_hmac tests/test_hmac.c)
 
-add_executable(test_sim_att tests/test_sim_att.c sim/dpls_sim_board.c)
+add_executable(test_sim_att
+    tests/test_sim_att.c
+    sim/dpls_sim_board.c
+    sim/dpls_sim_transport.c
+)
 target_include_directories(test_sim_att PRIVATE sim)
-target_link_libraries(test_sim_att PRIVATE test_dpls_server phy6252_emu)
+target_link_libraries(test_sim_att PRIVATE test_dpls_server)
 target_compile_options(test_sim_att PRIVATE -Wall -Wextra -Werror)
 if(ENABLE_COVERAGE)
     target_compile_options(test_sim_att PRIVATE --coverage)

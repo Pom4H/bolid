@@ -32,25 +32,19 @@ legacy_is_required() {
   local candidate="$1"
   local req
   for req in "${required[@]}"; do
-    if [[ "$(lower "$candidate")" == "$(lower "$req")" ]]; then
-      return 0
-    fi
+    if [[ "$(lower "$candidate")" == "$(lower "$req")" ]]; then return 0; fi
   done
   return 1
 }
 
 for path in "${legacy[@]}"; do
-  # macOS is case-insensitive: Firmware and firmware are the same directory.
-  if legacy_is_required "$path"; then
-    continue
-  fi
+  if legacy_is_required "$path"; then continue; fi
   if git ls-files -- "$path" | grep -q .; then
     echo "legacy path must not be tracked: $path" >&2
     exit 1
   fi
 done
 
-# Gradle module names are part of the public repository architecture.
 grep -q 'include(":wire")' mobile/settings.gradle.kts
 grep -q 'include(":runtime")' mobile/settings.gradle.kts
 grep -q 'include(":core")' mobile/settings.gradle.kts
@@ -58,7 +52,6 @@ grep -q 'include(":android")' mobile/settings.gradle.kts
 ! grep -q 'include(":app")' mobile/settings.gradle.kts
 ! grep -q 'include(":shared")' mobile/settings.gradle.kts
 
-# Dependency zones are represented by physical modules.
 test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
 test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsEncode.kt
 test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsDecode.kt
@@ -66,18 +59,12 @@ test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/Link
 test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt
 test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
 
-# One shared application/controller owns cross-platform product behavior.
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsApp.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTransport.kt
-
-# Old monolithic owners must not silently reappear.
 test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
 test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
 
-# Platform BLE adapters are the implemented transport boundary in this PR.
-# Future mesh/serial boundaries must arrive with the feature that consumes them,
-# not as unused runtime scaffolding.
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt
 test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsPlatformEffects.kt
 test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt
@@ -106,16 +93,10 @@ for path in "${duplicates[@]}"; do
   test ! -e "$path" || { echo "duplicate application layer must not exist: $path" >&2; exit 1; }
 done
 
-# Production iOS host is intentionally one Swift bootstrap file.
 test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" = "1"
-# Each OS has one BLE transport in the KMP product module.
 test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
-# PHY6252 integration must use the supported SDK boundary instead of reaching
-# into Link Layer RAM or an obsolete raw-MAC flash slot. Target manifests must
-# not compile unused example drivers. The key include path is intentionally
-# retained because vendor halPeripheral.h includes key.h transitively.
 identity=firmware/phy6252/dpls_ble_identity.c
 gnu_target=firmware/targets/phy6252/Makefile
 ac6_target=firmware/targets/phy6252/test-dpls.cproject.yml
@@ -134,26 +115,16 @@ for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
 done
 
 test -f tools/dpls_lab.sh
-test ! -e tools/dpls_board.sh
-test ! -e tools/dpls_bench.sh
-test ! -e tools/run_phy6252_zmu.sh
 test -f tools/dpls-lab/hub.ts
 test -f tools/dpls-lab/server.ts
-test ! -e tools/dpls-lab/cli.ts
-test ! -e tools/dpls-lab/bench.ts
 test -f mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt
-test ! -e tools/dpls-lab/src/App.tsx
-test ! -e tools/dpls-lab/src/main.tsx
-test ! -e tools/dpls-lab/src/session.ts
-test ! -e tools/dpls-lab/src/boardView.ts
-test ! -e tools/dpls-lab/index.html
-test ! -e tools/dpls-lab/src/protocol.ts
-test ! -e tools/dpls-lab/src/crypto.ts
-test ! -e tools/dpls-lab/src/ble.ts
+test -f firmware/sim/dpls_sim_transport.c
+test -f firmware/sim/dpls_sim_transport.h
 
-# Production HEX emulation belongs to the external Firmverse Action.
+# Production HEX emulation belongs only to the external Firmverse Action.
 test ! -e .gitmodules
 test ! -e third_party/phy6252-emu
+test ! -e firmware/phy6252_emu
 test ! -e firmware/zmu
 test ! -e tools/fetch_zmu.sh
 test ! -e tools/zmu_e2e.sh

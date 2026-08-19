@@ -136,7 +136,7 @@ commonMain → Android/CoreBluetooth/UIKit
 portable firmware/src → vendor SDK headers
 platform code → duplicate protocol/controller/UI
 mobile app → hardware safety decisions
-Bolid repo → vendored ZMU/guest HEX emulator
+Bolid repo → standalone PHY6252/ZMU/guest HEX emulator
 ```
 
 ## Где должны жить тесты
@@ -151,7 +151,7 @@ Bolid repo → vendored ZMU/guest HEX emulator
 - **production PHY6252 HEX execution → Firmverse GitHub Action**;
 - реальный radio/pairing/силовые выходы → hardware bring-up.
 
-`tools/check_repo_layout.sh` защищает проект от возврата дублирующих controllers, protocol facades, UI-деревьев и локального real-HEX emulator stack.
+`tools/check_repo_layout.sh` защищает проект от возврата дублирующих controllers, protocol facades, UI-деревьев и локального PHY6252 emulator stack.
 
 ## Правило разработки
 
@@ -170,6 +170,6 @@ PHY62XX SDK закреплён отдельно в `firmware/sdk/phy6252-sdk.env
 
 ## Эмуляция
 
-`firmware/phy6252_emu/` и `firmware/sim/` образуют быстрый **host product simulator** для lab/Soft-BLE. Он не исполняет production Intel HEX и не является PHY6252 acceptance gate.
+Быстрый product simulator целиком живёт в `firmware/sim/`. Его private transport моделирует только ATT queue/pacing для lab, replay и Soft-BLE. Он **не** исполняет Intel HEX, не моделирует Cortex-M0/MMIO/vendor ROM и не является PHY6252 acceptance gate.
 
-Production HEX исполняется только внешним [Firmverse](https://github.com/Pom4H/firmverse) через `Pom4H/firmverse@v1`. Старые `firmware/zmu/`, `tools/zmu_*` и `third_party/phy6252-emu` удалены из Bolid. Подробнее: [chip-emulator.md](chip-emulator.md).
+Production HEX исполняется только внешним [Firmverse](https://github.com/Pom4H/firmverse) через `Pom4H/firmverse@v1`. Standalone `firmware/phy6252_emu/`, `firmware/zmu/`, `tools/zmu_*` и `third_party/phy6252-emu` удалены из Bolid. Подробнее: [chip-emulator.md](chip-emulator.md).

@@ -2,7 +2,7 @@
 
 Проверка **реального production Intel HEX** вынесена из Bolid в отдельный open-source проект [Firmverse](https://github.com/Pom4H/firmverse).
 
-Bolid не должен хранить собственный ZMU/guest HEX runner или vendored-копию эмулятора. В GitHub Actions используется публичный Action:
+Bolid не хранит собственный PHY6252/ZMU emulator. В GitHub Actions используется публичный Action:
 
 ```yaml
 - uses: Pom4H/firmverse@v1
@@ -12,21 +12,21 @@ Bolid не должен хранить собственный ZMU/guest HEX runn
     strict: 'true'
 ```
 
-`@v1` — поддерживаемая compatibility line самого Firmverse. Action сам устанавливает Rust, подготавливает pinned zmu backend, собирает Firmverse и запускает firmware в deterministic single-node режиме.
+`@v1` — compatibility line Firmverse. Action сам подготавливает свой emulator backend и запускает firmware в deterministic single-node режиме.
 
 ## Что остаётся в Bolid
 
 | Путь | Назначение |
 |---|---|
-| `firmware/phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; **не запускает production HEX** |
-| `firmware/sim/` | Test-DPLS simulator для lab, replay и Soft-BLE сценариев |
+| `firmware/sim/` | быстрый продуктовый simulator для lab, replay и Soft-BLE; содержит только private ATT queue/pacing mock |
 | `tools/dpls-lab/` | host lab с тем же Compose UI |
 | `.github/workflows/ci.yml` | сборка production PHY6252 HEX и передача его в Firmverse |
 
-Host simulator нужен для быстрых protocol/UI сценариев. Он не является доказательством того, что target image работает на PHY6252, и не заменяет Firmverse.
+`firmware/sim` не исполняет target HEX и не моделирует Cortex-M0/MMIO/vendor ROM. Это быстрый mock продуктового протокола, а не эмулятор чипа.
 
 ## Что удалено из Bolid
 
+- `firmware/phy6252_emu/`;
 - `third_party/phy6252-emu` и `.gitmodules`;
 - `firmware/zmu/`;
 - `tools/fetch_zmu.sh`;
@@ -35,10 +35,10 @@ Host simulator нужен для быстрых protocol/UI сценариев. 
 - `tools/zmu_run_all.sh`;
 - ZMU-specific mobile interop test.
 
-Таким образом, в репозитории продукта больше нет собственного real-HEX emulator stack.
+Таким образом, в репозитории продукта нет второй реализации PHY6252 emulator stack.
 
-## Ограничение текущей проверки
+## Граница проверки
 
-Production firmware требует factory identity record в `0x1103F000..0x1103FFFF`. Текущий Firmverse Action принимает application HEX, но Bolid пока не передаёт ему отдельный factory record. Поэтому CI подтверждает загрузку/исполнение target HEX и fail-closed MMIO/vendor-ROM contract, но не должен называться полноценной проверкой production identity/BLE commissioning.
+Production firmware требует factory identity record в `0x1103F000..0x1103FFFF`. Текущий Firmverse Action получает application HEX, но Bolid пока не передаёт ему отдельный factory record. Поэтому Firmverse проверяет загрузку и исполнение target image/CPU/MMIO contract, но CI не должен выдавать это за полноценную проверку production provisioning и BLE commissioning.
 
-Когда Firmverse получит поддерживаемый способ предварительно заполнить factory flash, в CI можно добавить отдельный сценарий provisioning/advertising без возврата локального эмулятора в Bolid.
+Когда Firmverse получит поддерживаемый способ предварительно заполнить factory flash, этот сценарий надо добавить туда, а не возвращать локальный эмулятор в Bolid.

@@ -13,7 +13,7 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 1. **Firmware владеет hardware safety.** Телефон не может обойти таймауты, автоизоляцию и безопасный `NORMAL`.
 2. **Kotlin `commonMain` владеет общим поведением Android/iOS.** Здесь находятся `DplsClient`, protocol/crypto/domain/session и Compose UI.
 3. **Platform-код только адаптирует OS API.** Android/iOS не содержат вторых controllers, protocol codecs или независимых UI.
-4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный ZMU/guest HEX runner.
+4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный PHY6252/ZMU emulator.
 
 Подробнее: [docs/architecture.md](docs/architecture.md).
 
@@ -22,8 +22,7 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 | Путь | Назначение |
 |---|---|
 | `firmware/` | переносимый C99 server, PHY6252 HAL/GATT adapter, host tests и target builds |
-| `firmware/phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; не исполняет production HEX |
-| `firmware/sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE |
+| `firmware/sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE; не исполняет production HEX |
 | `mobile/core/` | общий KMP controller, protocol, crypto, domain/session, Compose UI и platform transports |
 | `mobile/android/` | Android shell и debug E2E |
 | `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
@@ -132,7 +131,7 @@ bash tools/dpls_lab.sh
     strict: 'true'
 ```
 
-Старые `firmware/zmu`, `tools/zmu_*` и `third_party/phy6252-emu` удалены. Детали: [docs/chip-emulator.md](docs/chip-emulator.md).
+Из Bolid удалены standalone `firmware/phy6252_emu`, `firmware/zmu`, `tools/zmu_*` и `third_party/phy6252-emu`. Быстрый продуктовый simulator остался только в `firmware/sim`. Детали: [docs/chip-emulator.md](docs/chip-emulator.md).
 
 ## Сборка firmware
 
@@ -173,24 +172,6 @@ tools/flash_factory_identity.sh tmp/factory-00012874.bin
 Factory record пишется raw-командой в offset `0x3F000`. Не использовать application `wh` для отдельного factory HEX.
 
 Полный chip erase стирает и factory identity, поэтому `tools/flash_firmware.sh --erase` требует явного `DPLS_ALLOW_FACTORY_ERASE=1` и после такого erase плата должна пройти provisioning заново.
-
-## Mobile
-
-```sh
-cd mobile
-./gradlew :core:testDebugUnitTest
-./gradlew :core:lintDebug :android:lintDebug :android:assembleDebug
-```
-
-На macOS:
-
-```sh
-./gradlew :core:iosSimulatorArm64Test
-./gradlew :core:linkDebugFrameworkIosSimulatorArm64
-open ios/TestDPLS.xcodeproj
-```
-
-Для Xcode/KMP требуется Java 17.
 
 ## BLE/GATT
 

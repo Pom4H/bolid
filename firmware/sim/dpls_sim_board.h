@@ -3,13 +3,13 @@
 
 #include "dpls_led.h"
 #include "dpls_server.h"
-#include "phy6252_emu.h"
+#include "dpls_sim_transport.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* DPLS product on top of the reusable PHY6252 emulator.
- * Queue sizes and ATT pacing come from phy6252_emu (same as the chip). */
+/* Product-level host simulator. Queue sizes and ATT pacing are private simulator
+ * transport details; production PHY6252 HEX is executed by Firmverse. */
 #define DPLS_SIM_RX_QUEUE_DEPTH PHY6252_EMU_RX_DEPTH
 #define DPLS_SIM_RX_SLOT_SIZE PHY6252_EMU_RX_SLOT
 #define DPLS_SIM_TX_QUEUE_DEPTH PHY6252_EMU_TX_DEPTH
