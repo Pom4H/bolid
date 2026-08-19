@@ -5,15 +5,9 @@
 #include "flash.h"
 #include "gap.h"
 #include "hci.h"
-#include "ll_enc.h"
 #include "osal_snv.h"
 #include "peripheral.h"
 #include <string.h>
-
-/* 0x82 was used by pre-factory-data builds. It is read only for migration of
- * development boards; new firmware never creates a random public-looking MAC. */
-#define DPLS_LEGACY_BLE_MAC_SNV_ID 0x82u
-#define DPLS_LEGACY_BLE_MAC_MAGIC 0x43414D44u /* "DMAC" */
 
 #define DPLS_FACTORY_MAGIC 0x31444944u /* bytes: "DID1" */
 #define DPLS_FACTORY_VERSION 1u
@@ -35,11 +29,6 @@
 #define DPLS_FACTORY_OFF_IRK 24u
 #define DPLS_FACTORY_OFF_CSRK 40u
 #define DPLS_FACTORY_OFF_CRC 62u
-
-typedef struct {
-    uint32_t magic;
-    uint8_t addr[B_ADDR_LEN];
-} dpls_legacy_ble_mac_record_t;
 
 typedef struct {
     uint32_t serial_number;
@@ -107,6 +96,7 @@ static bool factory_identity_load(dpls_factory_identity_t *out)
     if ((out->flags & (uint16_t)~DPLS_FACTORY_FLAGS_KNOWN) != 0u) return false;
     if ((out->flags & (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) !=
         (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) return false;
+
     memcpy(out->ble_addr, raw + DPLS_FACTORY_OFF_BLE_ADDR, B_ADDR_LEN);
     out->ble_addr_type = raw[DPLS_FACTORY_OFF_BLE_ADDR_TYPE];
     memcpy(out->irk, raw + DPLS_FACTORY_OFF_IRK, KEYLEN);
@@ -118,6 +108,7 @@ static bool factory_identity_load(dpls_factory_identity_t *out)
     } else if (out->ble_addr_type != DPLS_FACTORY_BLE_ADDR_CHIP_PUBLIC) {
         return false;
     }
+
     if (key_is_invalid(out->irk) || key_is_invalid(out->csrk)) return false;
     return true;
 }
@@ -135,27 +126,6 @@ static bool read_chip_factory_mac(uint8_t out[B_ADDR_LEN])
         out[i] = g_chipMAddr.mAddr[B_ADDR_LEN - 1u - i];
     }
     return !mac_is_invalid(out);
-}
-
-static bool legacy_snv_mac_is_usable(const uint8_t mac[B_ADDR_LEN])
-{
-    /* The legacy slot is accepted only if it looks like a public address.
-     * Static-random identity belongs in the CRC-protected factory record. */
-    return !mac_is_invalid(mac) && (mac[0] & 0xC0u) != 0xC0u;
-}
-
-static bool read_legacy_mac_snv(uint8_t out[B_ADDR_LEN])
-{
-    dpls_legacy_ble_mac_record_t record;
-    if (osal_snv_read(DPLS_LEGACY_BLE_MAC_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
-    if (record.magic != DPLS_LEGACY_BLE_MAC_MAGIC || !legacy_snv_mac_is_usable(record.addr)) return false;
-    memcpy(out, record.addr, B_ADDR_LEN);
-    return true;
-}
-
-static bool random_bytes(uint8_t *out, uint8_t length)
-{
-    return LL_ENC_GenerateTrueRandNum(out, length) == SUCCESS;
 }
 
 static void display_to_controller_addr(const uint8_t display[B_ADDR_LEN],
@@ -177,72 +147,25 @@ static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
 }
 
 static bool select_identity_address(const dpls_factory_identity_t *factory,
-                                    bool have_factory,
                                     uint8_t mac[B_ADDR_LEN],
                                     uint8_t *addr_type)
 {
-    if (have_factory && (factory->flags & DPLS_FACTORY_FLAG_BLE_STATIC) != 0u) {
+    if ((factory->flags & DPLS_FACTORY_FLAG_BLE_STATIC) != 0u) {
         memcpy(mac, factory->ble_addr, B_ADDR_LEN);
         *addr_type = ADDRTYPE_STATIC;
         return true;
     }
 
-    if (read_chip_factory_mac(mac)) {
-        *addr_type = ADDRTYPE_PUBLIC;
-        return true;
-    }
-
-    /* Migration path for already-flashed prototypes only. No address is ever
-     * generated here: a new series unit without a usable chip MAC must be
-     * provisioned with a static-random address in the factory record. */
-    if (!have_factory && read_legacy_mac_snv(mac)) {
-        *addr_type = ADDRTYPE_PUBLIC;
-        return true;
-    }
-    return false;
-}
-
-static bool read_key_snv(uint16_t snv_id, uint8_t out[KEYLEN])
-{
-    if (osal_snv_read(snv_id, KEYLEN, out) != SUCCESS) return false;
-    return !key_is_invalid(out);
-}
-
-static bool write_key_snv(uint16_t snv_id, const uint8_t key[KEYLEN])
-{
-    return osal_snv_write(snv_id, KEYLEN, (void *)key) == SUCCESS;
-}
-
-static bool ensure_identity_keys(const dpls_factory_identity_t *factory,
-                                 bool have_factory,
-                                 uint8_t irk[KEYLEN], uint8_t csrk[KEYLEN])
-{
-    if (have_factory) {
-        memcpy(irk, factory->irk, KEYLEN);
-        memcpy(csrk, factory->csrk, KEYLEN);
-        return true;
-    }
-
-    if (read_key_snv(BLE_NVID_IRK, irk) && read_key_snv(BLE_NVID_CSRK, csrk)) return true;
-    if (!random_bytes(irk, KEYLEN) || !random_bytes(csrk, KEYLEN)) return false;
-    if (!write_key_snv(BLE_NVID_IRK, irk) || !write_key_snv(BLE_NVID_CSRK, csrk)) return false;
+    if (!read_chip_factory_mac(mac)) return false;
+    *addr_type = ADDRTYPE_PUBLIC;
     return true;
-}
-
-static uint32_t development_id_from_mac(const uint8_t mac[B_ADDR_LEN])
-{
-    return (uint32_t)mac[0] | ((uint32_t)mac[1] << 8) |
-           ((uint32_t)mac[2] << 16) | ((uint32_t)mac[3] << 24);
 }
 
 void dpls_ble_identity_prepare(void)
 {
     dpls_factory_identity_t factory;
     uint8_t mac[B_ADDR_LEN];
-    uint8_t irk[KEYLEN];
-    uint8_t csrk[KEYLEN];
     uint8_t addr_type;
-    bool have_factory;
 
     s_identity_ready = false;
     s_identity_mac_valid = false;
@@ -250,17 +173,16 @@ void dpls_ble_identity_prepare(void)
     s_device_id = 0u;
 
     memset(&factory, 0, sizeof(factory));
-    have_factory = factory_identity_load(&factory);
-    if (!select_identity_address(&factory, have_factory, mac, &addr_type)) return;
-    if (!ensure_identity_keys(&factory, have_factory, irk, csrk)) return;
+    if (!factory_identity_load(&factory)) return;
+    if (!select_identity_address(&factory, mac, &addr_type)) return;
 
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_addr_type = addr_type;
-    s_device_id = have_factory ? factory.serial_number : development_id_from_mac(mac);
-    s_factory_provisioned = have_factory;
+    s_device_id = factory.serial_number;
+    s_factory_provisioned = true;
     s_identity_mac_valid = true;
-    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, irk);
-    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, csrk);
+    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, factory.irk);
+    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, factory.csrk);
 }
 
 void dpls_ble_identity_on_stack_started(void)
@@ -274,8 +196,8 @@ void dpls_ble_identity_on_stack_started(void)
     if (!s_identity_mac_valid) dpls_ble_identity_prepare();
     if (!s_identity_mac_valid) return;
 
-    /* PHY6252 may reject HCI_EXT_SetBDADDRCmd before the controller has fully
-     * started. Apply public identity here, after GAPROLE_STARTED, and let the
+    /* PR #32: PHY6252 may reject HCI_EXT_SetBDADDRCmd before the controller has
+     * fully started. Apply public identity after GAPROLE_STARTED and let the
      * idle tick retry this function if the controller is temporarily busy. */
     if (s_identity_addr_type == ADDRTYPE_PUBLIC && !set_controller_public_addr(s_identity_mac)) return;
 
@@ -303,8 +225,8 @@ void dpls_ble_identity_reset_bonding_keys(void)
 {
     uint8_t erased[KEYLEN];
     memset(erased, 0xFF, sizeof(erased));
-    /* This only clears SNV. Provisioned IRK/CSRK live in the immutable factory
-     * sector and are restored on reboot, so factory reset cannot change identity. */
+    /* Clear stack runtime/SNV copies only. Factory IRK/CSRK are restored from
+     * the mandatory factory record on the next boot. */
     (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
     (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
 }
