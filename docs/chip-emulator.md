@@ -1,26 +1,40 @@
-# Chip emulator boundary
+# Граница эмулятора PHY6252
 
-The PHY6252 hex runner lives in **[phy6252-emu](https://github.com/Pom4H/phy6252-emu)** (`third_party/phy6252-emu`). It is a **guest**, not a Test-DPLS product module. Bolid must not absorb zmu, MMIO, or kit-demo firmware as architecture.
+HEX-runner PHY6252 живёт в отдельном проекте **[phy6252-emu](https://github.com/Pom4H/phy6252-emu)** и подключён сюда как `third_party/phy6252-emu`. Это внешний guest-компонент, а не модуль продукта Test-DPLS. Архитектура Bolid не должна поглощать его zmu/MMIO/HLE-код.
 
-## Two different zmu uses
+## Три разных слоя эмуляции
 
-| Path | What it is | Where it lives |
-|---|---|---|
-| `firmware/zmu/` | Portable C99 + `sim/` board compiled for Cortex-M0 | Product E2E. Stays in this repo. |
-| `third_party/phy6252-emu/` | Intel HEX on zmu Cortex-M0 + PHY bus + ATT mailbox | Chip emulator. Source: [Pom4H/phy6252-emu](https://github.com/Pom4H/phy6252-emu). |
+| Путь | Назначение |
+|---|---|
+| `firmware/zmu/` | переносимый C99 firmware core + `sim/`, собранный под Cortex-M0; продуктовый E2E этого репозитория |
+| `firmware/phy6252_emu/` | host C-модель специфики ATT/OSAL/SNV PHY6252 |
+| `third_party/phy6252-emu/` | отдельный guest emulator: Intel HEX на zmu + PHY bus/ATT mailbox |
 
-`firmware/phy6252_emu/` is a third thing: host ATT/OSAL/SNV model in C. It is not the hex runner.
+Эти слои решают разные задачи и не должны сливаться.
 
-Bolid launches the **host** emulator one way: `bash tools/dpls_lab.sh` (`dpls_simulator` + wasm phone). To run the guest hex runner, use that repo:
+## Запуск
+
+Основной host lab Test-DPLS:
+
+```sh
+bash tools/dpls_lab.sh
+```
+
+Он запускает `dpls_simulator` и общий wasm-клиент.
+
+Guest HEX runner запускается из своего проекта:
 
 ```sh
 cd third_party/phy6252-emu
 cargo run --release -- --raw
 ```
 
-## What Bolid must not grow
+## Чего не должно появляться в Bolid
 
-- A second copy of the hex runner under `tools/phy6252-zmu` or `firmware/`
-- A second Bolid launcher for the same host simulator (`dpls_board.sh`, `run_phy6252_zmu.sh`)
-- A second protocol crate or `tools/dpls-lab/src/protocol.ts` for hex GATT
-- HLE / MMIO / TinyCrypt code under `firmware/` or `mobile/`
+- второй HEX runner под `tools/` или `firmware/`;
+- второй launcher для того же `dpls_simulator`;
+- отдельная TypeScript-копия Test-DPLS wire protocol только ради emulator bridge;
+- копии HLE/MMIO/TinyCrypt из `phy6252-emu` внутри product firmware/mobile;
+- зависимость продукта от внутренних деталей guest emulator.
+
+Если эмулятору нужна новая возможность, сначала меняется его собственный контракт, а Bolid использует этот контракт через узкую границу.
