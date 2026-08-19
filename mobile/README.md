@@ -14,7 +14,7 @@ Test-DPLS has one Kotlin Multiplatform application for Android and iOS.
 | `ios/` | Xcode project, plist/assets and one minimal Swift bootstrap |
 | `web/` | wasm Compose host (`LabBleTransport`) |
 
-Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`), matching firmware `DPLS_FW_VERSION_*`.
+Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`). Current PHY6252 firmware is **1.4.2**; both use DPLS wire protocol v2. BLE scan identifies the product by the project Service UUID and `Test-DPLS-XXXX` name. Full serial, firmware version, hardware revision, capabilities and the user-assigned name come from `DEVICE_INFO_REPORT` after connection.
 
 The rule is simple: **if Android and iOS should produce the same answer or show the same product behavior, put it in `commonMain`.** Platform code only translates operating-system APIs into `DplsTransport` events.
 
@@ -101,5 +101,7 @@ Without a physical phone, `bash tools/soft_ble_e2e.sh` runs the product `DplsCli
 | Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` |
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
+
+Pairing is driven by the encrypted CCCD write required by current firmware; the mobile app does not infer security requirements from Manufacturer Specific Data.
 
 A mode is application-visible only after firmware returns the matching `COMMAND_RESULT` and the following `STATE_REPORT`; a successful GATT write is never treated as proof of hardware state.
