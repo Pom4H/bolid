@@ -108,3 +108,7 @@ build_gcc() {
 }
 
 if [ "$TOOLCHAIN" = "gcc" ]; then build_gcc; else build_keil; fi
+if [ ! -s "$OUT" ]; then
+    echo "error: firmware build did not produce a non-empty HEX: $OUT" >&2
+    exit 1
+fi
