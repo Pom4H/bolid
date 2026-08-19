@@ -3,8 +3,9 @@
 #
 #   tools/flash_firmware.sh <файл.hex> [--erase]
 #
-# --erase стирает весь чип, ВКЛЮЧАЯ SNV (журнал, настройки, бонды).
-# Без него обновляются только секторы приложения, данные сохраняются.
+# Обычная прошивка обновляет только сектора из HEX и сохраняет SNV и factory
+# identity. --erase стирает ВЕСЬ чип, включая серийный номер/ключи в 0x1103F000,
+# поэтому для него требуется явное DPLS_ALLOW_FACTORY_ERASE=1.
 #
 # RTS/DTR у адаптера кита не разведены, автосброс невозможен:
 #   1) зажмите KEY1 (на шелке RST/PROG — кнопка рубит питание чипа);
@@ -18,7 +19,18 @@ PORT="${PORT:-$(ls /dev/cu.wchusbserial* 2>/dev/null | head -1)}"
 [ -n "$PORT" ] || { echo "USB-UART адаптер (CH340) не найден" >&2; exit 1; }
 
 ARGS=(-p "$PORT" -r wh "$HEX")
-[ "${2:-}" = "--erase" ] && ARGS=(-p "$PORT" -a -r wh "$HEX")
+if [ "${2:-}" = "--erase" ]; then
+  if [ "${DPLS_ALLOW_FACTORY_ERASE:-0}" != "1" ]; then
+    cat >&2 <<'EOF'
+ОТКАЗ: --erase стирает factory identity (серийный номер, BLE identity keys).
+Для непровиженного прототипа можно повторить с DPLS_ALLOW_FACTORY_ERASE=1.
+На серийном приборе после полного стирания factory identity нужно восстановить
+из производственной записи до запуска изделия.
+EOF
+    exit 2
+  fi
+  ARGS=(-p "$PORT" -a -r wh "$HEX")
+fi
 
 echo "Порт: $PORT — зажмите KEY1 и отпустите на строке «Turn on the power»"
 PYTHONPATH="$ROOT/.python-deps" exec python3 "$ROOT/third_party/phy62x2/Utils/rdwr_phy62x2.py" "${ARGS[@]}"
