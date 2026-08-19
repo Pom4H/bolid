@@ -4,8 +4,8 @@
 
 /* SDK main() starts with WDG_2S. Keep that as the normal failure detector and
  * widen it only while the flash driver owns the CPU. The runtime log captured
- * warm resets immediately after osal_snv_write, so allowing random modules to
- * feed the watchdog would hide the actual scheduling bug instead of bounding
+ * warm resets immediately after a journal SNV write, so allowing random modules
+ * to feed the watchdog would hide the actual scheduling bug instead of bounding
  * the one known blocking resource. */
 static uint8_t blocking_depth;
 
