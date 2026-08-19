@@ -154,6 +154,11 @@ void dpls_phy6252_runtime_disconnected(void)
     schedule_storage_if_needed();
 }
 
+void dpls_phy6252_runtime_pairing_state(uint8 state, uint8 status)
+{
+    dpls_phy6252_transport_pairing_state(state, status);
+}
+
 void dpls_phy6252_runtime_process_rx(void)
 {
     uint16 length = 0u;
