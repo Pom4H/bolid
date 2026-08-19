@@ -17,6 +17,7 @@ def assert_hex_checksums(text: str) -> None:
 def assert_source_contract() -> None:
     identity = Path("firmware/phy6252/dpls_ble_identity.c").read_text(encoding="utf-8")
     peripheral = Path("firmware/targets/phy6252/source/dplsBLEPeripheral.c").read_text(encoding="utf-8")
+    gatt = Path("firmware/phy6252/dpls_gatt_service.c").read_text(encoding="utf-8")
     scatter = Path("firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
     gcc_ld = Path("firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
 
@@ -26,7 +27,9 @@ def assert_source_contract() -> None:
     assert "write_mac_snv" not in identity
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
+    assert "HCI_EXT_SetBDADDRCmd" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
+    assert "!link_up && !dpls_ble_identity_is_ready()" in peripheral
 
     # Provisioned records are complete identities, not just serial-number tags.
     assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
@@ -34,6 +37,13 @@ def assert_source_contract() -> None:
     # A foreign/unallocated Company ID must not creep back into new firmware.
     assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
     assert "0x01, 0x0b" not in peripheral.lower()
+
+    # Pairing/security is expressed by GATT permissions, not by an advertising
+    # marker. Android already handles auth/encryption errors on CCCD writes.
+    assert (
+        "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | "
+        "GATT_PERMIT_ENCRYPT_WRITE"
+    ) in gatt
 
     # Both production linkers must leave the final 4 KiB sector untouched.
     assert "0x01F000" in scatter
