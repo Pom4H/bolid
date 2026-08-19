@@ -29,6 +29,8 @@ def assert_source_contract() -> None:
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
     assert "HCI_EXT_SetBDADDRCmd" in identity
+    assert "display_to_controller_addr" in identity
+    assert "GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, static_controller_addr)" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
     assert "!link_up && !dpls_ble_identity_is_ready()" in peripheral
 
