@@ -130,6 +130,7 @@ APP_SOURCES := \
 	$(FW)/phy6252/dpls_phy6252_outputs.c \
 	$(FW)/phy6252/dpls_phy6252_runtime.c \
 	$(FW)/phy6252/dpls_phy6252_storage.c \
+	$(FW)/phy6252/dpls_phy6252_storage_ble.c \
 	$(FW)/phy6252/dpls_phy6252_supervisor.c \
 	$(FW)/phy6252/dpls_phy6252_transport.c \
 	system_gcc.c
