@@ -29,18 +29,13 @@
 static uint8 app_task_id;
 static uint8 link_up;
 
-/* ADV is already 29/31 bytes (flags + 128-bit UUID + manufacturer id).
- * Firmware version rides in the scan response; Android concatenates the two
- * manufacturer payloads for company 0x0B01 into id + status + major.minor.patch. */
+/* The air contract intentionally uses only the project 128-bit service UUID
+ * plus the human-readable Test-DPLS-XXXX name. Do not put an unassigned or a
+ * third-party Bluetooth SIG Company Identifier into Manufacturer Specific Data.
+ * Full serial/status/firmware are read through the authenticated GATT protocol. */
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'T','e','s','t','-','D','P','L','S','-','0','0','0','0',
-    0x08, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01, 0x0b,
-    0x00,
-    DPLS_FW_VERSION_MAJOR,
-    DPLS_FW_VERSION_MINOR,
-    DPLS_FW_VERSION_PATCH
+    'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
 };
 
 static uint8 advertising_data[] = {
@@ -48,10 +43,7 @@ static uint8 advertising_data[] = {
     GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
     0x11, GAP_ADTYPE_128BIT_COMPLETE,
     0x01,0x00,0xf0,0xd5,0xb7,0x14,0x4c,0x9a,
-    0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b,
-    0x07, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01,0x0b,
-    0x00,0x00,0x00,0x00
+    0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b
 };
 
 static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
@@ -73,10 +65,20 @@ static void apply_identity_to_adv(void)
         device_name[10 + i] = (uint8)suffix[i];
     }
     device_name[14] = '\0';
-    advertising_data[25] = (uint8)(id);
-    advertising_data[26] = (uint8)(id >> 8);
-    advertising_data[27] = (uint8)(id >> 16);
-    advertising_data[28] = (uint8)(id >> 24);
+}
+
+/* Refresh every identity-bearing GAP value immediately before advertising.
+ * A failed early PHY6252 HCI address update must never leak a controller
+ * default address or Test-DPLS-0000 into the air. */
+static bool enable_advertising_if_identity_ready(void)
+{
+    uint8 enabled = TRUE;
+    if (!dpls_ble_identity_is_ready()) return false;
+    apply_identity_to_adv();
+    GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
+    GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+    return true;
 }
 
 /* Steps the LED and re-arms the timer only while there is something to show, so
@@ -91,14 +93,14 @@ static void schedule_led_if_needed(void)
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
-    case GAPROLE_STARTED: {
-        uint8 enabled = TRUE;
+    case GAPROLE_STARTED:
+        /* HCI_EXT_SetBDADDRCmd may reject a pre-start request. Identity is
+         * applied after GAP is live and advertising stays disabled until ready. */
         dpls_ble_identity_on_stack_started();
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+        (void)enable_advertising_if_identity_ready();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
-    }
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
@@ -108,14 +110,12 @@ static void state_changed(gaprole_States_t state)
         break;
     }
     case GAPROLE_WAITING:
-    case GAPROLE_WAITING_AFTER_TIMEOUT: {
-        uint8 enabled = TRUE;
+    case GAPROLE_WAITING_AFTER_TIMEOUT:
         link_up = FALSE;
         dpls_phy6252_disconnected();
         schedule_led_if_needed(); /* turn an interrupted identify off immediately */
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+        (void)enable_advertising_if_identity_ready();
         break;
-    }
     default:
         break;
     }
@@ -236,6 +236,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
+        if (!link_up && !dpls_ble_identity_is_ready()) {
+            dpls_ble_identity_on_stack_started();
+            (void)enable_advertising_if_identity_ready();
+        }
         dpls_phy6252_tick();
         schedule_led_if_needed();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,

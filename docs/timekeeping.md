@@ -1,40 +1,54 @@
-# Timekeeping and event timestamps
+# Время и отметки событий
 
-Test-DPLS deliberately keeps two time concepts separate.
+Test-DPLS намеренно разделяет монотонное время и календарное UTC.
 
-## Monotonic time
+## Монотонное время
 
-PHY6252 integration obtains milliseconds from `osal_GetSystemClock()`. This monotonic value is the only clock used for safety and protocol deadlines: dangerous-mode timeout, session timeout, identify timeout, factory-reset hold timing, BLE TX deadlines and similar logic.
+Интеграция PHY6252 получает миллисекунды из `osal_GetSystemClock()`. Это время используется для safety/protocol deadlines:
 
-Changing or synchronizing calendar time cannot extend or shorten any of those deadlines.
+- таймаута опасного режима;
+- таймаута сессии;
+- identify timeout;
+- удержания кнопки factory reset;
+- BLE TX timeout и других внутренних deadlines.
 
-The PHY62XX SDK derives its timing from the chip's low-frequency clock domain. The target currently uses the SDK's internal 32 kHz RC clock configuration. No periodic flash write is involved: current monotonic time lives in volatile runtime state.
+Синхронизация календарного времени не может продлить или сократить эти интервалы. Монотонное состояние живёт в RAM и не требует периодической записи flash.
 
-## Calendar UTC for the journal
+Конкретный физический источник low-frequency clock не считается контрактом этого документа: при изменении clock/power конфигурации PHY6252 он должен проверяться отдельно по pinned SDK и target configuration.
 
-After successful DPLS authentication, the mobile client sends `TIME_SYNC (0x0b)`:
+## UTC для журнала
 
-- `session_id`: 4 bytes, little-endian
-- `session_token`: 8 bytes
-- Unix UTC seconds: 4 bytes, little-endian
+После успешной application-аутентификации мобильный клиент отправляет `TIME_SYNC (0x0B)`:
 
-The firmware accepts the message only for the authenticated session and rejects clearly invalid dates outside 2020-01-01 through 2099-12-31.
+```text
+session_id      4 bytes LE
+session_token   8 bytes
+unix_utc        4 bytes LE
+```
 
-The synchronized UTC anchor is RAM-only. Firmware advances it from the same monotonic millisecond source on each server update. This means time continues through normal PHY6252 sleep without writing flash every second.
+Firmware принимает синхронизацию только в аутентифицированной сессии и отклоняет значения вне поддерживаемого диапазона 2020-01-01…2099-12-31.
 
-When a journal event occurs:
+UTC anchor хранится только в RAM. Дальше firmware продвигает его по тому же монотонному счётчику миллисекунд.
 
-- if UTC has been synchronized since boot, `timestamp_seconds` is Unix UTC seconds;
-- otherwise `timestamp_seconds` remains uptime seconds, preserving useful ordering before the first phone connection and compatibility with existing journal records.
+При записи события:
 
-Only the event record itself is written to SNV/flash. `TIME_SYNC` does not write the clock to flash.
+- если UTC уже синхронизирован после текущего boot, `timestamp_seconds` содержит Unix UTC;
+- если синхронизации ещё не было, `timestamp_seconds` содержит uptime seconds.
 
-## Power loss
+В flash/SNV записывается само событие. `TIME_SYNC` отдельно календарные часы во flash не сохраняет.
 
-A complete power loss invalidates the calendar anchor. On the next boot the device immediately has monotonic uptime again, but it cannot know how long it was unpowered. Calendar time becomes valid again after the next authenticated phone connection.
+## Полное снятие питания
 
-Consequently, an event generated after a cold boot but before the first synchronization has uptime rather than a calendar timestamp. Guaranteeing calendar time during a fully unpowered interval would require a separately powered RTC/time source.
+После cold boot календарный anchor неизвестен: прибор знает uptime, но не знает, сколько времени был выключен. UTC снова становится достоверным после следующего аутентифицированного подключения телефона.
 
-## Mobile presentation
+Поэтому события между cold boot и первым `TIME_SYNC` имеют uptime timestamp. Для гарантированного календарного времени без телефона потребовался бы отдельный RTC/источник времени, которого текущая архитектура не предполагает.
 
-The shared Android/iOS application recognizes timestamps in the supported Unix range as UTC and formats them as `YYYY-MM-DD HH:MM:SS UTC`. Older/pre-sync records remain displayed as `+HH:MM:SS` uptime. CSV export includes a `time_basis` column (`utc` or `uptime`) so mixed journals remain unambiguous.
+## Отображение в приложении
+
+Общий Android/iOS код различает поддерживаемый Unix timestamp и uptime:
+
+- UTC показывается как календарная дата/время;
+- pre-sync event — как время от старта;
+- CSV export содержит `time_basis` (`utc` или `uptime`), поэтому смешанный журнал остаётся однозначным.
+
+Safety logic никогда не использует календарное UTC как источник deadlines.

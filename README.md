@@ -1,220 +1,191 @@
 # Test-DPLS
 
-Firmware and mobile software for a BLE-controlled DPLS test device based on PHY6252 / PB-03F.
+Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6252 / PB-03F.
 
-The repository follows three ownership rules:
+Текущие версии:
 
-1. **firmware owns hardware safety**;
-2. **Kotlin `commonMain` owns the product behavior shared by Android and iOS**;
-3. **platform code only adapts operating-system APIs and application entry points**.
+- PHY6252 firmware: **1.4.2**;
+- Android/iOS: **1.4.1**;
+- wire protocol: **v2**.
 
-## Repository layout
+## Главные архитектурные правила
 
-| Path | Purpose |
+1. **Firmware владеет hardware safety.** Телефон не может обойти таймауты, автоизоляцию и безопасный `NORMAL`.
+2. **Kotlin `commonMain` владеет общим поведением Android/iOS.** Здесь находятся `DplsClient`, protocol/crypto/domain/session и Compose UI.
+3. **Platform-код только адаптирует OS API.** Android/iOS не содержат вторых controllers, protocol codecs или независимых UI.
+4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный PHY6252/ZMU emulator.
+
+Подробнее: [docs/architecture.md](docs/architecture.md).
+
+## Структура репозитория
+
+| Путь | Назначение |
 |---|---|
-| `firmware/` | Portable C99 server, PHY6252 HAL/GATT adapter and target builds |
-| `firmware/zmu/` | Cortex-M0 E2E of the **portable** board (`sim/`), not phy6252-emu |
-| `mobile/core/` | Kotlin Multiplatform `DplsClient`, protocol/crypto/domain/session code and shared Compose UI |
-| `mobile/android/` | Android shell: permissions, Activity, debug E2E (version **1.4.1**) |
-| `mobile/ios/` | Minimal Xcode host: metadata, assets and one tiny Swift bootstrap (version **1.4.1**) |
-| `mobile/web/` | Compose wasm phone (`LabBleTransport` over WebSocket) |
-| `docs/` | Architecture, bring-up and PHY6252 engineering references |
-| `tools/` | Build, flash, lint, coverage, lab and one-command checks |
-| `tools/dpls-lab/` | Hub: `dpls_lab.sh` starts `dpls_simulator` + wasm phone |
-| `third_party/phy62x2/` | Vendored PHY62x2 utilities and reference material |
-| `third_party/phy6252-emu/` | Guest PHY6252 hex emulator ([Pom4H/phy6252-emu](https://github.com/Pom4H/phy6252-emu)) |
+| `firmware/` | переносимый C99 server, PHY6252 HAL/GATT adapter, host tests и target builds |
+| `firmware/sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE; не исполняет production HEX |
+| `mobile/core/` | общий KMP controller, protocol, crypto, domain/session, Compose UI и platform transports |
+| `mobile/android/` | Android shell и debug E2E |
+| `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
+| `mobile/web/` | тот же Compose UI поверх `LabBleTransport` |
+| `docs/` | архитектура, production identity, bring-up и технические reference |
+| `tools/` | build/flash/check/lab/session utilities |
 
-The production PHY62XX SDK is **not vendored**. Target builds fetch the SDK commit pinned as **3.1.2** in `firmware/sdk/phy6252-sdk.env`.
+Production PHY62XX SDK не vendored: точная версия **3.1.2** закреплена в `firmware/sdk/phy6252-sdk.env`.
+
+## Серийная identity
+
+Новая схема не поддерживает legacy identity прототипов.
+
+Каждая плата до запуска BLE должна иметь валидный factory record:
+
+- `serial_number` — полный 32-битный `device_id`;
+- IRK/CSRK;
+- источник BLE address: заводской public MAC PHY6252 либо provisioned static-random address;
+- hardware revision;
+- CRC.
+
+Factory record хранится отдельно в `0x1103F000..0x1103FFFF`. Без него firmware **не начинает advertising**.
+
+В эфире остаются только:
+
+- BLE flags;
+- фирменный 128-bit Service UUID;
+- имя `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит serial.
+
+Полный serial, firmware version, hardware revision, capabilities и пользовательское имя приходят только через `DEVICE_INFO_REPORT`. Суффикс `XXXX` не считается полным `NodeId`.
+
+Подробно: [docs/factory-identity.md](docs/factory-identity.md).
 
 ## Mobile architecture
 
-There is one application controller, one UI and one protocol implementation:
-
 ```text
-                    Test-DPLS BLE wire contract
-                              │
-                    ┌─────────▼──────────┐
-                    │ mobile/core/       │
-                    │ commonMain         │
-                    │                    │
-                    │ DplsClient         │
-                    │ protocol + crypto  │
-                    │ domain + session   │
-                    │ message parsers    │
-                    │ DplsApp Compose UI │
-                    └─────────┬──────────┘
-                              │ DplsTransport
-                 ┌────────────┴────────────┐
-                 │                         │
-        Android platform edge              iOS platform edge
-        core/androidMain                  core/iosMain
-        AndroidBleTransport               IosBleTransport
-        AndroidPlatformServices           IosPlatformServices
-                 │                                 │
-        mobile/android/                    mobile/ios/
-        Activity + permissions             Xcode + one Swift bootstrap
-                 └────── same DplsClient + DplsApp ──────┘
+                 Test-DPLS wire protocol v2
+                          │
+                ┌─────────▼─────────┐
+                │ commonMain        │
+                │ DplsClient        │
+                │ protocol/crypto   │
+                │ domain/session    │
+                │ DplsApp Compose   │
+                └─────────┬─────────┘
+                          │ DplsTransport
+                 ┌────────┴────────┐
+                 │                 │
+          Android adapter     iOS adapter
+                 │                 │
+          Android shell       Xcode shell
 ```
 
-`commonMain` contains no Android or Apple framework APIs. Android and iOS implement only the `DplsTransport`/platform-services boundary. Swift does not contain a second BLE client, protocol, crypto model or SwiftUI application.
-
-See [docs/architecture.md](docs/architecture.md) for the detailed ownership rules.
+Swift не содержит отдельный BLE client или SwiftUI-копию приложения.
 
 ## Safety model
 
-The phone is never the safety boundary. Firmware owns the final electrical state.
+Firmware гарантирует:
 
-- boot and disconnect force `NORMAL`;
-- dangerous test modes have a hard timeout;
-- session timeout returns the device to `NORMAL`;
-- low reserve and real-short isolation override requested modes;
-- output switching is break-before-make;
-- authentication lock can persist across reconnect/reboot;
-- ATT indications are serialized and advance only after confirmation.
+- boot/disconnect/error → `NORMAL`;
+- hard timeout опасного режима;
+- session timeout → `NORMAL`;
+- low reserve / real-short override;
+- break-before-make;
+- persistent authentication lock;
+- сериализованный ATT TX.
 
-A mobile crash, reconnect bug or stale UI state must not be able to keep a dangerous output active indefinitely.
+Успешный GATT write не считается подтверждением физического режима. UI меняет состояние только после `COMMAND_RESULT` и последующего `STATE_REPORT`.
 
-## Developer quick start
+## Быстрые проверки
 
-Run the complete mobile loop from the repository root:
-
-```sh
-bash tools/check_mobile.sh
-```
-
-Run all host-side repository checks:
+Полный host-side набор:
 
 ```sh
 bash tools/check_all.sh
 ```
 
-On macOS, `check_mobile.sh` also runs Kotlin/Native simulator tests, links `DplsCore` and executes the Xcode integration smoke test. Physical BLE behavior still requires a real phone/device pair.
-
-### Device-free firmware ↔ mobile E2E (zmu)
-
-Run the portable firmware core on a Cortex-M0 emulator and verify the responses with Kotlin wire encoders — no PB-03F or phone required:
+Mobile loop:
 
 ```sh
-# needs: rustc/cargo, arm-none-eabi-gcc, JDK 17+
-bash tools/fetch_zmu.sh          # clones https://github.com/jjkt/zmu and builds zmu-cortex-m0
-bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
-# covers: all firmware/tests/* on Cortex-M0 + phone-E2E protocol matrix (modes/settings/journal)
+bash tools/check_mobile.sh
 ```
 
-### Soft-BLE product stack (host simulator)
-
-Exercise real `DplsClient` against host `dpls_simulator` over a stdio “soft-BLE” transport — no phone and no PHY6252 radio:
+Soft-BLE product E2E:
 
 ```sh
-# needs: cmake, JDK 17+
 bash tools/soft_ble_e2e.sh
-# covers: connect/auth, all test modes, rename, journal, identify LED, real-short reject, low reserve
 ```
 
-This is not a substitute for the Chinese board’s BLE/ADC/SNV stack; it covers the shared product protocol path on the host.
-
-### Host wasm phone (simulator + laptop BLE)
+Host lab с тем же Compose UI:
 
 ```sh
 bash tools/dpls_lab.sh
 # http://127.0.0.1:8787
 ```
 
-Same Compose `DplsApp` as Android/iOS (`mobile/web`). Details: [tools/dpls-lab/README.md](tools/dpls-lab/README.md).
+### Production HEX / Firmverse
 
-The chip hex runner is a git submodule (`third_party/phy6252-emu`); Bolid does not launch it. See [docs/chip-emulator.md](docs/chip-emulator.md).
+Реальный GCC target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse):
 
-Current firmware and phone version is **1.4.1** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
-
-### Capture real phone↔board sessions (for simulator fidelity)
-
-Record live logcat (BLE frames + client `STATE`/`E2E` markers) and optionally UART, then parse/replay into `dpls_simulator`:
-
-```sh
-python3 tools/session_capture/record_session.py --name lab
-python3 tools/session_capture/parse_session.py tmp/sessions/session-*-lab.log
-python3 tools/session_capture/test_session_capture.py   # offline smoke
+```yaml
+- uses: Pom4H/firmverse@v1
+  with:
+    firmware: tmp/test-dpls-firmverse.hex
+    board: pb03f-kit
+    strict: 'true'
 ```
 
-See `tools/session_capture/README.md`.
+Из Bolid удалены standalone `firmware/phy6252_emu`, `firmware/zmu`, `tools/zmu_*` и `third_party/phy6252-emu`. Быстрый продуктовый simulator остался только в `firmware/sim`. Детали: [docs/chip-emulator.md](docs/chip-emulator.md).
 
-### Firmware
+## Сборка firmware
+
+Host tests:
 
 ```sh
 cmake -S firmware -B firmware/build
 cmake --build firmware/build
 ctest --test-dir firmware/build --output-on-failure
-# phy6252_emu is the reusable PHY6252 ATT/OSAL host model; DPLS sim/zmu sit on top of it.
+```
 
-# PHY6252 target
+PHY6252 targets:
+
+```sh
 tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 ```
 
-### Mobile
+## Provisioning и прошивка платы
+
+Для новой платы сначала создаётся индивидуальный factory record:
 
 ```sh
-cd mobile
-./gradlew :core:testDebugUnitTest
-./gradlew :core:lintDebug :android:lintDebug :android:assembleDebug
+python3 tools/make_factory_identity.py \
+  --serial 12874 \
+  --hw-revision 2 \
+  --binary-output tmp/factory-00012874.bin \
+  --metadata tmp/factory-00012874.json
 ```
 
-On macOS:
+Затем:
 
 ```sh
-cd mobile
-./gradlew :core:iosSimulatorArm64Test
-./gradlew :core:linkDebugFrameworkIosSimulatorArm64
-cd ..
-xcodebuild test \
-  -project mobile/ios/TestDPLS.xcodeproj \
-  -scheme TestDPLS \
-  -destination 'platform=iOS Simulator,name=iPhone 16' \
-  CODE_SIGNING_ALLOWED=NO
+tools/flash_firmware.sh tmp/test-dpls.hex
+tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-## Where to make changes
+Factory record пишется raw-командой в offset `0x3F000`. Не использовать application `wh` для отдельного factory HEX.
 
-- Shared screen/presentation behavior → `mobile/core/src/commonMain/.../app/`.
-- Protocol, auth or binary contract → `mobile/core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
-- Session secret/runtime rules → `mobile/core/src/commonMain/.../session/`.
-- Android Bluetooth/lifecycle quirk → `mobile/android/`.
-- iOS CoreBluetooth/lifecycle quirk → `mobile/core/src/iosMain/`.
-- Xcode signing/assets/capabilities → `mobile/ios/`.
+Полный chip erase стирает и factory identity, поэтому `tools/flash_firmware.sh --erase` требует явного `DPLS_ALLOW_FACTORY_ERASE=1` и после такого erase плата должна пройти provisioning заново.
 
-An ordinary product feature should normally require **one shared Kotlin change**, not parallel Android + Swift implementations.
+## BLE/GATT
 
-## Test strategy
+| Элемент | UUID |
+|---|---|
+| Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` |
+| RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
+| TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-Behavior-heavy checks live at the lowest reusable layer:
-
-- firmware host tests + coverage + cppcheck;
-- zmu Cortex-M0 E2E (Kotlin request vectors → ARM firmware server → Kotlin response checks);
-- CRC known-answer and all-message frame round trips;
-- 10,000 randomized malformed decoder inputs;
-- 2,000 randomized valid frame round trips;
-- binary auth/command/state/device-info/journal contracts;
-- PBKDF2/HMAC/SHA-256 known-answer vectors;
-- shared `DplsClient` fake-transport tests including stale command-id rejection and reconnect safety;
-- the same KMP common tests on JVM and Kotlin/Native;
-- Android adapter lint/build;
-- native Xcode/KMP integration smoke test.
-
-The repository layout check also rejects reintroducing duplicate platform controllers, UI trees or protocol facades.
-
-## GATT
-
-| Characteristic | UUID | Direction |
-|---|---|---|
-| Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` | — |
-| RX | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` | app → device (WRITE) |
-| TX | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` | device → app (INDICATE/NOTIFY) |
-
-Frame format: `version / type / flags / sequence / length / payload / CRC16-CCITT-FALSE`.
+CCCD требует encrypted write. Manufacturer Specific Data в текущем контракте нет.
 
 ## Hardware revision 2
 
-| Function | GPIO |
+| Функция | GPIO |
 |---|---|
 | ISO_1 / ISO_2 / ISO_T | P31 / P32 / P33 |
 | KZ_1 / KZ_2 / KZ_T | P14 / P16 / P17 |
@@ -222,18 +193,6 @@ Frame format: `version / type / flags / sequence / length / payload / CRC16-CCIT
 | RGB R / G / B | P7 / P11 / P18 |
 | Factory reset | P34 |
 
-![PB-03F-Kit ↔ power-stage pinout](docs/hardware/pb03f-kit-power-pinout.png)
+Логика силовых управляющих сигналов — 3,3 В active-high; все нули соответствуют безопасному `NORMAL`.
 
-Logic is 3.3 V, active-high. All control outputs low is the safe `NORMAL` state.
-
-## Hardware bring-up
-
-Use [docs/bring-up-checklist.md](docs/bring-up-checklist.md) as the acceptance checklist. PHY6252-specific notes are collected in [docs/phy6252-programmer-reference.md](docs/phy6252-programmer-reference.md).
-
-To flash a PB-03F-Kit:
-
-```sh
-tools/flash_firmware.sh tmp/test-dpls.hex
-```
-
-`--erase` also clears SNV (settings, bonds and journal), so it is intentionally not the default.
+Аппаратная приёмка: [docs/bring-up-checklist.md](docs/bring-up-checklist.md).

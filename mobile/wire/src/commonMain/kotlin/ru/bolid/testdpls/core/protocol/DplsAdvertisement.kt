@@ -1,8 +1,7 @@
 package ru.bolid.testdpls.core.protocol
 
-/** Manufacturer ADV payload: company 0x0B01, device id LE32, optional status, optional fw. */
+/** Current BLE discovery helpers. Device data itself is read from GATT DEVICE_INFO. */
 object DplsAdvertisement {
-    const val COMPANY_ID = 0x0B01
     const val REAL_SHORT = 0x01
     const val FROM_RESERVE = 0x02
     const val RESERVE_LOW = 0x04
@@ -19,9 +18,8 @@ object DplsAdvertisement {
     fun displayName(deviceId: Long): String = "Test-DPLS-${idSuffix(deviceId)}"
 
     /**
-     * 8-char ADV local name. Flags + 128-bit service UUID leave 10 bytes for the
-     * name AD; CoreBluetooth cannot fit `Test-DPLS-XXXX` in the same PDU.
-     * Keep in sync with `DplsBle.swift` peripheral advertising.
+     * 8-char local name used by the macOS lab peripheral when the 128-bit UUID
+     * must fit the same legacy advertising PDU.
      */
     fun compactAirName(deviceId: Long): String = "DPLS${idSuffix(deviceId)}"
 
@@ -32,38 +30,4 @@ object DplsAdvertisement {
     }
 
     private val AIR_NAME = Regex("^(?:Test-)?DPLS-?([0-9A-Fa-f]{4})$")
-
-    fun parse(raw: ByteArray, includesCompanyId: Boolean): Fields {
-        val offset = if (includesCompanyId) {
-            if (raw.size < 2) return Fields()
-            val company = (raw[0].toInt() and 0xff) or ((raw[1].toInt() and 0xff) shl 8)
-            if (company != COMPANY_ID) return Fields()
-            2
-        } else {
-            0
-        }
-        if (raw.size < offset + 4) return Fields()
-        val deviceId = (raw[offset].toLong() and 0xff) or
-            ((raw[offset + 1].toLong() and 0xff) shl 8) or
-            ((raw[offset + 2].toLong() and 0xff) shl 16) or
-            ((raw[offset + 3].toLong() and 0xff) shl 24)
-        val extra = raw.size - offset - 4
-        val status = if (extra >= 1) raw[offset + 4].toInt() and 0xff else 0
-        val firmwareVersion = if (extra >= 4) {
-            formatFirmware(
-                raw[offset + 5].toInt() and 0xff,
-                raw[offset + 6].toInt() and 0xff,
-                raw[offset + 7].toInt() and 0xff,
-            )
-        } else {
-            null
-        }
-        return Fields(deviceId, status, firmwareVersion)
-    }
-
-    data class Fields(
-        val deviceId: Long? = null,
-        val status: Int = 0,
-        val firmwareVersion: String? = null,
-    )
 }

@@ -33,7 +33,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
-          submodules: true
 
       - name: Detect changed areas
         id: changes
@@ -96,18 +95,18 @@ jobs:
           grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
           ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.hardware.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.hardware.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
-          grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DplsDomain.kt
+          grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
 
       - name: Fast firmware host tests
         if: steps.changes.outputs.firmware == 'true' || steps.changes.outputs.replay == 'true'
         run: |
-          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Debug
           cmake --build firmware/build --parallel 2
           ctest --test-dir firmware/build --output-on-failure
 
@@ -142,6 +141,37 @@ jobs:
         working-directory: mobile
         run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
 
+  firmverse:
+    name: PHY6252 Firmverse
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.firmware == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup cached ARM GNU Toolchain
+        uses: ./.github/actions/setup-arm-gcc
+      - name: Build production PHY6252 HEX
+        run: |
+          mkdir -p tmp
+          bash tools/build_firmware.sh gcc tmp/test-dpls-firmverse.hex
+      - name: Run production HEX in Firmverse
+        id: firmverse
+        uses: Pom4H/firmverse@v1
+        with:
+          firmware: tmp/test-dpls-firmverse.hex
+          board: pb03f-kit
+          strict: 'true'
+          log: tmp/firmverse.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: test-dpls-firmverse
+          path: |
+            tmp/test-dpls-firmverse.hex
+            ${{ steps.firmverse.outputs.log }}
+          if-no-files-found: warn
+          retention-days: 3
+
   firmware-quality:
     name: Firmware coverage + cppcheck
     if: github.event_name != 'pull_request'
@@ -169,38 +199,14 @@ jobs:
       - name: Run soft-BLE phone E2E scenarios
         run: bash tools/soft_ble_e2e.sh
 
-  firmware-zmu-e2e:
-    name: Firmware ↔ mobile ZMU E2E
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v5
-      - name: Install ARM GCC + Rust
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build zmu-cortex-m0
-        run: bash tools/fetch_zmu.sh tmp/zmu
-      - name: Run all ZMU scenarios
-        run: bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
-
   firmware-gcc:
     name: PHY6252 GNU Arm GCC
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-      - name: Install GNU Arm Embedded
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Setup cached ARM GNU Toolchain
+        uses: ./.github/actions/setup-arm-gcc
       - name: Fetch pinned PHY62XX SDK 3.1.2
         run: bash tools/fetch_phy6252_sdk.sh
       - name: Build

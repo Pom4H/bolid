@@ -1,14 +1,22 @@
-# Test-DPLS wasm phone
+# Test-DPLS lab / wasm-клиент
 
-One command starts the host emulator and the Compose client:
+Одной командой запускаются host simulator и тот же Compose client, который используется на Android/iOS:
 
 ```sh
 bash tools/dpls_lab.sh
 # http://127.0.0.1:8787
 ```
 
-Same `DplsApp` as Android/iOS. Transport is WebSocket to `dpls_simulator` (`LabBleTransport`). Factory password: `TestDpls01`.
+Transport — WebSocket к `dpls_simulator` через `LabBleTransport`. Для factory-сценария simulator использует пароль `TestDpls01`.
 
-`dpls-ble` is only the laptop radio adapter (optional: real phone sees the sim in the air). Chip hex emulator is the guest repo, not this command: [docs/chip-emulator.md](../../docs/chip-emulator.md).
+`dpls-ble` — только опциональный CoreBluetooth adapter ноутбука. Он не является вторым product client и не содержит отдельную бизнес-логику.
 
-Device-free protocol E2E (not a second launcher): `bash tools/soft_ble_e2e.sh`.
+Guest HEX emulator PHY6252 находится в отдельном проекте `third_party/phy6252-emu`; его граница описана в [docs/chip-emulator.md](../../docs/chip-emulator.md).
+
+Device-free product E2E без второго launcher:
+
+```sh
+bash tools/soft_ble_e2e.sh
+```
+
+Lab должен следовать текущему BLE-контракту продукта: discovery по Service UUID/имени, без Manufacturer Specific Data и без legacy Company ID.

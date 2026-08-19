@@ -4,7 +4,6 @@ package ru.bolid.testdpls.core.app
 
 import kotlinx.cinterop.ObjCSignatureOverride
 import platform.CoreBluetooth.CBAdvertisementDataLocalNameKey
-import platform.CoreBluetooth.CBAdvertisementDataManufacturerDataKey
 import platform.CoreBluetooth.CBCentralManager
 import platform.CoreBluetooth.CBCentralManagerDelegateProtocol
 import platform.CoreBluetooth.CBCentralManagerScanOptionAllowDuplicatesKey
@@ -17,7 +16,6 @@ import platform.CoreBluetooth.CBPeripheralStateConnected
 import platform.CoreBluetooth.CBPeripheralStateConnecting
 import platform.CoreBluetooth.CBService
 import platform.CoreBluetooth.CBUUID
-import platform.Foundation.NSData
 import platform.Foundation.NSError
 import platform.Foundation.NSNumber
 import platform.Foundation.NSUUID
@@ -66,14 +64,11 @@ internal class IosBleTransport : DplsTransport {
         ) {
             val address = didDiscoverPeripheral.identifier.UUIDString
             known[address] = didDiscoverPeripheral
-            val manufacturer = advertisementData[CBAdvertisementDataManufacturerDataKey] as? NSData
             listener?.onDiscovered(
                 DplsBle.discovered(
                     address = address,
                     advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String,
                     peripheralName = didDiscoverPeripheral.name,
-                    manufacturerPayload = manufacturer?.toByteArrayCopy(),
-                    manufacturerIncludesCompanyId = true,
                     rssi = RSSI.intValue,
                 ),
             )

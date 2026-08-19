@@ -3,17 +3,29 @@
 
 #include "bcomdef.h"
 
-/* Must run before GAPRole_StartDevice(). */
+/* Factory identity occupies the last 4 KiB sector of the 256 KiB application
+ * flash window. The linker deliberately excludes this sector from firmware. */
+#define DPLS_FACTORY_IDENTITY_FLASH_ADDR 0x1103F000u
+#define DPLS_FACTORY_IDENTITY_RECORD_SIZE 64u
+
+/* Must run before GAPRole_StartDevice(). A missing/invalid factory record leaves
+ * identity not ready and the application must not enable BLE advertising. */
 void dpls_ble_identity_prepare(void);
 
-/* Sync RPA with IRK after GAP_DeviceInit (GAPROLE_STARTED). */
+/* Sync the selected public/static identity address after GAP_DeviceInit. */
 void dpls_ble_identity_on_stack_started(void);
 
-/* Erases persisted bonding keys; MAC is kept. Reboot after calling. */
+/* Clears runtime copies of BLE identity keys in SNV. Factory keys are not
+ * touched and are restored from the mandatory factory record on reboot. */
 void dpls_ble_identity_reset_bonding_keys(void);
 
-/* Stable 32-bit device id derived from the identity MAC (0 if not ready).
- * Reported in DEVICE_INFO_REPORT and used by the app to key its name cache. */
+/* Stable 32-bit production serial number from the factory record. */
 uint32_t dpls_ble_identity_device_id(void);
+
+/* TRUE when the provisioned address and identity keys are applied successfully. */
+bool dpls_ble_identity_is_ready(void);
+
+/* TRUE only when a valid CRC-protected factory record was loaded. */
+bool dpls_ble_identity_is_provisioned(void);
 
 #endif

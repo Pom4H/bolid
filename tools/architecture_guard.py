@@ -154,15 +154,17 @@ require_text(
     "HMAC must not live on the 1 KiB OSAL stack: receive (496) + hmac (344) overflows and corrupts TX",
 )
 require_text(
-    ROOT / "firmware/phy6252_emu/phy6252_emu.c",
-    "TX is a separate OSAL turn",
-    "PHY6252 emu tick must not nested-pump TX; notify pace is a timer, TX is its own turn",
+    ROOT / "firmware/sim/dpls_sim_transport.c",
+    "pace_ms = dpls_sim_transport_cccd_notify(transport)",
+    "host simulator must preserve ATT notify/indicate pacing without a standalone PHY6252 emulator",
 )
 require_text(
     ROOT / "firmware/sim/dpls_sim_board.c",
     "phy6252_emu_tick(&board->radio, board->now_ms);\n    dpls_sim_board_process_tx(board);",
-    "DPLS board must use phy6252_emu for ATT pacing, then TX as a separate turn",
+    "product simulator must keep timer and TX as separate turns",
 )
+if (ROOT / "firmware/phy6252_emu").exists():
+    fail(ROOT / "firmware/phy6252_emu", "standalone PHY6252 emulator is forbidden; production HEX belongs to Firmverse")
 require_text(
     ROOT / "firmware/src/dpls_server.c",
     "send_auth_result(s, f->sequence, DPLS_AUTH_DENIED, 0);\n        dpls_server_log(s, EVT_AUTH_FAILURE",

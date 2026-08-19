@@ -4,7 +4,6 @@ import Foundation
 let serviceUUID = CBUUID(string: "7B5F1000-5D7A-4D2F-9A4C-14B7D5F00001")
 let rxUUID = CBUUID(string: "7B5F1001-5D7A-4D2F-9A4C-14B7D5F00001")
 let txUUID = CBUUID(string: "7B5F1002-5D7A-4D2F-9A4C-14B7D5F00001")
-let companyId: UInt16 = 0x0B01
 
 func emit(_ line: String) {
     fputs(line + "\n", stdout)
@@ -39,31 +38,22 @@ func jsonEscape(_ text: String) -> String {
         .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
-func parseManufacturer(_ raw: Data?) -> (deviceId: UInt32?, status: UInt8, firmware: String?) {
-    guard let raw, raw.count >= 2 else { return (nil, 0, nil) }
-    let company = UInt16(raw[0]) | (UInt16(raw[1]) << 8)
-    guard company == companyId else { return (nil, 0, nil) }
-    let bytes = Array(raw.dropFirst(2))
-    guard bytes.count >= 4 else { return (nil, 0, nil) }
-    let deviceId = UInt32(bytes[0])
-        | (UInt32(bytes[1]) << 8)
-        | (UInt32(bytes[2]) << 16)
-        | (UInt32(bytes[3]) << 24)
-    let extra = bytes.count - 4
-    let status = extra >= 1 ? bytes[4] : 0
-    var firmware: String?
-    if extra >= 4 {
-        firmware = "\(bytes[5]).\(bytes[6]).\(bytes[7])"
+func parseAirDeviceId(_ name: String) -> UInt32? {
+    let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let suffix: String
+    if normalized.hasPrefix("Test-DPLS-") && normalized.count == 14 {
+        suffix = String(normalized.suffix(4))
+    } else if normalized.hasPrefix("DPLS") && normalized.count == 8 {
+        suffix = String(normalized.suffix(4))
+    } else {
+        return nil
     }
-    return (deviceId, status, firmware)
+    return UInt32(suffix, radix: 16)
 }
 
-func isDplsAdvertisement(name: String, services: [CBUUID], overflow: [CBUUID], mfg: Data?) -> Bool {
-    if name.hasPrefix("Test-DPLS") { return true }
-    if services.contains(serviceUUID) || overflow.contains(serviceUUID) { return true }
-    guard let mfg, mfg.count >= 2 else { return false }
-    let company = UInt16(mfg[0]) | (UInt16(mfg[1]) << 8)
-    return company == companyId
+func isDplsAdvertisement(name: String, services: [CBUUID], overflow: [CBUUID]) -> Bool {
+    if name.hasPrefix("Test-DPLS") || name.hasPrefix("DPLS") { return true }
+    return services.contains(serviceUUID) || overflow.contains(serviceUUID)
 }
 
 func isPairingWriteError(_ error: Error) -> Bool {
@@ -242,19 +232,16 @@ final class CentralRole: NSObject, CBCentralManagerDelegate, CBPeripheralDelegat
             ?? "Test-DPLS"
         let services = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let overflow = (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID]) ?? []
-        let mfg = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
-        guard isDplsAdvertisement(name: name, services: services, overflow: overflow, mfg: mfg) else { return }
+        guard isDplsAdvertisement(name: name, services: services, overflow: overflow) else { return }
         seen[peripheral.identifier] = peripheral
         if pendingConnect == peripheral.identifier {
             connect(peripheral.identifier)
         }
-        let parsed = parseManufacturer(mfg)
-        let deviceId = parsed.deviceId.map { String($0) } ?? "null"
-        let firmware = parsed.firmware.map { "\"\(jsonEscape($0))\"" } ?? "null"
+        let deviceId = parseAirDeviceId(name).map { String($0) } ?? "null"
         emit(
             "ADV {\"id\":\"\(peripheral.identifier.uuidString)\",\"rssi\":\(RSSI.intValue)," +
-            "\"name\":\"\(jsonEscape(name))\",\"deviceId\":\(deviceId),\"firmware\":\(firmware)," +
-            "\"status\":\(parsed.status)}"
+            "\"name\":\"\(jsonEscape(name))\",\"deviceId\":\(deviceId),\"firmware\":null," +
+            "\"status\":0}"
         )
     }
 
@@ -354,16 +341,10 @@ final class PeripheralRole: NSObject, CBPeripheralManagerDelegate {
     private var rxChar: CBMutableCharacteristic!
     private var txChar: CBMutableCharacteristic!
     private var pendingTx: [Data] = []
-    private let name: String
     private let deviceId: UInt32
-    private let status: UInt8
-    private let fw: (UInt8, UInt8, UInt8)
 
-    init(name: String, deviceId: UInt32, status: UInt8, fw: (UInt8, UInt8, UInt8)) {
-        self.name = name
+    init(deviceId: UInt32) {
         self.deviceId = deviceId
-        self.status = status
-        self.fw = fw
     }
 
     func start() {
@@ -412,9 +393,8 @@ final class PeripheralRole: NSObject, CBPeripheralManagerDelegate {
             emitError(error.localizedDescription)
             return
         }
-        // Flags + 128-bit UUID leave 10 bytes for the name AD (8-char payload).
-        // Must match DplsAdvertisement.compactAirName. Manufacturer data is
-        // stripped by CoreBluetooth and must not steal those bytes.
+        // Flags + 128-bit UUID leave 10 bytes for the local name AD.
+        // The lab uses the same UUID/name discovery contract as current firmware.
         let suffix = String(format: "%04X", UInt16(truncatingIfNeeded: deviceId))
         peripheral.startAdvertising([
             CBAdvertisementDataLocalNameKey: "DPLS\(suffix)",
@@ -469,14 +449,6 @@ func argValue(_ args: [String], _ name: String) -> String? {
     return args[index + 1]
 }
 
-func parseFw(_ text: String) -> (UInt8, UInt8, UInt8) {
-    let parts = text.split(separator: ".")
-    guard parts.count == 3,
-          let a = UInt8(parts[0]), let b = UInt8(parts[1]), let c = UInt8(parts[2])
-    else { return (1, 4, 0) }
-    return (a, b, c)
-}
-
 let args = Array(CommandLine.arguments.dropFirst())
 let mode = args.first ?? ""
 let reader = LineReader()
@@ -494,17 +466,14 @@ if mode == "central" {
     central.start()
     RunLoop.main.run()
 } else if mode == "peripheral" {
-    let name = argValue(args, "--name") ?? "Test-DPLS-1234"
     let idText = argValue(args, "--id") ?? "0x1234"
     let deviceId = UInt32(idText.replacingOccurrences(of: "0x", with: ""), radix: 16)
         ?? UInt32(idText) ?? 0x1234
-    let status = UInt8(argValue(args, "--status") ?? "0") ?? 0
-    let fw = parseFw(argValue(args, "--fw") ?? "1.4.1")
-    let peripheral = PeripheralRole(name: name, deviceId: deviceId, status: status, fw: fw)
+    let peripheral = PeripheralRole(deviceId: deviceId)
     reader.onLine = { line in DispatchQueue.main.async { peripheral.handle(line) } }
     peripheral.start()
     RunLoop.main.run()
 } else {
-    fputs("usage: dpls-ble central | peripheral [--name STR] [--id HEX] [--fw X.Y.Z] [--status N]\n", stderr)
+    fputs("usage: dpls-ble central | peripheral [--id HEX]\n", stderr)
     exit(2)
 }

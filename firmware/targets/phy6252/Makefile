@@ -162,7 +162,7 @@ $(foreach src,$(SDK_SOURCES),$(eval $(call COMPILE_SDK,$(src))))
 
 define COMPILE_APP
 $(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
-	$(CC) $(APP_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
+	$(CC) $$(APP_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
 endef
 $(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 
@@ -183,10 +183,13 @@ $(RF_LIB): $(RF_LIB_SRC) $(FIX_AR) | $(BUILD)
 $(BLE_LIB): $(BLE_LIB_SRC) $(FIX_AR) | $(BUILD)
 	python3 $(FIX_AR) $< $@
 
+# MAIN is intentionally RWX: the vendor PHY6252 runtime executes SRAM code and
+# stores initialized data in the same fixed SRAM window. Suppress only GNU ld's
+# generic RWX program-segment diagnostic; compiler/linker warnings stay fatal.
 $(ELF): $(OBJECTS) $(ROM_LD) $(LDSCRIPT) $(RF_LIB) $(BLE_LIB)
 	$(CC) $(ARCH) -nostartfiles -nostdlib \
 		-Wl,-Map,$(MAP),--cref,--gc-sections,--undefined=jump_table_base,--undefined=global_config \
-		-Wl,--no-warn-mismatch,--allow-multiple-definition \
+		-Wl,--no-warn-mismatch,--allow-multiple-definition,--no-warn-rwx-segments \
 		-T $(LDSCRIPT) -T $(ROM_LD) -o $@ $(OBJECTS) \
 		-Wl,--start-group $(RF_LIB) $(BLE_LIB) -lgcc -Wl,--end-group
 	$(SIZE) $@

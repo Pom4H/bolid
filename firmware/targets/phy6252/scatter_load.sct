@@ -1,5 +1,7 @@
 ; Test-DPLS PHY6252 memory map.
 ; Retains the proven PB-03F layout while using the SDK 3.1.2 libraries.
+; 0x1103C000..0x1103EFFF is SNV and 0x1103F000..0x1103FFFF is factory identity.
+; Neither persistent region is linkable as application XIP.
 
 LR_IROM1 0x1fff1838 0x0E7C8 {
   ER_IROM1 0x1fff1838 0x077C8 {
@@ -24,8 +26,8 @@ LR_ROM_JT_GC 0x1fff0000 0x00800 {
   }
 }
 
-LR_ROM_XIP 0x11020000 0x020000 {
-  ER_ROM_XIP 0x11020000 0x020000 {
+LR_ROM_XIP 0x11020000 0x01C000 {
+  ER_ROM_XIP 0x11020000 0x01C000 {
     gatt*.o(+RO)
     gattservapp.o(+RO)
     l2cap*.o(+RO)
