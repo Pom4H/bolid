@@ -16,7 +16,7 @@ class DplsBleTest {
     }
 
     @Test
-    fun discoveredUsesCurrentAirNameOnly() {
+    fun discoveredUsesAirNameOnlyAsDisplayHint() {
         val named = DplsBle.discovered(
             address = "AA:BB",
             advertisedName = "Test-DPLS-3B31",
@@ -25,7 +25,7 @@ class DplsBleTest {
         )
         assertEquals("AA:BB", named.address)
         assertEquals("Test-DPLS-3B31", named.name)
-        assertEquals(0x3B31, named.deviceId)
+        assertNull(named.deviceId)
         assertEquals(0, named.advStatus)
         assertEquals(-51, named.rssi)
         assertNull(named.firmwareVersion)
@@ -36,7 +36,7 @@ class DplsBleTest {
             peripheralName = null,
             rssi = -67,
         )
-        assertEquals(0x1234, compact.deviceId)
+        assertNull(compact.deviceId)
         assertEquals("Test-DPLS-1234", compact.name)
 
         val empty = DplsBle.discovered(
