@@ -16,13 +16,11 @@
 
 #define DPLS_HW_REVISION 2u
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
-#define DPLS_RUNTIME_RX_FRAME_SIZE 96u
 
 static dpls_server_t server;
 static uint8 task_id;
 static bool factory_reset_armed;
 static uint32 factory_reset_started_ms;
-static uint8 runtime_rx_frame[DPLS_RUNTIME_RX_FRAME_SIZE];
 
 static uint32 now_ms(void)
 {
@@ -161,10 +159,11 @@ void dpls_phy6252_runtime_pairing_state(uint8 state, uint8 status)
 
 void dpls_phy6252_runtime_process_rx(void)
 {
-    uint16 length = 0u;
-    if (!dpls_phy6252_transport_pop_rx(runtime_rx_frame, &length,
-                                       sizeof(runtime_rx_frame))) return;
-    (void)dpls_server_receive(&server, runtime_rx_frame, length, now_ms());
+    const uint8 *frame;
+    uint16 length;
+    if (!dpls_phy6252_transport_peek_rx(&frame, &length)) return;
+    (void)dpls_server_receive(&server, frame, length, now_ms());
+    dpls_phy6252_transport_consume_rx();
 }
 
 void dpls_phy6252_runtime_process_adc(void)
