@@ -158,15 +158,19 @@ static bool random_bytes(uint8_t *out, uint8_t length)
     return LL_ENC_GenerateTrueRandNum(out, length) == SUCCESS;
 }
 
+static void display_to_controller_addr(const uint8_t display[B_ADDR_LEN],
+                                       uint8_t controller[B_ADDR_LEN])
+{
+    uint8_t i;
+    for (i = 0; i < B_ADDR_LEN; ++i) {
+        controller[i] = display[B_ADDR_LEN - 1u - i];
+    }
+}
+
 static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
 {
     uint8_t controller_addr[B_ADDR_LEN];
-    uint8_t i;
-
-    for (i = 0; i < B_ADDR_LEN; ++i) {
-        controller_addr[i] = mac[B_ADDR_LEN - 1u - i];
-    }
-
+    display_to_controller_addr(mac, controller_addr);
     if (HCI_EXT_SetBDADDRCmd(controller_addr) != HCI_SUCCESS) return false;
     (void)HCI_ReadBDADDRCmd();
     return true;
@@ -264,6 +268,7 @@ void dpls_ble_identity_on_stack_started(void)
     uint8_t irk[KEYLEN];
     uint8_t hci_addr[B_ADDR_LEN];
     uint8_t zero_irk[KEYLEN];
+    uint8_t static_controller_addr[B_ADDR_LEN];
 
     s_identity_ready = false;
     if (!s_identity_mac_valid) dpls_ble_identity_prepare();
@@ -277,7 +282,15 @@ void dpls_ble_identity_on_stack_started(void)
     GAPRole_GetParameter(GAPROLE_IRK, irk);
     if (key_is_invalid(irk)) return;
 
-    (void)GAP_ConfigDeviceAddr(s_identity_addr_type, s_identity_mac);
+    if (s_identity_addr_type == ADDRTYPE_STATIC) {
+        /* Factory data is stored in human/display order (C2:34:...). GAP uses
+         * the SDK B_ADDR byte layout, therefore feed it the reversed array. */
+        display_to_controller_addr(s_identity_mac, static_controller_addr);
+        if (GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, static_controller_addr) != SUCCESS) return;
+    } else if (GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL) != SUCCESS) {
+        return;
+    }
+
     GAPRole_GetParameter(GAPROLE_BD_ADDR, hci_addr);
     if (mac_is_invalid(hci_addr)) return;
 
