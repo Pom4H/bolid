@@ -28,6 +28,9 @@ def assert_source_contract() -> None:
     assert "read_chip_factory_mac" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
 
+    # Provisioned records are complete identities, not just serial-number tags.
+    assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
+
     # A foreign/unallocated Company ID must not creep back into new firmware.
     assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
     assert "0x01, 0x0b" not in peripheral.lower()
@@ -40,18 +43,21 @@ def assert_source_contract() -> None:
 
 
 def main() -> int:
-    chip_record = factory.make_record(0x12345678, 2, None, True)
+    chip_record = factory.make_record(0x12345678, 2, None)
     assert len(chip_record) == factory.RECORD_SIZE
     assert struct.unpack_from("<I", chip_record, 0)[0] == factory.MAGIC
     assert struct.unpack_from("<H", chip_record, 4)[0] == factory.VERSION
     assert struct.unpack_from("<H", chip_record, 6)[0] == factory.RECORD_SIZE
     assert struct.unpack_from("<I", chip_record, 8)[0] == 0x12345678
+    chip_flags = struct.unpack_from("<H", chip_record, 14)[0]
+    assert chip_flags & factory.FLAG_IRK
+    assert chip_flags & factory.FLAG_CSRK
     assert chip_record[16:22] == b"\xff" * 6
     assert chip_record[22] == factory.BLE_ADDR_CHIP_PUBLIC
     assert struct.unpack_from("<H", chip_record, 62)[0] == factory.crc16_ccitt_false(chip_record[:62])
 
     static_mac = bytes.fromhex("C23456789ABC")
-    static_record = factory.make_record(42, 7, static_mac, True)
+    static_record = factory.make_record(42, 7, static_mac)
     flags = struct.unpack_from("<H", static_record, 14)[0]
     assert flags & factory.FLAG_BLE_STATIC
     assert flags & factory.FLAG_IRK
@@ -70,7 +76,7 @@ def main() -> int:
     assert_hex_checksums(ihex)
 
     try:
-        factory.make_record(43, 2, bytes.fromhex("023456789ABC"), True)
+        factory.make_record(43, 2, bytes.fromhex("023456789ABC"))
     except ValueError:
         pass
     else:
