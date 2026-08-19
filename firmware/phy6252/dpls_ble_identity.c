@@ -20,6 +20,7 @@
 #define DPLS_FACTORY_FLAG_BLE_STATIC 0x0001u
 #define DPLS_FACTORY_FLAG_IRK 0x0002u
 #define DPLS_FACTORY_FLAG_CSRK 0x0004u
+#define DPLS_FACTORY_FLAGS_KNOWN (DPLS_FACTORY_FLAG_BLE_STATIC | DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)
 #define DPLS_FACTORY_BLE_ADDR_CHIP_PUBLIC 0u
 #define DPLS_FACTORY_BLE_ADDR_STATIC 1u
 
@@ -59,7 +60,6 @@ static uint8_t s_identity_addr_type = ADDRTYPE_PUBLIC;
 static uint32_t s_device_id;
 static bool s_identity_mac_valid;
 static bool s_factory_provisioned;
-static bool s_factory_keys_present;
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -103,6 +103,7 @@ static bool factory_identity_load(dpls_factory_identity_t *out)
     if (out->serial_number == 0u || out->serial_number == 0xffffffffu) return false;
     out->hardware_revision = rd16(raw + DPLS_FACTORY_OFF_HW_REVISION);
     out->flags = rd16(raw + DPLS_FACTORY_OFF_FLAGS);
+    if ((out->flags & (uint16_t)~DPLS_FACTORY_FLAGS_KNOWN) != 0u) return false;
     memcpy(out->ble_addr, raw + DPLS_FACTORY_OFF_BLE_ADDR, B_ADDR_LEN);
     out->ble_addr_type = raw[DPLS_FACTORY_OFF_BLE_ADDR_TYPE];
     memcpy(out->irk, raw + DPLS_FACTORY_OFF_IRK, KEYLEN);
@@ -215,7 +216,6 @@ static bool ensure_identity_keys(const dpls_factory_identity_t *factory,
             (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) {
         memcpy(irk, factory->irk, KEYLEN);
         memcpy(csrk, factory->csrk, KEYLEN);
-        s_factory_keys_present = true;
         return true;
     }
 
@@ -285,6 +285,11 @@ void dpls_ble_identity_reset_bonding_keys(void)
 uint32_t dpls_ble_identity_device_id(void)
 {
     return s_identity_mac_valid ? s_device_id : 0u;
+}
+
+bool dpls_ble_identity_is_ready(void)
+{
+    return s_identity_mac_valid;
 }
 
 bool dpls_ble_identity_is_provisioned(void)
