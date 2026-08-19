@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Создание factory identity для серийного Test-DPLS.
 
-Формирует Intel HEX ровно для выделенного сектора 0x1103F000. По умолчанию
-BLE использует заводской public MAC PHY6252, а IRK/CSRK генерируются один раз
-на производстве и затем остаются частью неизменяемой идентичности прибора.
+Формирует 64-байтный factory record, BIN для штатного PHY62x2 programmer и,
+при необходимости, Intel HEX для внешнего производственного оборудования.
+По умолчанию BLE использует заводской public MAC PHY6252, а IRK/CSRK
+генерируются один раз на производстве.
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import struct
 from pathlib import Path
 
 FLASH_ADDRESS = 0x1103F000
+FLASH_OFFSET = 0x0003F000
 RECORD_SIZE = 64
 MAGIC = 0x31444944  # bytes: DID1
 VERSION = 1
@@ -105,11 +108,22 @@ def to_intel_hex(address: int, payload: bytes) -> str:
     return "\n".join(lines) + "\n"
 
 
+def write_secret_binary(path: Path, record: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(record)
+    # BIN contains IRK/CSRK. Keep it private even when the caller's umask is loose.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Создать factory identity Test-DPLS")
     parser.add_argument("--serial", type=int, required=True, help="серийный номер 1..4294967294")
     parser.add_argument("--hw-revision", type=int, default=2, help="ревизия платы, по умолчанию 2")
-    parser.add_argument("--output", type=Path, required=True, help="выходной Intel HEX")
+    parser.add_argument("--binary-output", type=Path, required=True, help="64-байтный BIN для factory provisioning")
+    parser.add_argument("--hex-output", type=Path, help="опциональный Intel HEX для внешнего программатора")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--static-address", type=parse_mac, help="заданный BLE static random address")
     group.add_argument("--generate-static-address", action="store_true", help="сгенерировать BLE static random address")
@@ -125,13 +139,16 @@ def main() -> int:
     if struct.unpack_from("<H", record, 62)[0] != crc16_ccitt_false(record[:62]):
         raise RuntimeError("внутренняя ошибка CRC factory identity")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(to_intel_hex(FLASH_ADDRESS, record), encoding="ascii")
+    write_secret_binary(args.binary_output, record)
+    if args.hex_output:
+        args.hex_output.parent.mkdir(parents=True, exist_ok=True)
+        args.hex_output.write_text(to_intel_hex(FLASH_ADDRESS, record), encoding="ascii")
 
     metadata = {
         "serial": args.serial,
         "hardware_revision": args.hw_revision,
         "flash_address": f"0x{FLASH_ADDRESS:08X}",
+        "flash_offset": f"0x{FLASH_OFFSET:08X}",
         "record_size": RECORD_SIZE,
         "ble_address_source": "static_random" if static_mac is not None else "phy6252_factory_public",
         "ble_address": static_mac.hex(":").upper() if static_mac is not None else None,
