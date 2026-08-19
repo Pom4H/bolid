@@ -35,6 +35,14 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$TOOLCHAIN" = "ac6" ]; then TOOLCHAIN="keil"; fi
 
+# Callers normally pass repo-relative paths such as tmp/test-dpls.hex. GCC is
+# invoked with `make -C "$TARGET"`, so leaving OUT relative would make objcopy
+# write under firmware/targets/phy6252 instead of the caller's workspace.
+case "$OUT" in
+    /*) ;;
+    *) OUT="$ROOT/$OUT" ;;
+esac
+
 cleanup() {
     if [ -n "$REGION_ROOT" ]; then rm -rf "$REGION_ROOT"; fi
 }
