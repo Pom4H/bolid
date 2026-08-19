@@ -105,7 +105,7 @@ static void tick_factory_reset(uint32 now)
         return;
     }
     dpls_phy6252_transport_erase_bonds();
-    dpls_ble_identity_reset_bonding_keys();
+    dpls_phy6252_storage_reset_ble_bonding_keys();
     dpls_phy6252_outputs_factory_reset_latched();
     NVIC_SystemReset();
 }
@@ -125,7 +125,7 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
 
     if (dpls_phy6252_storage_settings_state(NULL) == DPLS_SETTINGS_EMPTY) {
         dpls_phy6252_transport_erase_bonds();
-        dpls_ble_identity_reset_bonding_keys();
+        dpls_phy6252_storage_reset_ble_bonding_keys();
     }
 
     hal = server_hal();
