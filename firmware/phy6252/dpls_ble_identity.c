@@ -59,6 +59,7 @@ static uint8_t s_identity_mac[B_ADDR_LEN];
 static uint8_t s_identity_addr_type = ADDRTYPE_PUBLIC;
 static uint32_t s_device_id;
 static bool s_identity_mac_valid;
+static bool s_identity_ready;
 static bool s_factory_provisioned;
 
 static uint16_t rd16(const uint8_t *p)
@@ -184,7 +185,7 @@ static bool select_identity_address(const dpls_factory_identity_t *factory,
 
     if (read_chip_factory_mac(mac)) {
         *addr_type = ADDRTYPE_PUBLIC;
-        return set_controller_public_addr(mac);
+        return true;
     }
 
     /* Migration path for already-flashed prototypes only. No address is ever
@@ -192,7 +193,7 @@ static bool select_identity_address(const dpls_factory_identity_t *factory,
      * provisioned with a static-random address in the factory record. */
     if (!have_factory && read_legacy_mac_snv(mac)) {
         *addr_type = ADDRTYPE_PUBLIC;
-        return set_controller_public_addr(mac);
+        return true;
     }
     return false;
 }
@@ -239,6 +240,11 @@ void dpls_ble_identity_prepare(void)
     uint8_t addr_type;
     bool have_factory;
 
+    s_identity_ready = false;
+    s_identity_mac_valid = false;
+    s_factory_provisioned = false;
+    s_device_id = 0u;
+
     memset(&factory, 0, sizeof(factory));
     have_factory = factory_identity_load(&factory);
     if (!select_identity_address(&factory, have_factory, mac, &addr_type)) return;
@@ -259,16 +265,25 @@ void dpls_ble_identity_on_stack_started(void)
     uint8_t hci_addr[B_ADDR_LEN];
     uint8_t zero_irk[KEYLEN];
 
+    s_identity_ready = false;
+    if (!s_identity_mac_valid) dpls_ble_identity_prepare();
     if (!s_identity_mac_valid) return;
+
+    /* PHY6252 may reject HCI_EXT_SetBDADDRCmd before the controller has fully
+     * started. Apply public identity here, after GAPROLE_STARTED, and let the
+     * idle tick retry this function if the controller is temporarily busy. */
+    if (s_identity_addr_type == ADDRTYPE_PUBLIC && !set_controller_public_addr(s_identity_mac)) return;
+
     GAPRole_GetParameter(GAPROLE_IRK, irk);
     if (key_is_invalid(irk)) return;
 
     (void)GAP_ConfigDeviceAddr(s_identity_addr_type, s_identity_mac);
-
     GAPRole_GetParameter(GAPROLE_BD_ADDR, hci_addr);
     if (mac_is_invalid(hci_addr)) return;
+
     memset(zero_irk, 0, sizeof(zero_irk));
     (void)HCI_LE_AddDevToResolvingListCmd(s_identity_addr_type, hci_addr, zero_irk, irk);
+    s_identity_ready = true;
 }
 
 void dpls_ble_identity_reset_bonding_keys(void)
@@ -288,7 +303,7 @@ uint32_t dpls_ble_identity_device_id(void)
 
 bool dpls_ble_identity_is_ready(void)
 {
-    return s_identity_mac_valid;
+    return s_identity_ready && s_identity_mac_valid;
 }
 
 bool dpls_ble_identity_is_provisioned(void)
