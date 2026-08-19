@@ -124,7 +124,7 @@ Same Compose `DplsApp` as Android/iOS (`mobile/web`). Details: [tools/dpls-lab/R
 
 The chip hex runner is a git submodule (`third_party/phy6252-emu`); Bolid does not launch it. See [docs/chip-emulator.md](docs/chip-emulator.md).
 
-Current firmware and phone version is **1.4.1** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
+Current PHY6252 firmware is **1.4.2**; Android/iOS remain **1.4.1**. Protocol framing remains v2. BLE scan uses the project Service UUID and `Test-DPLS-XXXX`; full serial, firmware version and user-assigned name are read from `DEVICE_INFO_REPORT` after connection.
 
 ### Capture real phone↔board sessions (for simulator fidelity)
 
@@ -230,10 +230,16 @@ Logic is 3.3 V, active-high. All control outputs low is the safe `NORMAL` state.
 
 Use [docs/bring-up-checklist.md](docs/bring-up-checklist.md) as the acceptance checklist. PHY6252-specific notes are collected in [docs/phy6252-programmer-reference.md](docs/phy6252-programmer-reference.md).
 
-To flash a PB-03F-Kit:
+A current board must be provisioned before it is expected to advertise:
 
 ```sh
+python3 tools/make_factory_identity.py \
+  --serial 12874 \
+  --binary-output tmp/factory-00012874.bin \
+  --metadata tmp/factory-00012874.json
+
 tools/flash_firmware.sh tmp/test-dpls.hex
+tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-`--erase` also clears SNV (settings, bonds and journal), so it is intentionally not the default.
+The application image and factory identity are separate. `--erase` is guarded because a full chip erase destroys factory identity as well as SNV.
