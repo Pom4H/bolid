@@ -61,8 +61,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var cccdRetryCount = 0
     private var suppressDisconnectEvent = false
     private var pairingFailed = false
-    /** Real PHY6252 advertisements carry 0x0B01; Mac CBPeripheralManager usually strips it. */
-    private val requiresBond = mutableMapOf<String, Boolean>()
     private var cccdValue = DplsBle.CCCD_ENABLE_INDICATE_NOTIFY
 
     private val scanCallback = object : ScanCallback() {
@@ -186,7 +184,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     override fun send(bytes: ByteArray, priority: Boolean, flush: Boolean): Boolean {
         if (bytes.size > negotiatedMtu - ATT_HEADER_BYTES) return false
         handler.post {
-            // Drop queued writes only. An in-flight GATT write must finish first.
             if (flush) writeQueue.clear()
             if (priority) writeQueue.addFirst(bytes.copyOf()) else writeQueue.addLast(bytes.copyOf())
             drainWriteQueue()
@@ -242,16 +239,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private fun acceptScan(result: ScanResult) {
         val record = result.scanRecord ?: return
         if (!record.serviceUuids.orEmpty().contains(ParcelUuid(SERVICE_UUID))) return
-        val manufacturerPayload = record.getManufacturerSpecificData(DplsBle.MANUFACTURER_ID)
-        requiresBond[result.device.address] = manufacturerPayload != null && manufacturerPayload.isNotEmpty()
         emit {
             onDiscovered(
                 DplsBle.discovered(
                     address = result.device.address,
                     advertisedName = record.deviceName,
                     peripheralName = result.device.name,
-                    manufacturerPayload = manufacturerPayload,
-                    manufacturerIncludesCompanyId = false,
                     rssi = result.rssi,
                 ),
             )
@@ -281,17 +274,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                         schedulePairingTimeout()
                     }
                     else -> {
-                        if (requiresBond[current.device.address] != true) {
-                            Log.i(TAG, "GATT without bond (lab / no manufacturer data)")
-                            beginGattNegotiation()
-                        } else {
-                            pairing = true
-                            schedulePairingTimeout()
-                            if (!current.device.createBond()) {
-                                Log.i(TAG, "createBond refused — continue GATT")
-                                beginGattNegotiation()
-                            }
-                        }
+                        // Current firmware expresses the security boundary in GATT:
+                        // encrypted CCCD write returns auth/encryption error and starts pairing.
+                        beginGattNegotiation()
                     }
                 }
                 return
