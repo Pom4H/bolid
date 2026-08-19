@@ -106,7 +106,7 @@ jobs:
       - name: Fast firmware host tests
         if: steps.changes.outputs.firmware == 'true' || steps.changes.outputs.replay == 'true'
         run: |
-          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Debug
           cmake --build firmware/build --parallel 2
           ctest --test-dir firmware/build --output-on-failure
 
