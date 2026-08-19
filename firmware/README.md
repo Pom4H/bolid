@@ -1,6 +1,6 @@
 # Test-DPLS firmware
 
-PHY6252 firmware for the Test-DPLS device, version **1.4.1** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
+PHY6252 firmware for the Test-DPLS device, version **1.4.2** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
 
 ## Layout
 
