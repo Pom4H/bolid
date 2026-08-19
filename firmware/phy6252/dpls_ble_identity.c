@@ -163,7 +163,11 @@ static bool select_identity_address(const dpls_factory_identity_t *factory,
 {
     if ((factory->flags & DPLS_FACTORY_FLAG_BLE_STATIC) != 0u) {
         memcpy(mac, factory->ble_addr, B_ADDR_LEN);
-        *addr_type = ADDRTYPE_STATIC;
+        /* Diagnostic only: keep the exact factory MAC bytes but route them
+         * through the controller's public-address path used by the last known
+         * working firmware. This isolates PHY6252 ADDRTYPE_STATIC from every
+         * other factory-identity variable (serial, IRK/CSRK and address bytes). */
+        *addr_type = ADDRTYPE_PUBLIC;
         return true;
     }
 
