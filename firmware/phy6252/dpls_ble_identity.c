@@ -104,6 +104,8 @@ static bool factory_identity_load(dpls_factory_identity_t *out)
     out->hardware_revision = rd16(raw + DPLS_FACTORY_OFF_HW_REVISION);
     out->flags = rd16(raw + DPLS_FACTORY_OFF_FLAGS);
     if ((out->flags & (uint16_t)~DPLS_FACTORY_FLAGS_KNOWN) != 0u) return false;
+    if ((out->flags & (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) !=
+        (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) return false;
     memcpy(out->ble_addr, raw + DPLS_FACTORY_OFF_BLE_ADDR, B_ADDR_LEN);
     out->ble_addr_type = raw[DPLS_FACTORY_OFF_BLE_ADDR_TYPE];
     memcpy(out->irk, raw + DPLS_FACTORY_OFF_IRK, KEYLEN);
@@ -115,8 +117,7 @@ static bool factory_identity_load(dpls_factory_identity_t *out)
     } else if (out->ble_addr_type != DPLS_FACTORY_BLE_ADDR_CHIP_PUBLIC) {
         return false;
     }
-    if ((out->flags & DPLS_FACTORY_FLAG_IRK) != 0u && key_is_invalid(out->irk)) return false;
-    if ((out->flags & DPLS_FACTORY_FLAG_CSRK) != 0u && key_is_invalid(out->csrk)) return false;
+    if (key_is_invalid(out->irk) || key_is_invalid(out->csrk)) return false;
     return true;
 }
 
@@ -211,9 +212,7 @@ static bool ensure_identity_keys(const dpls_factory_identity_t *factory,
                                  bool have_factory,
                                  uint8_t irk[KEYLEN], uint8_t csrk[KEYLEN])
 {
-    if (have_factory &&
-        (factory->flags & (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) ==
-            (DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK)) {
+    if (have_factory) {
         memcpy(irk, factory->irk, KEYLEN);
         memcpy(csrk, factory->csrk, KEYLEN);
         return true;
