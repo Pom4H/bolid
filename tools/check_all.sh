@@ -6,6 +6,7 @@ cd "$ROOT"
 
 bash tools/check_repo_layout.sh
 python3 tools/test_dpls_protocol_crc.py
+python3 tools/test_factory_identity.py
 python3 tools/session_capture/test_session_capture.py
 bash tools/coverage_firmware.sh
 bash tools/lint_firmware.sh
