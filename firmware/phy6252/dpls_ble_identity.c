@@ -5,7 +5,6 @@
 #include "flash.h"
 #include "gap.h"
 #include "hci.h"
-#include "osal_snv.h"
 #include "peripheral.h"
 #include <string.h>
 
@@ -228,16 +227,6 @@ void dpls_ble_identity_on_stack_started(void)
     memset(zero_irk, 0, sizeof(zero_irk));
     (void)HCI_LE_AddDevToResolvingListCmd(s_identity_addr_type, hci_addr, zero_irk, irk);
     s_identity_ready = true;
-}
-
-void dpls_ble_identity_reset_bonding_keys(void)
-{
-    uint8_t erased[KEYLEN];
-    memset(erased, 0xFF, sizeof(erased));
-    /* Clear stack runtime/SNV copies only. Factory IRK/CSRK are restored from
-     * the mandatory factory record on the next boot. */
-    (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
-    (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
 }
 
 uint32_t dpls_ble_identity_device_id(void)
