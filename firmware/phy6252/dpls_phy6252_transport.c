@@ -170,19 +170,25 @@ uint8 dpls_phy6252_transport_receive_frame(const uint8 *data, uint16 length)
     return SUCCESS;
 }
 
-bool dpls_phy6252_transport_pop_rx(uint8 *out, uint16 *length, uint16 capacity)
+bool dpls_phy6252_transport_peek_rx(const uint8 **data, uint16 *length)
 {
     dpls_rx_slot_t *slot;
-    if (rx.count == 0u) return false;
+    if (!data || !length || rx.count == 0u) return false;
     slot = &rx.slots[rx.head];
-    if (slot->length > capacity) return false;
-    memcpy(out, slot->data, slot->length);
+    *data = slot->data;
     *length = slot->length;
+    return true;
+}
+
+void dpls_phy6252_transport_consume_rx(void)
+{
+    dpls_rx_slot_t *slot;
+    if (rx.count == 0u) return;
+    slot = &rx.slots[rx.head];
     slot->length = 0u;
     rx.head = (uint8)((rx.head + 1u) % DPLS_RX_QUEUE_DEPTH);
     --rx.count;
     if (rx.count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
-    return true;
 }
 
 bool dpls_phy6252_transport_encrypted(void *context)
