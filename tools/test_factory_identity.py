@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Offline contract test for tools/make_factory_identity.py."""
+"""Offline contract test for production Test-DPLS identity."""
 
 import struct
+from pathlib import Path
 
 import make_factory_identity as factory
 
@@ -11,6 +12,31 @@ def assert_hex_checksums(text: str) -> None:
         assert line.startswith(":")
         raw = bytes.fromhex(line[1:])
         assert sum(raw) & 0xFF == 0
+
+
+def assert_source_contract() -> None:
+    identity = Path("firmware/phy6252/dpls_ble_identity.c").read_text(encoding="utf-8")
+    peripheral = Path("firmware/targets/phy6252/source/dplsBLEPeripheral.c").read_text(encoding="utf-8")
+    scatter = Path("firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
+    gcc_ld = Path("firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
+
+    # Production firmware may consume randomness for keys, but must never mint
+    # a new BLE address at boot or persist one into the legacy 0x82 slot.
+    assert "generate_mac" not in identity
+    assert "write_mac_snv" not in identity
+    assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
+    assert "read_chip_factory_mac" in identity
+    assert "dpls_ble_identity_is_ready" in peripheral
+
+    # A foreign/unallocated Company ID must not creep back into new firmware.
+    assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
+    assert "0x01, 0x0b" not in peripheral.lower()
+
+    # Both production linkers must leave the final 4 KiB sector untouched.
+    assert "0x01F000" in scatter
+    assert "0x1103F000" in scatter
+    assert "LENGTH = 0x1f000" in gcc_ld
+    assert "0x1103F000" in gcc_ld
 
 
 def main() -> int:
@@ -34,6 +60,10 @@ def main() -> int:
     assert static_record[22] == factory.BLE_ADDR_STATIC
     assert struct.unpack_from("<H", static_record, 62)[0] == factory.crc16_ccitt_false(static_record[:62])
 
+    generated_mac = factory.generate_static_mac()
+    assert len(generated_mac) == 6
+    assert generated_mac[0] & 0xC0 == 0xC0
+
     ihex = factory.to_intel_hex(factory.FLASH_ADDRESS, static_record)
     assert ihex.splitlines()[0] == ":020000041103E6"
     assert ihex.splitlines()[-1] == ":00000001FF"
@@ -46,6 +76,7 @@ def main() -> int:
     else:
         raise AssertionError("non-static BLE address was accepted")
 
+    assert_source_contract()
     print("factory identity: OK")
     return 0
 
