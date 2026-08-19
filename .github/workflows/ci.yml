@@ -91,14 +91,14 @@ jobs:
           grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' firmware/phy6252/dpls_board.h
           grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' firmware/phy6252/dpls_board.h
           grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'hal.hardware.port2_voltage_mv = dpls_phy6252_measurements_port2_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'hal.hardware.port_t_voltage_mv = dpls_phy6252_measurements_port_t_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_measurements.c
           grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
