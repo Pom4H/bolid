@@ -22,6 +22,48 @@ jobs:
           sudo apt-get install -y libpython3.9 libtinfo5
       - name: Fetch pinned PHY62XX SDK 3.1.2
         run: bash tools/fetch_phy6252_sdk.sh
+      - name: Apply watchdog diagnostic patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('firmware/targets/phy6252/source/dplsBLEPeripheral.c')
+          text = path.read_text()
+
+          needle = '#include "pwrmgr.h"\n#include "fs.h"'
+          replacement = '#include "pwrmgr.h"\n#include "watchdog.h"\n#include "fs.h"'
+          if needle not in text:
+              raise SystemExit('include anchor not found')
+          text = text.replace(needle, replacement, 1)
+
+          needle = '    app_task_id = task_id;\n'
+          replacement = (
+              '    app_task_id = task_id;\n'
+              '    /* Diagnostic only: vendor main starts WDG_2S. Real-hardware logs\n'
+              '     * show RSTC_WARM_UP during active GATT traffic, so widen it while\n'
+              '     * checking whether the BLE instability is watchdog-driven. */\n'
+              '    (void)watchdog_config(WDG_8S);\n'
+          )
+          if needle not in text:
+              raise SystemExit('init anchor not found')
+          text = text.replace(needle, replacement, 1)
+
+          needle = 'uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)\n{\n    (void)task_id;\n'
+          replacement = (
+              'uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)\n'
+              '{\n'
+              '    (void)task_id;\n'
+              '    /* Diagnostic only: prove the OSAL loop is alive often enough and\n'
+              '     * keep the vendor watchdog away from legitimate BLE/flash work. */\n'
+              '    hal_watchdog_feed();\n'
+          )
+          if needle not in text:
+              raise SystemExit('event anchor not found')
+          text = text.replace(needle, replacement, 1)
+
+          path.write_text(text)
+          PY
+          grep -n 'watchdog_config\|hal_watchdog_feed' firmware/targets/phy6252/source/dplsBLEPeripheral.c
       - name: Activate CMSIS Toolbox and Arm Compiler 6
         uses: ARM-software/cmsis-actions/vcpkg@v1
         with:
@@ -33,14 +75,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp
-          bash tools/build_firmware.sh keil tmp/test-dpls-keil-diag.hex 2>&1 | tee tmp/keil-build.log
+          bash tools/build_firmware.sh keil tmp/test-dpls-keil-watchdog-diag.hex 2>&1 | tee tmp/keil-build.log
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-keil-gatt-parity
+          name: test-dpls-keil-watchdog-diag
           path: |
-            tmp/test-dpls-keil-diag.hex
+            tmp/test-dpls-keil-watchdog-diag.hex
             tmp/test-dpls.axf
             tmp/test-dpls.map
             tmp/keil-build.log
