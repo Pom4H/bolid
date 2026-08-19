@@ -22,14 +22,14 @@
 
 Имя в эфире остаётся `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит серийного номера в HEX. Полный 32-битный номер читается после подключения через `DEVICE_INFO_REPORT`.
 
-## 2. Factory sector
+## 2. Карта постоянной памяти
 
-Под factory identity выделен последний сектор 4 КиБ в используемом flash-окне:
+Persistent data физически исключены из разрешённой linker-области приложения:
 
 ```text
 0x11020000 ─┐
             │ application XIP
-            │ 0x1F000 bytes
+            │ 0x1C000 bytes
 0x1103BFFF ─┘
 
 0x1103C000 ─┐
@@ -41,11 +41,11 @@
 0x1103FFFF ─┘
 ```
 
-Linker-файлы `scatter_load.sct` и `phy6252.ld` заканчивают XIP на `0x1103EFFF`, поэтому обычный firmware image никогда не содержит данных factory-сектора.
+Linker-файлы `scatter_load.sct` и `phy6252.ld` заканчивают application XIP на `0x1103BFFF`. Поэтому рост прошивки не может молча занять SNV или factory identity: linker должен сообщить overflow вместо повреждения persistent data.
 
-Firmware только **читает** запись из `0x1103F000`. API записи или стирания factory identity в рабочей прошивке нет.
+Firmware только **читает** factory record из `0x1103F000`. API записи или стирания factory identity в рабочей прошивке нет.
 
-Важно: это логически неизменяемая область, а не OTP/eFuse. Полное chip erase физически стирает её. Поэтому `tools/flash_firmware.sh --erase` заблокирован без явного `DPLS_ALLOW_FACTORY_ERASE=1`.
+Важно: factory sector логически неизменяемый, но это не OTP/eFuse. Полное chip erase физически стирает его. Поэтому `tools/flash_firmware.sh --erase` заблокирован без явного `DPLS_ALLOW_FACTORY_ERASE=1`.
 
 ## 3. Формат factory record v1
 
@@ -100,6 +100,10 @@ identity не готова → BLE advertising не запускается
 Если конкретная партия чипов не имеет пригодного заводского MAC, при provisioning генерируется BLE **static random** address. Его два старших бита должны быть `11`; адрес записывается в factory record и больше не меняется.
 
 Firmware больше не генерирует случайный public-looking MAC при загрузке.
+
+### Старт PHY6252
+
+На PHY6252 `HCI_EXT_SetBDADDRCmd()` может временно не принять public address до полного старта контроллера. Поэтому material factory identity читается заранее, а применение адреса выполняется после `GAPROLE_STARTED`. Пока controller address не подтверждён, advertising остаётся выключенным. Idle tick повторяет применение identity, если первая post-start попытка временно не удалась.
 
 ### Совместимость со старыми прототипами
 
@@ -226,7 +230,7 @@ IRK/CSRK не следует писать в обычные логи или CSV 
 
 Полный chip erase — сервисная/производственная операция. После него прибор нельзя выпускать или возвращать заказчику, пока factory identity не восстановлена из производственной записи и не пройдена повторная проверка.
 
-## 10. Advertising и Bluetooth Company Identifier
+## 10. Advertising, discovery и pairing
 
 Новая прошивка не отправляет Manufacturer Specific Data с `0x0B01`.
 
@@ -238,13 +242,31 @@ IRK/CSRK не следует писать в обычные логи или CSV 
 
 Это соответствует ТЗ: приложение обнаруживает Test-DPLS по фирменному Service UUID, а серийный номер и состояние получает через имя/GATT.
 
-Мобильный код пока может распознавать старый manufacturer payload для обратной совместимости с ранними прототипами, но новая серийная прошивка его больше не создаёт.
+Pairing больше не определяется косвенно по наличию manufacturer payload. CCCD сервиса Test-DPLS требует `GATT_PERMIT_ENCRYPT_WRITE`; существующий Android transport уже обрабатывает `GATT_INSUFFICIENT_AUTHENTICATION`/`GATT_INSUFFICIENT_ENCRYPTION`, запускает системное сопряжение и повторяет CCCD write. Таким образом, необходимость защищённого соединения задаётся самим GATT-контрактом.
+
+Мобильный parser пока может читать старый manufacturer payload для обратной совместимости с ранними прототипами, но новая серийная прошивка его больше не создаёт.
 
 ## 11. Что намеренно не добавлено
 
 Отдельный `device_secret` сейчас не вводится: в существующем протоколе Test-DPLS для него нет потребителя. Хранить дополнительный секрет «на будущее» без определённого криптографического назначения — лишний lifecycle и риск утечки. Если появится device attestation, secure provisioning backend или подпись производственных данных, формат factory record нужно расширить новой версией с конкретной моделью ключей.
 
-## 12. Критерии готовности к серии
+## 12. Автоматические проверки
+
+`tools/test_factory_identity.py` проверяет:
+
+- бинарный factory record и CRC;
+- обязательные IRK/CSRK;
+- генерацию корректного static-random address;
+- Intel HEX и checksums;
+- отсутствие runtime MAC generation;
+- отсутствие `0x0B01` в новой PHY6252 рекламе;
+- encrypted CCCD;
+- post-GAP identity retry;
+- что linker заканчивает XIP до `0x1103C000` и не может занять SNV/factory sectors.
+
+Тест включён в `tools/check_all.sh`.
+
+## 13. Критерии готовности к серии
 
 Перед первым серийным выпуском проверить на реальном стенде:
 
@@ -259,6 +281,7 @@ IRK/CSRK не следует писать в обычные логи или CSV 
 - после намеренного chip erase и повторного provisioning прибор возвращает тот же serial;
 - две платы с одинаковым serial не могут пройти производственный acceptance;
 - приложение фильтрует приборы по Service UUID и корректно показывает `Test-DPLS-XXXX`;
-- Android/iOS pairing проверен на реальном PHY6252 без legacy manufacturer payload.
+- Android/iOS pairing проверен на реальном PHY6252 без legacy manufacturer payload;
+- Keil/GCC target build подтверждает, что текущий XIP footprint помещается до `0x1103C000`.
 
 После этого источником истины по идентичности считается производственная БД + factory record, а MAC больше не используется как бизнес-идентификатор прибора.
