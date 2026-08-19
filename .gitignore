@@ -1,6 +1,7 @@
 .DS_Store
 .python-deps/
 .codex-docx-render/
+.toolchains/
 tmp/
 pb03f-original-flash-2026-07-10.bin
 wch-driver/
