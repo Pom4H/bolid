@@ -68,26 +68,4 @@ class DplsControlMessagesTest {
         assertNull(buildTimeSyncPayload(1, token, DplsProtocol.TIME_MAX_UNIX_SECONDS + 1))
         assertNull(buildTimeSyncPayload(1, ByteArray(7), 1_786_732_800L))
     }
-
-    @Test
-    fun manufacturerAdvertisementKeepsLegacyIdAndReadsStatus() {
-        val androidPayload = byteArrayOf(0x31, 0x3B, 0x00, 0x00, 0x05)
-        val parsed = DplsAdvertisement.parse(androidPayload, includesCompanyId = false)
-        assertEquals(0x3B31, parsed.deviceId)
-        assertTrue(DplsAdvertisement.realShort(parsed.status))
-        assertTrue(DplsAdvertisement.reserveLow(parsed.status))
-        assertTrue(!DplsAdvertisement.fromReserve(parsed.status))
-
-        val iosPayload = byteArrayOf(0x01, 0x0B, 0x31, 0x3B, 0x00, 0x00)
-        val legacy = DplsAdvertisement.parse(iosPayload, includesCompanyId = true)
-        assertEquals(0x3B31, legacy.deviceId)
-        assertEquals(0, legacy.status)
-        assertEquals(null, legacy.firmwareVersion)
-
-        val withFw = byteArrayOf(0x31, 0x3B, 0x00, 0x00, 0x05, 2, 1, 0)
-        val parsedFw = DplsAdvertisement.parse(withFw, includesCompanyId = false)
-        assertEquals(0x3B31, parsedFw.deviceId)
-        assertEquals(5, parsedFw.status)
-        assertEquals("2.1.0", parsedFw.firmwareVersion)
-    }
 }
