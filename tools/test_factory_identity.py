@@ -97,12 +97,20 @@ def assert_source_contract() -> None:
     assert "parseManufacturer" not in lab_ble
     assert "CBAdvertisementDataManufacturerDataKey" not in lab_ble
 
-    # Pairing/security is expressed by GATT permissions, not by an advertising marker.
+    # Security boundary is the protocol RX characteristic. CCCD must remain
+    # writable before encryption because CoreBluetooth uses that write to enable
+    # indications before the first protected protocol request. This preserves the
+    # proven PHY6252/iOS order: subscribe first, pair on the encrypted RX write.
+    assert (
+        "dpls_rx_uuid}, GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE"
+    ) in gatt
+    assert (
+        "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE,"
+    ) in gatt
     assert (
         "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | "
         "GATT_PERMIT_ENCRYPT_WRITE"
-    ) in gatt
-    assert "status in CCCD_AUTH_STATUSES" in android_ble
+    ) not in gatt
 
     # Application XIP must stop before SNV. The three SNV sectors and the final
     # factory sector are persistent data, never linker spill space.
