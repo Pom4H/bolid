@@ -196,8 +196,14 @@ project:
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
         - file: ../../phy6252/dpls_gatt_service.c
-        - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_ble_identity.c
+        - file: ../../phy6252/dpls_phy6252_auth.c
+        - file: ../../phy6252/dpls_phy6252_measurements.c
+        - file: ../../phy6252/dpls_phy6252_outputs.c
+        - file: ../../phy6252/dpls_phy6252_runtime.c
+        - file: ../../phy6252/dpls_phy6252_storage.c
+        - file: ../../phy6252/dpls_phy6252_supervisor.c
+        - file: ../../phy6252/dpls_phy6252_transport.c
 
   components:
     - component: ARM::CMSIS:CORE
