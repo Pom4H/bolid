@@ -37,7 +37,9 @@ static gattAttribute_t attrs[DPLS_ATTR_COUNT] = {
     {{ATT_UUID_SIZE, (uint8 *)dpls_rx_uuid}, GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE, 0, &rx_value},
     {{ATT_BT_UUID_SIZE, characterUUID}, GATT_PERMIT_READ, 0, &tx_properties},
     {{ATT_UUID_SIZE, (uint8 *)dpls_tx_uuid}, 0, 0, &tx_value},
-    {{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE, 0, (uint8 *)&tx_cccd}
+    /* Pairing is a GATT security property, not an advertising convention. This
+     * lets clients discover by Service UUID without relying on manufacturer data. */
+    {{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE, 0, (uint8 *)&tx_cccd}
 };
 
 CONST gattServiceCBs_t callbacks = {read_cb, write_cb, NULL};
