@@ -52,9 +52,22 @@ def assert_source_contract() -> None:
     assert "read_chip_factory_mac" in identity
     assert "HCI_EXT_SetBDADDRCmd" in identity
     assert "display_to_controller_addr" in identity
-    assert "GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, static_controller_addr)" in identity
+    assert "configure_static_identity_addr" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
     assert "!link_up && !dpls_ble_identity_is_ready()" in peripheral
+
+    # PHY6252 snapshots the peripheral local address during GAP_DeviceInit.
+    # Static identity must therefore be configured in prepare(), before the
+    # deferred SBP_START_DEVICE_EVT calls GAPRole_StartDevice().
+    prepare_start = identity.index("void dpls_ble_identity_prepare(void)")
+    stack_start = identity.index("void dpls_ble_identity_on_stack_started(void)")
+    prepare_body = identity[prepare_start:stack_start]
+    stack_body = identity[stack_start:]
+    assert "configure_static_identity_addr(mac)" in prepare_body
+    assert "GAP_ConfigDeviceAddr(ADDRTYPE_STATIC" not in stack_body
+    init_call = peripheral.index("dpls_ble_identity_prepare();")
+    start_event = peripheral.index("osal_set_event(app_task_id, SBP_START_DEVICE_EVT);")
+    assert init_call < start_event
 
     # Provisioned records are complete identities, not just serial-number tags.
     assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
