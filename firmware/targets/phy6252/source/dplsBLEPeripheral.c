@@ -29,18 +29,13 @@
 static uint8 app_task_id;
 static uint8 link_up;
 
-/* ADV is already 29/31 bytes (flags + 128-bit UUID + manufacturer id).
- * Firmware version rides in the scan response; Android concatenates the two
- * manufacturer payloads for company 0x0B01 into id + status + major.minor.patch. */
+/* The air contract intentionally uses only the project 128-bit service UUID
+ * plus the human-readable Test-DPLS-XXXX name. Do not put an unassigned or a
+ * third-party Bluetooth SIG Company Identifier into Manufacturer Specific Data.
+ * Full serial/status/firmware are read through the authenticated GATT protocol. */
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    'T','e','s','t','-','D','P','L','S','-','0','0','0','0',
-    0x08, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01, 0x0b,
-    0x00,
-    DPLS_FW_VERSION_MAJOR,
-    DPLS_FW_VERSION_MINOR,
-    DPLS_FW_VERSION_PATCH
+    'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
 };
 
 static uint8 advertising_data[] = {
@@ -48,10 +43,7 @@ static uint8 advertising_data[] = {
     GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
     0x11, GAP_ADTYPE_128BIT_COMPLETE,
     0x01,0x00,0xf0,0xd5,0xb7,0x14,0x4c,0x9a,
-    0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b,
-    0x07, GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0x01,0x0b,
-    0x00,0x00,0x00,0x00
+    0x2f,0x4d,0x7a,0x5d,0x00,0x10,0x5f,0x7b
 };
 
 static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
@@ -73,10 +65,6 @@ static void apply_identity_to_adv(void)
         device_name[10 + i] = (uint8)suffix[i];
     }
     device_name[14] = '\0';
-    advertising_data[25] = (uint8)(id);
-    advertising_data[26] = (uint8)(id >> 8);
-    advertising_data[27] = (uint8)(id >> 16);
-    advertising_data[28] = (uint8)(id >> 24);
 }
 
 /* Steps the LED and re-arms the timer only while there is something to show, so
