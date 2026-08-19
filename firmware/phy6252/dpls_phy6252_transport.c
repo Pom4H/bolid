@@ -140,6 +140,12 @@ void dpls_phy6252_transport_disconnected(bool authenticated)
     memset(&tx, 0, sizeof(tx));
 }
 
+void dpls_phy6252_transport_pairing_state(uint8 state, uint8 status)
+{
+    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS)
+        dpls_phy6252_transport_erase_bonds();
+}
+
 bool dpls_phy6252_transport_connected_now(void)
 {
     return connection_handle != INVALID_CONNHANDLE;
