@@ -96,8 +96,8 @@ jobs:
           grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
           ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.hardware.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'hal.hardware.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
