@@ -92,13 +92,46 @@ build_keil() {
     echo "hex: $OUT"
 }
 
+gcc_has_target_headers() {
+    command -v arm-none-eabi-gcc >/dev/null 2>&1 || return 1
+    printf '#include <stdint.h>\nint main(void){return 0;}\n' | \
+        arm-none-eabi-gcc -mcpu=cortex-m0 -mthumb -x c -E - >/dev/null 2>&1
+}
+
+activate_pinned_gcc() {
+    if gcc_has_target_headers; then
+        return 0
+    fi
+
+    if command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+        echo "System arm-none-eabi-gcc is incomplete (target stdint.h/newlib unavailable)." >&2
+        echo "Using pinned Arm GNU Toolchain 13.2.rel1 instead." >&2
+    else
+        echo "arm-none-eabi-gcc not found; downloading pinned Arm GNU Toolchain 13.2.rel1." >&2
+    fi
+
+    local bin
+    bin="$(bash "$ROOT/tools/fetch_arm_gcc.sh")"
+    export PATH="$bin:$PATH"
+
+    if ! gcc_has_target_headers; then
+        echo "Pinned Arm GNU Toolchain is unusable: target standard headers are unavailable" >&2
+        exit 1
+    fi
+}
+
 build_gcc() {
+    activate_pinned_gcc
     for tool in arm-none-eabi-gcc arm-none-eabi-objcopy; do
         if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "$tool not found. Install gcc-arm-none-eabi." >&2
+            echo "$tool not found after Arm GNU Toolchain setup" >&2
             exit 1
         fi
     done
+
+    echo "compiler: $(command -v arm-none-eabi-gcc)"
+    arm-none-eabi-gcc --version | head -n 1
+
     BUILD_LOG="$ROOT/tmp/firmware-gcc.log"
     make -C "$TARGET" HEX="$OUT" CROSS=arm-none-eabi- 2>&1 | tee "$BUILD_LOG"
     reject_warnings "$BUILD_LOG"
