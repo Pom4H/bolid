@@ -17,7 +17,10 @@
 #define DPLS_JOURNAL_RECORD_SIZE 12u
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
-#define DPLS_PENDING_EVENT_CAPACITY 32u
+/* A session can buffer a substantial command/event burst without touching flash.
+ * Keep this bounded because the PHY6252 SRAM budget is hard; overflow is visible
+ * to the domain instead of silently reintroducing radio-critical flash writes. */
+#define DPLS_PENDING_EVENT_CAPACITY 24u
 #define DPLS_NAME_SIZE 32u
 #define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_VALID_MARKER 0x56u
@@ -52,9 +55,11 @@ static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool link_active;
 static dpls_event_t pending_events[DPLS_PENDING_EVENT_CAPACITY];
 static uint8_t pending_event_count;
+/* One cache serves both reads and disconnected write-back. The old refactor
+ * draft had a second 120-byte service buffer even though the two paths cannot
+ * run concurrently; sharing it preserves the ownership boundary and SRAM. */
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
-static uint8_t journal_service_block[DPLS_JOURNAL_BLOCK_SIZE];
 
 #if DPLS_EVENT_CAPACITY != 200u
 #error "PHY6252 journal layout is defined for exactly 200 events"
@@ -125,13 +130,13 @@ static bool journal_record_in_slot(const uint8_t *record, uint16_t slot, dpls_ev
 static uint32_t journal_latest_sequence(void)
 {
     dpls_event_t event;
-    uint32_t max_sequence = 0;
+    uint32_t max_sequence = 0u;
     uint16_t block_index, record_index;
-    for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
+    for (block_index = 0u; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         uint8_t *block;
         dpls_phy6252_supervisor_checkpoint();
         block = journal_load_block((uint8_t)block_index);
-        for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
+        for (record_index = 0u; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
             if (journal_record_in_slot(block + record_index * DPLS_JOURNAL_RECORD_SIZE,
                                        slot, &event) && event.sequence > max_sequence)
@@ -145,13 +150,13 @@ static uint16_t journal_contiguous_count(uint32_t max_sequence)
 {
     uint8_t present[(DPLS_EVENT_CAPACITY + 7u) / 8u];
     dpls_event_t event;
-    uint16_t block_index, record_index, count = 0;
+    uint16_t block_index, record_index, count = 0u;
     memset(present, 0, sizeof(present));
-    for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
+    for (block_index = 0u; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         uint8_t *block;
         dpls_phy6252_supervisor_checkpoint();
         block = journal_load_block((uint8_t)block_index);
-        for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
+        for (record_index = 0u; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
             uint16_t slot = (uint16_t)(block_index * DPLS_JOURNAL_EVENTS_PER_BLOCK + record_index);
             uint32_t age;
             if (!journal_record_in_slot(block + record_index * DPLS_JOURNAL_RECORD_SIZE,
@@ -170,7 +175,7 @@ static uint16_t journal_contiguous_count(uint32_t max_sequence)
 static void classify_settings(void)
 {
     uint16_t expected_crc;
-    uint8_t marker = 0;
+    uint8_t marker = 0u;
     uint8_t state_read;
     memset(&settings, 0, sizeof(settings));
     state_read = osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
@@ -379,13 +384,12 @@ bool dpls_phy6252_storage_service_journal(void)
     uint8_t block_index;
     uint8_t applied = 0u;
     uint8_t i;
+    uint8_t *block;
     if (link_active || pending_event_count == 0u) return pending_event_count != 0u;
 
     block_index = (uint8_t)(((pending_events[0].sequence - 1u) % DPLS_EVENT_CAPACITY) /
                             DPLS_JOURNAL_EVENTS_PER_BLOCK);
-    memset(journal_service_block, 0, sizeof(journal_service_block));
-    (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                        (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_service_block);
+    block = journal_load_block(block_index);
 
     for (i = 0u; i < pending_event_count; ++i) {
         uint16_t slot = (uint16_t)((pending_events[i].sequence - 1u) % DPLS_EVENT_CAPACITY);
@@ -393,21 +397,20 @@ bool dpls_phy6252_storage_service_journal(void)
         uint8_t record_index;
         if (event_block != block_index) break;
         record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
-        journal_encode_record(journal_service_block + record_index * DPLS_JOURNAL_RECORD_SIZE,
+        journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE,
                               &pending_events[i]);
         ++applied;
     }
 
     if (applied == 0u) return false;
     if (snv_write_bounded((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE,
-                          journal_service_block) != SUCCESS) {
+                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, block) != SUCCESS) {
+        /* Force a fresh flash read before a later retry; pending_events remains
+         * the source of truth if this write did not commit. */
         journal_cached_block = 0xffu;
         return false;
     }
 
-    journal_cached_block = block_index;
-    memcpy(journal_block_cache, journal_service_block, sizeof(journal_block_cache));
     memmove(pending_events, pending_events + applied,
             (size_t)(pending_event_count - applied) * sizeof(pending_events[0]));
     pending_event_count = (uint8_t)(pending_event_count - applied);
