@@ -150,7 +150,16 @@ test ! -e tools/dpls-lab/index.html
 test ! -e tools/dpls-lab/src/protocol.ts
 test ! -e tools/dpls-lab/src/crypto.ts
 test ! -e tools/dpls-lab/src/ble.ts
-# Hex runner is the phy6252-emu submodule, not a second in-tree copy.
-test ! -e firmware/phy6252-zmu
-test ! -e tools/phy6252-zmu
-test -f third_party/phy6252-emu/Cargo.toml
+
+# Production HEX emulation belongs to the external Firmverse Action.
+test ! -e .gitmodules
+test ! -e third_party/phy6252-emu
+test ! -e firmware/zmu
+test ! -e tools/fetch_zmu.sh
+test ! -e tools/zmu_e2e.sh
+test ! -e tools/zmu_firmware_tests.sh
+test ! -e tools/zmu_run_all.sh
+test ! -e mobile/interop/src/jvmTest/kotlin/ru/bolid/testdpls/interop/ZmuInteropTest.kt
+grep -q 'uses: Pom4H/firmverse@v1' .github/workflows/ci.yml
+grep -q 'board: pb03f-kit' .github/workflows/ci.yml
+grep -q "strict: 'true'" .github/workflows/ci.yml

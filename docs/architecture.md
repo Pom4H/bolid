@@ -126,6 +126,7 @@ core/androidMain           → commonMain
 core/iosMain               → commonMain
 mobile/ios bootstrap       → DplsCore
 firmware target adapter    → pinned PHY62XX SDK
+CI production HEX          → Pom4H/firmverse@v1
 ```
 
 Запрещено:
@@ -135,6 +136,7 @@ commonMain → Android/CoreBluetooth/UIKit
 portable firmware/src → vendor SDK headers
 platform code → duplicate protocol/controller/UI
 mobile app → hardware safety decisions
+Bolid repo → vendored ZMU/guest HEX emulator
 ```
 
 ## Где должны жить тесты
@@ -146,9 +148,10 @@ mobile app → hardware safety decisions
 - iOS integration → Kotlin/Native + XCTest smoke;
 - host product path → `tools/soft_ble_e2e.sh`;
 - wasm/laptop BLE → `tools/dpls_lab.sh`;
+- **production PHY6252 HEX execution → Firmverse GitHub Action**;
 - реальный radio/pairing/силовые выходы → hardware bring-up.
 
-`tools/check_repo_layout.sh` защищает проект от возврата дублирующих controllers, protocol facades и UI-деревьев.
+`tools/check_repo_layout.sh` защищает проект от возврата дублирующих controllers, protocol facades, UI-деревьев и локального real-HEX emulator stack.
 
 ## Правило разработки
 
@@ -165,6 +168,8 @@ mobile app → hardware safety decisions
 
 PHY62XX SDK закреплён отдельно в `firmware/sdk/phy6252-sdk.env`; его обновление считается отдельной миграцией.
 
-## Эмуляторы
+## Эмуляция
 
-`firmware/zmu/` — Cortex-M0 E2E переносимого firmware core. `firmware/phy6252_emu/` — C-модель ATT/OSAL/SNV. `third_party/phy6252-emu` — отдельный guest HEX emulator. Эти три слоя не должны сливаться в одну архитектуру. Подробнее: [chip-emulator.md](chip-emulator.md).
+`firmware/phy6252_emu/` и `firmware/sim/` образуют быстрый **host product simulator** для lab/Soft-BLE. Он не исполняет production Intel HEX и не является PHY6252 acceptance gate.
+
+Production HEX исполняется только внешним [Firmverse](https://github.com/Pom4H/firmverse) через `Pom4H/firmverse@v1`. Старые `firmware/zmu/`, `tools/zmu_*` и `third_party/phy6252-emu` удалены из Bolid. Подробнее: [chip-emulator.md](chip-emulator.md).

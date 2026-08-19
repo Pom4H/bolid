@@ -13,6 +13,7 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 1. **Firmware владеет hardware safety.** Телефон не может обойти таймауты, автоизоляцию и безопасный `NORMAL`.
 2. **Kotlin `commonMain` владеет общим поведением Android/iOS.** Здесь находятся `DplsClient`, protocol/crypto/domain/session и Compose UI.
 3. **Platform-код только адаптирует OS API.** Android/iOS не содержат вторых controllers, protocol codecs или независимых UI.
+4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный ZMU/guest HEX runner.
 
 Подробнее: [docs/architecture.md](docs/architecture.md).
 
@@ -21,15 +22,14 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 | Путь | Назначение |
 |---|---|
 | `firmware/` | переносимый C99 server, PHY6252 HAL/GATT adapter, host tests и target builds |
-| `firmware/zmu/` | Cortex-M0 E2E переносимого firmware core |
-| `firmware/phy6252_emu/` | host-модель особенностей ATT/OSAL/SNV PHY6252 |
+| `firmware/phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; не исполняет production HEX |
+| `firmware/sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE |
 | `mobile/core/` | общий KMP controller, protocol, crypto, domain/session, Compose UI и platform transports |
 | `mobile/android/` | Android shell и debug E2E |
 | `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
 | `mobile/web/` | тот же Compose UI поверх `LabBleTransport` |
 | `docs/` | архитектура, production identity, bring-up и технические reference |
 | `tools/` | build/flash/check/lab/session utilities |
-| `third_party/phy6252-emu/` | внешний guest HEX emulator |
 
 Production PHY62XX SDK не vendored: точная версия **3.1.2** закреплена в `firmware/sdk/phy6252-sdk.env`.
 
@@ -107,13 +107,6 @@ Mobile loop:
 bash tools/check_mobile.sh
 ```
 
-Portable Cortex-M0 E2E:
-
-```sh
-bash tools/fetch_zmu.sh
-bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
-```
-
 Soft-BLE product E2E:
 
 ```sh
@@ -126,6 +119,20 @@ Host lab с тем же Compose UI:
 bash tools/dpls_lab.sh
 # http://127.0.0.1:8787
 ```
+
+### Production HEX / Firmverse
+
+Реальный GCC target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse):
+
+```yaml
+- uses: Pom4H/firmverse@v1
+  with:
+    firmware: tmp/test-dpls-firmverse.hex
+    board: pb03f-kit
+    strict: 'true'
+```
+
+Старые `firmware/zmu`, `tools/zmu_*` и `third_party/phy6252-emu` удалены. Детали: [docs/chip-emulator.md](docs/chip-emulator.md).
 
 ## Сборка firmware
 

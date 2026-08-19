@@ -1,21 +1,20 @@
 # Firmware Test-DPLS
 
-PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter, чтобы protocol/safety logic можно было тестировать без vendor SDK и реальной платы.
+PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter, чтобы protocol/safety logic можно было быстро тестировать на host, а реальный target HEX — отдельно в Firmverse.
 
 ## Структура
 
 | Путь | Назначение |
 |---|---|
 | `src/`, `include/` | protocol, server, LED, HMAC, calibration |
-| `phy6252_emu/` | host-модель ATT/OSAL/SNV PHY6252 |
-| `sim/` | модель платы Test-DPLS поверх host emulator |
-| `zmu/` | Cortex-M0 E2E переносимого firmware core |
+| `phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; production HEX не исполняет |
+| `sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE |
 | `tests/` | host behavioral/edge-case tests |
 | `phy6252/` | HAL/GATT/ADC/persistence/board mapping |
 | `targets/phy6252/` | Keil и GNU Arm target builds |
 | `sdk/phy6252-sdk.env` | pin PHY62XX SDK 3.1.2 |
 
-Полный vendor SDK не хранится в репозитории.
+Полный vendor SDK не хранится в репозитории. Собственный ZMU/guest HEX runner также не хранится: target emulation выполняет внешний [Firmverse](https://github.com/Pom4H/firmverse).
 
 ## Safety invariants
 
@@ -39,14 +38,7 @@ bash tools/lint_firmware.sh
 bash tools/coverage_firmware.sh
 ```
 
-Cortex-M0 E2E:
-
-```sh
-bash tools/fetch_zmu.sh
-bash tools/zmu_run_all.sh tmp/zmu/target/release/zmu-cortex-m0
-```
-
-Soft-BLE:
+Soft-BLE продуктовый сценарий:
 
 ```sh
 bash tools/soft_ble_e2e.sh
@@ -64,6 +56,22 @@ tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 - Keil: Arm Compiler 6 / CMSIS-Toolbox;
 - GCC: GNU Arm Embedded;
 - оба target используют одни project sources и pinned SDK 3.1.2.
+
+## Firmverse в CI
+
+Для pull request с изменениями firmware GitHub Actions собирает настоящий GCC Intel HEX и передаёт его в Firmverse:
+
+```yaml
+- uses: Pom4H/firmverse@v1
+  with:
+    firmware: tmp/test-dpls-firmverse.hex
+    board: pb03f-kit
+    strict: 'true'
+```
+
+Firmverse владеет Rust/zmu/MMIO эмуляцией. Bolid больше не содержит `firmware/zmu`, `tools/zmu_*` или vendored guest HEX emulator.
+
+Текущая проверка не подменяет production provisioning: factory identity находится в отдельном flash sector и пока не передаётся в Action. Подробно: [`../docs/chip-emulator.md`](../docs/chip-emulator.md).
 
 ## BLE/GATT
 

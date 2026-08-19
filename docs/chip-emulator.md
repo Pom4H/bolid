@@ -1,40 +1,44 @@
-# Граница эмулятора PHY6252
+# Эмуляция PHY6252 в CI
 
-HEX-runner PHY6252 живёт в отдельном проекте **[phy6252-emu](https://github.com/Pom4H/phy6252-emu)** и подключён сюда как `third_party/phy6252-emu`. Это внешний guest-компонент, а не модуль продукта Test-DPLS. Архитектура Bolid не должна поглощать его zmu/MMIO/HLE-код.
+Проверка **реального production Intel HEX** вынесена из Bolid в отдельный open-source проект [Firmverse](https://github.com/Pom4H/firmverse).
 
-## Три разных слоя эмуляции
+Bolid не должен хранить собственный ZMU/guest HEX runner или vendored-копию эмулятора. В GitHub Actions используется публичный Action:
+
+```yaml
+- uses: Pom4H/firmverse@v1
+  with:
+    firmware: tmp/test-dpls-firmverse.hex
+    board: pb03f-kit
+    strict: 'true'
+```
+
+`@v1` — поддерживаемая compatibility line самого Firmverse. Action сам устанавливает Rust, подготавливает pinned zmu backend, собирает Firmverse и запускает firmware в deterministic single-node режиме.
+
+## Что остаётся в Bolid
 
 | Путь | Назначение |
 |---|---|
-| `firmware/zmu/` | переносимый C99 firmware core + `sim/`, собранный под Cortex-M0; продуктовый E2E этого репозитория |
-| `firmware/phy6252_emu/` | host C-модель специфики ATT/OSAL/SNV PHY6252 |
-| `third_party/phy6252-emu/` | отдельный guest emulator: Intel HEX на zmu + PHY bus/ATT mailbox |
+| `firmware/phy6252_emu/` | лёгкая host-модель ATT/OSAL/SNV для продуктового simulator; **не запускает production HEX** |
+| `firmware/sim/` | Test-DPLS simulator для lab, replay и Soft-BLE сценариев |
+| `tools/dpls-lab/` | host lab с тем же Compose UI |
+| `.github/workflows/ci.yml` | сборка production PHY6252 HEX и передача его в Firmverse |
 
-Эти слои решают разные задачи и не должны сливаться.
+Host simulator нужен для быстрых protocol/UI сценариев. Он не является доказательством того, что target image работает на PHY6252, и не заменяет Firmverse.
 
-## Запуск
+## Что удалено из Bolid
 
-Основной host lab Test-DPLS:
+- `third_party/phy6252-emu` и `.gitmodules`;
+- `firmware/zmu/`;
+- `tools/fetch_zmu.sh`;
+- `tools/zmu_e2e.sh`;
+- `tools/zmu_firmware_tests.sh`;
+- `tools/zmu_run_all.sh`;
+- ZMU-specific mobile interop test.
 
-```sh
-bash tools/dpls_lab.sh
-```
+Таким образом, в репозитории продукта больше нет собственного real-HEX emulator stack.
 
-Он запускает `dpls_simulator` и общий wasm-клиент.
+## Ограничение текущей проверки
 
-Guest HEX runner запускается из своего проекта:
+Production firmware требует factory identity record в `0x1103F000..0x1103FFFF`. Текущий Firmverse Action принимает application HEX, но Bolid пока не передаёт ему отдельный factory record. Поэтому CI подтверждает загрузку/исполнение target HEX и fail-closed MMIO/vendor-ROM contract, но не должен называться полноценной проверкой production identity/BLE commissioning.
 
-```sh
-cd third_party/phy6252-emu
-cargo run --release -- --raw
-```
-
-## Чего не должно появляться в Bolid
-
-- второй HEX runner под `tools/` или `firmware/`;
-- второй launcher для того же `dpls_simulator`;
-- отдельная TypeScript-копия Test-DPLS wire protocol только ради emulator bridge;
-- копии HLE/MMIO/TinyCrypt из `phy6252-emu` внутри product firmware/mobile;
-- зависимость продукта от внутренних деталей guest emulator.
-
-Если эмулятору нужна новая возможность, сначала меняется его собственный контракт, а Bolid использует этот контракт через узкую границу.
+Когда Firmverse получит поддерживаемый способ предварительно заполнить factory flash, в CI можно добавить отдельный сценарий provisioning/advertising без возврата локального эмулятора в Bolid.

@@ -1,3 +1,0 @@
-[submodule "third_party/phy6252-emu"]
-	path = third_party/phy6252-emu
-	url = https://github.com/Pom4H/phy6252-emu.git
