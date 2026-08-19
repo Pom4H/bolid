@@ -1,31 +1,31 @@
-# Runtime architecture: one truth, serialized effects
+# Runtime-архитектура: один источник истины и сериализованные эффекты
 
-An abstraction is useful here only when it removes mutable state, makes an invalid state unrepresentable, or defines a boundary that is used by the product today.
+Абстракция полезна здесь только если она убирает дублируемое mutable state, делает недопустимое состояние непредставимым или задаёт реальную границу, уже используемую продуктом.
 
-## Dependency zones
+## Зоны зависимостей
 
 ```text
-:wire      frame/CRC/crypto/advertisement; no coroutines, UI or OS APIs
+:wire      frame / CRC / crypto / radio-name helpers; без coroutines, UI и OS API
    ↓
-:runtime   NodeId, BLE endpoint, session lifecycle and frame sequencing
+:runtime   NodeId, BLE endpoint, lifecycle сессии, frame sequencing
    ↓
-:core      product orchestration, journal, Compose and platform adapters
+:core      product orchestration, journal, Compose, platform adapters
 ```
 
-`core` may depend downward. `wire` and `runtime` must never depend on Compose, Android Bluetooth, CoreBluetooth or product screens.
+`core` может зависеть вниз. `wire` и `runtime` не должны зависеть от Compose, Android Bluetooth, CoreBluetooth или экранов приложения.
 
-The runtime module intentionally contains only concepts used by this PR. Mesh routing, serial links and passive observations are not pre-designed here; they belong to the PR that implements those features.
+Не проектируем заранее mesh, RS-232, routing и passive observations. Эти границы появятся только вместе с реальной фичей.
 
-## Identity invariant
+## Инвариант identity
 
-A device identity and its current BLE address are different facts.
+Identity прибора и способ текущего подключения — разные факты.
 
-- `NodeId` is the stable identity proven by `DEVICE_INFO`.
-- `LinkEndpoint.Ble` is only the current route to the device.
-- an advertised device id is a `candidateNodeId`: useful for locating cached credentials, but not authoritative.
-- `DeviceSession.Online` requires a non-null verified `NodeId`.
+- `NodeId` — стабильный 32-битный `serial_number`, подтверждённый `DEVICE_INFO_REPORT`.
+- `LinkEndpoint.Ble` — текущий маршрут до прибора.
+- `Test-DPLS-XXXX` — radio/display name; `XXXX` содержит только младшие 16 бит serial.
+- `DeviceSession.Online` всегда содержит подтверждённый ненулевой `NodeId`.
 
-Authentication therefore does not immediately mean `Online`:
+BLE-имя **не создаёт `candidateNodeId`**: 16 бит недостаточно для проверки 32-битного serial. До `DEVICE_INFO_REPORT` полный identity неизвестен.
 
 ```text
 Connecting
@@ -36,67 +36,66 @@ Linked
     ↓
 Authenticating / Commissioning
     ↓
-Synchronizing       authenticated, identity not proven yet
-    ↓ DEVICE_INFO
-Online              authenticated + verified NodeId
+Synchronizing       auth уже есть, NodeId ещё не подтверждён
+    ↓ DEVICE_INFO_REPORT
+Online              auth + подтверждённый NodeId
 ```
 
-If the advertised candidate id and `DEVICE_INFO` disagree, the connection fails closed.
+После `DEVICE_INFO_REPORT` текущая сессия связывается с `NodeId`; дальнейшая смена ID внутри активной сессии считается ошибкой и закрывается fail-closed.
 
-Legacy BLE-address credential keys remain readable for migration. Stable credentials are persisted by verified node id once identity has been proven.
+### Хранение verifier
 
-## Request invariant — protocol v2
+Канонический долговременный ключ verifier — `node:<NodeId>`.
 
-`DplsProtocol.Frame.sequence` is the **only** transaction id. `REQUEST/RESPONSE/EVENT/ERROR` flags describe correlation semantics independently from message type. A response or error echoes the request sequence.
+До первого `DEVICE_INFO_REPORT` verifier может временно храниться под `endpoint:<BLE endpoint>`, чтобы пережить reboot PHY6252 после первичной настройки. Это bootstrap cache, а не identity. После подтверждения NodeId тот же verifier сохраняется под `node:<serial>`.
 
-The controller allows one transactional `Operation` at a time. Do not add `commandId`, `awaitingFoo`, `fooPending`, or a generic request broker until the product needs independent concurrent transactions.
+Старые alias `id:`, `addr:` и `legacy-addr:` намеренно не читаются и не записываются: до выхода в серию migration compatibility не поддерживается.
 
-A timeout carries the same operation sequence. Cancellation alone is not considered sufficient: if a canceled timeout has already become runnable, it may act only while its captured sequence is still the current operation sequence.
+## Инвариант запросов — protocol v2
 
-## Concurrency invariant
+`DplsProtocol.Frame.sequence` — единственный transaction id. Флаги `REQUEST/RESPONSE/EVENT/ERROR` описывают корреляцию независимо от типа сообщения. Ответ или ошибка повторяет `sequence` запроса.
 
-We avoid shared-state locking by serializing mutation rather than protecting arbitrary concurrent mutation.
+Controller допускает одну transactional `Operation` одновременно. Не добавлять отдельные `commandId`, `awaitingFoo`, `fooPending` или generic request broker без реальной потребности в параллельных транзакциях.
 
-### Product state
+Таймаут хранит тот же `sequence`: даже если отменённый coroutine уже стал runnable, он может изменить состояние только если его sequence всё ещё принадлежит текущей операции.
 
-Production `DplsClient` runs on `Dispatchers.Main`.
+## Инвариант конкурентности
 
-- Android delivers GATT state and product callbacks on one main `Handler`.
-- iOS creates `CBCentralManager` with the main queue.
-- Compose actions and controller timers therefore observe the same serialized product state.
+Вместо множества mutex проект сериализует изменение продуктового состояния.
 
-### Stale asynchronous work
+Production `DplsClient` работает на `Dispatchers.Main`:
 
-Single-thread confinement removes data races, but it does not by itself remove stale logical work. Delayed work is therefore identity-checked:
+- Android доставляет GATT/product callbacks через main `Handler`;
+- iOS создаёт `CBCentralManager` на main queue;
+- Compose actions и controller timers наблюдают тот же последовательный state.
+
+Один thread не устраняет позднюю асинхронную работу, поэтому delayed effects дополнительно проверяют identity:
 
 - protocol response → `Frame.sequence`;
-- operation timeout → captured operation `sequence`;
-- connection/session loop/RSSI/reconnect → captured `linkGeneration`;
-- scan deadline → captured `scanGeneration`;
-- journal timeout → captured `logTimeoutGeneration`.
+- operation timeout → sequence операции;
+- connection/session/RSSI/reconnect → `linkGeneration`;
+- scan deadline → `scanGeneration`;
+- journal timeout → `logTimeoutGeneration`.
 
-A late callback or timeout can run, but it cannot mutate a newer logical operation when its identity no longer matches.
+Поздний callback может выполниться, но не может мутировать новую логическую операцию.
 
-This is deliberately preferred to a collection of independent mutexes and boolean locks.
+## Инвариант сессии
 
-## Session invariant — one truth
+`DeviceSession` — единственный mutable source of truth для lifecycle/auth/identity.
 
-`DeviceSession` is the only mutable source of truth for link/auth lifecycle.
+Он содержит:
 
-It owns:
-
-- current endpoint;
-- discovery identity hint while it is still untrusted;
+- endpoint;
 - pre-auth client nonce;
-- challenge `sessionId`, device nonce and auth salt;
+- challenge `sessionId`, device nonce и auth salt;
 - authenticated session id/token/salt;
-- synchronization state before identity proof;
-- verified stable `NodeId` in `Online`;
-- recovering/failed lifecycle state.
+- фазу `Synchronizing` до получения identity;
+- подтверждённый `NodeId` в `Online`;
+- recovering/failed состояния.
 
-`FrameSequencer` owns only the next protocol-v2 frame sequence. It must never grow authentication or lifecycle fields.
+`FrameSequencer` хранит только следующий protocol-v2 sequence и не должен обрастать auth/lifecycle state.
 
-`DplsUiState.phase`, `authenticated`, `initialized` and `credentialsReady` are projections. `DplsClient` must never use those fields as protocol authority. Every UI mutation passes through `projectSession()`, which derives lifecycle presentation from `DeviceSession`.
+`DplsUiState.phase`, `authenticated`, `initialized`, `credentialsReady` — только проекция для UI. `DplsClient` не использует её как протокольную истину.
 
 ```text
 transport / decoded frame
@@ -112,54 +111,46 @@ transport / decoded frame
         Compose
 ```
 
-The reverse dependency is forbidden.
+Обратная зависимость запрещена.
 
-## Journal invariant
+## Инвариант журнала
 
-`JournalMachine` owns journal paging/index state and returns explicit effects (`Ack`, `Pause`, `Complete`, `Error`). It does not know BLE, Compose, notifications or coroutine jobs.
+`JournalMachine` владеет paging/index state и возвращает явные effects (`Ack`, `Pause`, `Complete`, `Error`). Он ничего не знает о BLE, Compose, notifications или coroutine jobs.
 
-Journal timeout ownership remains in `DplsClient`, and each timeout is generation-checked so an old page timeout cannot fail a newer load.
+Таймауты журнала остаются в `DplsClient` и защищены generation token.
 
-## Measurement invariant
+## Инвариант измерений
 
-Validity is encoded in the value:
+Validity кодируется самим значением:
 
-- `null` — no valid measurement;
-- `0` — valid zero volts.
+- `null` — достоверного измерения нет;
+- `0` — достоверные ноль вольт.
 
-Do not add `fooValue + fooValid` pairs. Capability bits stay packed in `DeviceCapabilities`; adding a firmware capability must not grow the `DeviceInfo` constructor.
+Не добавлять пары `fooValue + fooValid`. Capability bits остаются внутри `DeviceCapabilities`.
 
 ## Firmware safety
 
-`dpls_safety` is the single owner of dangerous-mode state, deadline math, revision and forced-return precedence. BLE, journal export, authentication proof and wall-clock time must not be added to it.
+`dpls_safety` — единственный владелец dangerous-mode state, deadline math, revision и приоритетов forced return. BLE, journal export, authentication proof и calendar time туда не добавляются.
 
-A failed `hal.hardware.apply_mode()` forces both physical outputs and the logical safety state to Normal, preventing physical/logical split-brain.
+Если `hal.hardware.apply_mode()` завершается ошибкой, firmware переводит и физические выходы, и logical safety state в `NORMAL`, исключая split-brain.
 
-## Future mesh and RS-232
+## Будущие mesh и RS-232
 
-`NodeId` is already independent from a BLE address, which is the only prerequisite this PR needs for future routing.
+`NodeId` уже независим от BLE endpoint — этого достаточно для будущего routing. `PacketRouter`, `ByteLink`, serial endpoint и topology types должны появляться только в PR, который реально ими пользуется.
 
-Do not add `PacketRouter`, `ByteLink`, serial endpoints, passive observers or topology types until a real mesh/RS-232 feature consumes them. The first feature PR should introduce the smallest boundary justified by actual behavior.
+## Правила удаления
 
-## Architecture analysis
+Изменение следует отклонить, если оно без удаления эквивалентного state добавляет:
 
-Do not optimize architecture against a home-grown numeric complexity score. Formatting must not be able to improve the reported architecture.
+- второго владельца session/auth;
+- nullable identity внутри `Online`;
+- второй transaction id;
+- controller decisions на основе UI lifecycle projections;
+- delayed action без sequence/generation guard;
+- `awaitingX` / `xPending` orchestration flags;
+- UI-строки в wire/domain enums;
+- пары `value + valid`;
+- generic manager/repository/use-case interface с одной реализацией;
+- speculative mesh/serial abstractions без caller.
 
-`tools/architecture_guard.py` is a narrow migration tripwire, not a complexity analyzer. It checks repository-specific invariants that are cheap and reliable to detect textually. The real protection comes from types, module dependencies and behavioral tests.
-
-Generic cognitive/cyclomatic complexity, when useful, should come from AST-aware language tooling. It is diagnostic evidence, not an architecture score.
-
-## Delete rules
-
-Reject changes that introduce any of these without deleting equivalent state elsewhere:
-
-- a second session/auth owner;
-- a nullable identity inside `Online`;
-- a second transaction id;
-- controller decisions based on UI lifecycle projections;
-- an unguarded delayed action that can outlive its operation/session;
-- `awaitingX` / `xPending` orchestration booleans;
-- UI strings in wire/domain enums;
-- `value + valid` measurement pairs;
-- a generic manager/repository/use-case interface with one implementation;
-- speculative mesh/serial abstractions with no current caller.
+`tools/architecture_guard.py` — узкий migration tripwire, а не численная метрика качества архитектуры. Основная защита — типы, направления зависимостей и behavioral tests.
