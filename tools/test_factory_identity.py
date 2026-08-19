@@ -21,11 +21,29 @@ def assert_source_contract() -> None:
     scatter = Path("firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
     gcc_ld = Path("firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
     flash_factory = Path("tools/flash_factory_identity.sh").read_text(encoding="utf-8")
+    mobile_ble = Path(
+        "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt"
+    ).read_text(encoding="utf-8")
+    android_ble = Path(
+        "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
+    ).read_text(encoding="utf-8")
+    ios_ble = Path(
+        "mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt"
+    ).read_text(encoding="utf-8")
+    advertisement = Path(
+        "mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsAdvertisement.kt"
+    ).read_text(encoding="utf-8")
 
-    # Production firmware may consume randomness for keys, but must never mint
-    # a new BLE address at boot or persist one into the legacy 0x82 slot.
-    assert "generate_mac" not in identity
-    assert "write_mac_snv" not in identity
+    # One production identity model only: a valid factory record is mandatory.
+    assert "DPLS_LEGACY_BLE_MAC" not in identity
+    assert "read_legacy_mac_snv" not in identity
+    assert "development_id_from_mac" not in identity
+    assert "LL_ENC_GenerateTrueRandNum" not in identity
+    assert "read_key_snv" not in identity
+    assert "write_key_snv" not in identity
+    assert "factory_identity_load(&factory)" in identity
+    assert "s_device_id = factory.serial_number" in identity
+
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
     assert "HCI_EXT_SetBDADDRCmd" in identity
@@ -37,16 +55,22 @@ def assert_source_contract() -> None:
     # Provisioned records are complete identities, not just serial-number tags.
     assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
 
-    # A foreign/unallocated Company ID must not creep back into new firmware.
+    # No Bluetooth SIG Company ID or old manufacturer payload in current firmware/mobile.
     assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
     assert "0x01, 0x0b" not in peripheral.lower()
+    assert "MANUFACTURER_ID" not in mobile_ble
+    assert "manufacturerPayload" not in mobile_ble
+    assert "getManufacturerSpecificData" not in android_ble
+    assert "CBAdvertisementDataManufacturerDataKey" not in ios_ble
+    assert "COMPANY_ID" not in advertisement
+    assert "fun parse(raw:" not in advertisement
 
-    # Pairing/security is expressed by GATT permissions, not by an advertising
-    # marker. Android already handles auth/encryption errors on CCCD writes.
+    # Pairing/security is expressed by GATT permissions, not by an advertising marker.
     assert (
         "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | "
         "GATT_PERMIT_ENCRYPT_WRITE"
     ) in gatt
+    assert "status in CCCD_AUTH_STATUSES" in android_ble
 
     # Application XIP must stop before SNV. The three SNV sectors and the final
     # factory sector are persistent data, never linker spill space.
