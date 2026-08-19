@@ -124,15 +124,15 @@ Firmware всегда использует factory keys у провиженно�
 
 Для старого непривиженного прототипа сохранён legacy-режим: ключи читаются из SNV либо один раз создаются RNG PHY6252 и сохраняются в SNV.
 
-## 6. Подготовка factory HEX
+## 6. Подготовка factory record
 
-Для одного прибора:
+Для штатного PHY62x2 programmer нужен **64-байтный BIN**, а не отдельный application HEX:
 
 ```sh
 python3 tools/make_factory_identity.py \
   --serial 12874 \
   --hw-revision 2 \
-  --output tmp/factory-00012874.hex \
+  --binary-output tmp/factory-00012874.bin \
   --metadata tmp/factory-00012874.json
 ```
 
@@ -140,8 +140,10 @@ python3 tools/make_factory_identity.py \
 
 - BLE использует заводской public MAC PHY6252;
 - IRK и CSRK генерируются случайно один раз и всегда входят в record;
-- в JSON не записываются секретные ключи;
-- HEX содержит только адреса factory-сектора `0x1103F000`.
+- BIN содержит ровно 64 байта factory record;
+- BIN содержит секретные IRK/CSRK и создаётся с правами `0600`, где это поддерживает ОС;
+- JSON не содержит секретные ключи;
+- в metadata сохраняется SHA-256 factory record для контроля экземпляра.
 
 Если заводского MAC нет:
 
@@ -149,7 +151,7 @@ python3 tools/make_factory_identity.py \
 python3 tools/make_factory_identity.py \
   --serial 12874 \
   --generate-static-address \
-  --output tmp/factory-00012874.hex \
+  --binary-output tmp/factory-00012874.bin \
   --metadata tmp/factory-00012874.json
 ```
 
@@ -159,17 +161,42 @@ python3 tools/make_factory_identity.py \
 python3 tools/make_factory_identity.py \
   --serial 12874 \
   --static-address C2:34:56:78:9A:BC \
-  --output tmp/factory-00012874.hex
+  --binary-output tmp/factory-00012874.bin
 ```
 
-## 7. Прошивка на производстве
+Для внешнего программатора, который умеет писать Intel HEX без генерации собственного application header, дополнительно можно получить HEX:
+
+```sh
+python3 tools/make_factory_identity.py \
+  --serial 12874 \
+  --binary-output tmp/factory-00012874.bin \
+  --hex-output tmp/factory-00012874.hex
+```
+
+## 7. Почему factory HEX нельзя шить через `rdwr_phy62x2.py wh`
+
+Операция `wh` в используемой утилите PHY62x2 предназначена для **application image**. Она разбирает HEX, строит таблицу сегментов приложения (`HexfHeader`) и записывает служебный header в flash.
+
+Поэтому команда вида:
+
+```text
+rdwr_phy62x2.py ... wh factory.hex
+```
+
+для независимого provisioning запрещена: даже если HEX содержит только `0x1103F000`, `wh` всё равно создаёт application segment table и может изменить boot/application header.
+
+Штатный provisioning использует raw binary write `we` по flash offset `0x3F000`. Для 64-байтной записи `we` автоматически стирает только затронутый 4-КиБ sector и не трогает application header или SNV.
+
+Эта граница закреплена отдельным скриптом и contract test.
+
+## 8. Прошивка на производстве
 
 Рекомендуемый порядок для каждой платы:
 
 1. получить следующий уникальный `serial_number` из производственной БД;
-2. сформировать индивидуальный factory HEX;
-3. прошить application firmware;
-4. прошить factory HEX **без полного erase**;
+2. сформировать индивидуальный factory BIN и metadata JSON;
+3. прошить application firmware обычным способом;
+4. записать factory BIN отдельной provisioning-командой;
 5. перезапустить плату;
 6. проверить имя `Test-DPLS-XXXX`;
 7. подключиться по фирменному 128-bit Service UUID;
@@ -177,18 +204,34 @@ python3 tools/make_factory_identity.py \
 9. выполнить BLE pairing/auth smoke test;
 10. записать фактически прочитанный BLE address и результат тестов в производственную БД.
 
-Factory HEX можно записывать тем же программатором PHY62x2, которым прошивается обычный Intel HEX: файл содержит отдельную секцию с адресом `0x1103F000`.
-
-Пример для текущего стенда:
+Для текущего стенда:
 
 ```sh
 tools/flash_firmware.sh tmp/test-dpls.hex
-tools/flash_firmware.sh tmp/factory-00012874.hex
+tools/flash_factory_identity.sh tmp/factory-00012874.bin
+```
+
+`tools/flash_factory_identity.sh` проверяет размер файла (`64` байта) и вызывает:
+
+```text
+rdwr_phy62x2.py -r we 0x3F000 factory.bin
 ```
 
 Не использовать `--erase` между этими шагами.
 
-## 8. Производственная БД
+### Секретность временного BIN
+
+Factory BIN содержит IRK/CSRK. Его нельзя прикладывать к GitHub Actions artifacts, коммитить в репозиторий, отправлять в обычный production CSV или оставлять в общей папке оператора.
+
+Практический production flow:
+
+1. сгенерировать BIN непосредственно на станции;
+2. прошить плату;
+3. проверить record/device;
+4. сохранить только metadata без ключей;
+5. удалить временный BIN, если компания отдельно не приняла решение о защищённом escrow ключей.
+
+## 9. Производственная БД
 
 Минимальная запись на единицу продукции:
 
@@ -207,9 +250,9 @@ test_result
 
 IRK/CSRK не следует писать в обычные логи или CSV оператора. Если компании требуется резервное хранение секретов, оно должно быть отдельным защищённым хранилищем с контролем доступа.
 
-Уникальность `serial_number` обеспечивает производственная система **до** формирования factory HEX. Firmware не пытается самостоятельно «занять следующий номер».
+Уникальность `serial_number` обеспечивает производственная система **до** формирования factory record. Firmware не пытается самостоятельно «занять следующий номер».
 
-## 9. Factory reset и обновление firmware
+## 10. Factory reset и обновление firmware
 
 Обычный factory reset устройства может очистить:
 
@@ -230,7 +273,7 @@ IRK/CSRK не следует писать в обычные логи или CSV 
 
 Полный chip erase — сервисная/производственная операция. После него прибор нельзя выпускать или возвращать заказчику, пока factory identity не восстановлена из производственной записи и не пройдена повторная проверка.
 
-## 10. Advertising, discovery и pairing
+## 11. Advertising, discovery и pairing
 
 Новая прошивка не отправляет Manufacturer Specific Data с `0x0B01`.
 
@@ -246,27 +289,28 @@ Pairing больше не определяется косвенно по нал�
 
 Мобильный parser пока может читать старый manufacturer payload для обратной совместимости с ранними прототипами, но новая серийная прошивка его больше не создаёт.
 
-## 11. Что намеренно не добавлено
+## 12. Что намеренно не добавлено
 
 Отдельный `device_secret` сейчас не вводится: в существующем протоколе Test-DPLS для него нет потребителя. Хранить дополнительный секрет «на будущее» без определённого криптографического назначения — лишний lifecycle и риск утечки. Если появится device attestation, secure provisioning backend или подпись производственных данных, формат factory record нужно расширить новой версией с конкретной моделью ключей.
 
-## 12. Автоматические проверки
+## 13. Автоматические проверки
 
 `tools/test_factory_identity.py` проверяет:
 
 - бинарный factory record и CRC;
 - обязательные IRK/CSRK;
 - генерацию корректного static-random address;
-- Intel HEX и checksums;
+- Intel HEX и checksums для внешних production tools;
 - отсутствие runtime MAC generation;
 - отсутствие `0x0B01` в новой PHY6252 рекламе;
 - encrypted CCCD;
 - post-GAP identity retry;
-- что linker заканчивает XIP до `0x1103C000` и не может занять SNV/factory sectors.
+- что linker заканчивает XIP до `0x1103C000` и не может занять SNV/factory sectors;
+- что штатный factory flasher использует `we 0x3F000`, принимает только 64-байтный BIN и не использует application `wh`.
 
 Тест включён в `tools/check_all.sh`.
 
-## 13. Критерии готовности к серии
+## 14. Критерии готовности к серии
 
 Перед первым серийным выпуском проверить на реальном стенде:
 
@@ -278,6 +322,7 @@ Pairing больше не определяется косвенно по нал�
 - удаление SNV не меняет identity у провиженного прибора;
 - прибор с повреждённой/неполной identity не начинает BLE advertising;
 - полный erase блокируется сервисным скриптом без override;
+- factory provisioning не изменяет application header и SNV;
 - после намеренного chip erase и повторного provisioning прибор возвращает тот же serial;
 - две платы с одинаковым serial не могут пройти производственный acceptance;
 - приложение фильтрует приборы по Service UUID и корректно показывает `Test-DPLS-XXXX`;
