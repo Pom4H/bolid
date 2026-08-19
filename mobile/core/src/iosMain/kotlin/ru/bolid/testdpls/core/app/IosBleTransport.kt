@@ -41,9 +41,11 @@ internal class IosBleTransport : DplsTransport {
     private var inFlightWrite: ByteArray? = null
     private var pairingRetryCount = 0
     private var subscribed = false
+    private var lastStage = "idle"
 
     private val delegate = object : NSObject(), CBCentralManagerDelegateProtocol, CBPeripheralDelegateProtocol {
         override fun centralManagerDidUpdateState(central: CBCentralManager) {
+            markStage("central-state:${central.state}")
             if (central.state == CBManagerStatePoweredOn) {
                 listener?.onBluetoothAvailable()
             } else {
@@ -82,7 +84,9 @@ internal class IosBleTransport : DplsTransport {
             }
             peripheral = didConnectPeripheral
             didConnectPeripheral.delegate = this
+            markStage("didConnect")
             listener?.onConnected()
+            markStage("discoverServices-requested")
             didConnectPeripheral.discoverServices(listOf(serviceUuid))
         }
 
@@ -114,16 +118,19 @@ internal class IosBleTransport : DplsTransport {
         override fun peripheral(peripheral: CBPeripheral, didDiscoverServices: NSError?) {
             if (!isSelected(peripheral)) return
             if (didDiscoverServices != null) {
+                markStage("didDiscoverServices-error")
                 deliverNsError(peripheral, "Поиск службы", didDiscoverServices)
                 return
             }
+            markStage("didDiscoverServices-ok")
             val service = peripheral.services
                 ?.filterIsInstance<CBService>()
                 ?.firstOrNull { uuidMatches(it.UUID, serviceUuid) }
             if (service == null) {
-                listener?.onTransportError("Служба Test-DPLS не найдена")
+                listener?.onTransportError("Служба Test-DPLS не найдена; stage=$lastStage")
                 return
             }
+            markStage("discoverCharacteristics-requested")
             peripheral.discoverCharacteristics(listOf(rxUuid, txUuid), service)
         }
 
@@ -135,22 +142,30 @@ internal class IosBleTransport : DplsTransport {
         ) {
             if (!isSelected(peripheral)) return
             if (error != null) {
+                markStage("didDiscoverCharacteristics-error")
                 deliverNsError(peripheral, "Характеристики", error)
                 return
             }
+            markStage("didDiscoverCharacteristics-ok")
             val characteristics = didDiscoverCharacteristicsForService.characteristics
                 ?.filterIsInstance<CBCharacteristic>()
                 .orEmpty()
             rx = characteristics.firstOrNull { uuidMatches(it.UUID, rxUuid) }
             val notify = characteristics.firstOrNull { uuidMatches(it.UUID, txUuid) }
             if (rx == null || notify == null) {
-                listener?.onTransportError("Служба Test-DPLS не найдена")
+                listener?.onTransportError("Служба Test-DPLS не найдена; stage=$lastStage")
                 return
             }
             writeLimit = peripheral.maximumWriteValueLengthForType(CBCharacteristicWriteWithResponse)
                 .toInt()
                 .coerceAtLeast(20)
-            if (notify.isNotifying) completeSubscribe() else peripheral.setNotifyValue(true, notify)
+            if (notify.isNotifying) {
+                markStage("notify-already-enabled")
+                completeSubscribe()
+            } else {
+                markStage("setNotify-requested")
+                peripheral.setNotifyValue(true, notify)
+            }
         }
 
         @ObjCSignatureOverride
@@ -161,9 +176,11 @@ internal class IosBleTransport : DplsTransport {
         ) {
             if (!isSelected(peripheral) || !uuidMatches(didUpdateNotificationStateForCharacteristic.UUID, txUuid)) return
             if (error != null) {
+                markStage("didUpdateNotificationState-error")
                 deliverNsError(peripheral, "Подписка на BLE-события", error)
                 return
             }
+            markStage("didUpdateNotificationState-ok")
             completeSubscribe()
         }
 
@@ -175,9 +192,11 @@ internal class IosBleTransport : DplsTransport {
         ) {
             if (!isSelected(peripheral) || !uuidMatches(didUpdateValueForCharacteristic.UUID, txUuid)) return
             if (error != null) {
+                markStage("didUpdateValue-error")
                 deliverNsError(peripheral, "Ошибка BLE-индикации", error)
                 return
             }
+            markStage("didUpdateValue-ok")
             didUpdateValueForCharacteristic.value?.let { listener?.onBytes(it.toByteArrayCopy()) }
         }
 
@@ -189,6 +208,7 @@ internal class IosBleTransport : DplsTransport {
         ) {
             if (!isSelected(peripheral) || !uuidMatches(didWriteValueForCharacteristic.UUID, rxUuid)) return
             writeInProgress = false
+            markStage(if (error == null) "didWrite-ok" else "didWrite-error:${error.domain}/${error.code}")
             if (error != null && isStaleBondError(error)) {
                 reportStaleBond(peripheral)
                 return
@@ -196,6 +216,7 @@ internal class IosBleTransport : DplsTransport {
             if (error != null && isPairingWriteError(error) && pairingRetryCount < PAIRING_WRITE_RETRIES) {
                 pairingRetryCount++
                 inFlightWrite?.let { writeQueue.addFirst(it.copyOf()) }
+                markStage("pairing-write-retry:$pairingRetryCount")
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, PAIRING_RETRY_NS), dispatch_get_main_queue()) {
                     drainWrites()
                 }
@@ -255,16 +276,18 @@ internal class IosBleTransport : DplsTransport {
         subscribed = false
         resetWrites()
         target.delegate = delegate
+        markStage("connect-entry:state=${target.state}")
         when (target.state) {
             CBPeripheralStateConnected -> {
                 listener?.onConnected()
+                markStage("discoverServices-requested:already-connected")
                 target.discoverServices(listOf(serviceUuid))
             }
-            // CoreBluetooth keeps an outstanding connection request pending until
-            // it succeeds or fails. A second connectPeripheral() for the same
-            // peripheral is not a retry and can perturb the in-flight attempt.
-            CBPeripheralStateConnecting -> Unit
-            else -> central.connectPeripheral(target, options = null)
+            CBPeripheralStateConnecting -> markStage("connect-already-pending")
+            else -> {
+                markStage("connectPeripheral-requested")
+                central.connectPeripheral(target, options = null)
+            }
         }
         return true
     }
@@ -325,6 +348,7 @@ internal class IosBleTransport : DplsTransport {
     private fun completeSubscribe() {
         if (subscribed) return
         subscribed = true
+        markStage("subscribed-callback")
         listener?.onSubscribed(writeLimit)
     }
 
@@ -335,6 +359,7 @@ internal class IosBleTransport : DplsTransport {
         val next = writeQueue.removeFirstOrNull() ?: return
         inFlightWrite = next
         writeInProgress = true
+        markStage("write-requested:n=${next.size}")
         target.writeValue(next.toNSDataCopy(), characteristic, CBCharacteristicWriteWithResponse)
     }
 
@@ -352,12 +377,19 @@ internal class IosBleTransport : DplsTransport {
         central.cancelPeripheralConnection(peripheral)
     }
 
+    private fun markStage(stage: String) {
+        lastStage = stage
+        println("DPLS BLE stage: $stage")
+    }
+
     private fun deliverLinkFailure(peripheral: CBPeripheral, stage: String, error: NSError?) {
         if (error != null && isStaleBondError(error)) {
             reportStaleBond(peripheral)
             return
         }
-        val detail = error?.let { "$stage: ${it.domain}/${it.code}: ${it.localizedDescription}" }
+        val detail = error?.let {
+            "$stage after=$lastStage: ${it.domain}/${it.code}: ${it.localizedDescription}"
+        } ?: "$stage after=$lastStage"
         listener?.onDisconnected(detail)
     }
 
@@ -366,7 +398,7 @@ internal class IosBleTransport : DplsTransport {
             reportStaleBond(peripheral)
             return
         }
-        listener?.onTransportError("$prefix: ${error.domain}/${error.code}: ${error.localizedDescription}")
+        listener?.onTransportError("$prefix after=$lastStage: ${error.domain}/${error.code}: ${error.localizedDescription}")
     }
 
     private fun isPairingWriteError(error: NSError): Boolean {
