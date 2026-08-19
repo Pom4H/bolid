@@ -1,57 +1,69 @@
-# Mobile
+# Mobile Test-DPLS
 
-Test-DPLS has one Kotlin Multiplatform application for Android and iOS.
+Один Kotlin Multiplatform application для Android и iOS.
 
-## Where code belongs
+Текущая версия приложений — **1.4.1**. PHY6252 firmware — **1.4.2**. Wire protocol — v2.
 
-| Path | Responsibility |
+## Где находится код
+
+| Путь | Ответственность |
 |---|---|
-| `core/src/commonMain/` | `DplsClient`, shared Compose UI, protocol/CRC/auth, binary parsers, domain and session runtime |
-| `core/src/commonTest/` | Cross-platform controller/protocol/crypto/session tests |
-| `core/src/androidMain/` | `AndroidBleTransport`, Android clock/prefs/alerts/BLE keep-alive |
-| `core/src/iosMain/` | `IosBleTransport`, Apple clock/random/alerts and Compose `UIViewController` entry point |
-| `android/` | permissions/Activity shell and debug E2E driver |
-| `ios/` | Xcode project, plist/assets and one minimal Swift bootstrap |
-| `web/` | wasm Compose host (`LabBleTransport`) |
+| `core/src/commonMain/` | `DplsClient`, Compose UI, protocol/crypto/parsers/domain/session orchestration |
+| `core/src/commonTest/` | общие unit/contract tests |
+| `core/src/androidMain/` | `AndroidBleTransport`, Android services/alerts/prefs |
+| `core/src/iosMain/` | `IosBleTransport`, Apple services и Compose UIViewController |
+| `runtime/` | `NodeId`, session lifecycle, endpoint и sequencing |
+| `wire/` | низкоуровневый wire/CRC/crypto/radio-name helpers |
+| `android/` | permissions и Activity/Application shell |
+| `ios/` | Xcode shell, plist/assets/signing |
+| `web/` | тот же Compose UI поверх lab transport |
 
-Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`). Current PHY6252 firmware is **1.4.2**; both use DPLS wire protocol v2. BLE scan identifies the product by the project Service UUID and `Test-DPLS-XXXX` name. Full serial, firmware version, hardware revision, capabilities and the user-assigned name come from `DEVICE_INFO_REPORT` after connection.
+Правило: если Android и iOS должны показать одинаковое поведение, оно находится в common Kotlin code.
 
-The rule is simple: **if Android and iOS should produce the same answer or show the same product behavior, put it in `commonMain`.** Platform code only translates operating-system APIs into `DplsTransport` events.
+## BLE identity и discovery
 
-There is no SwiftUI copy, second protocol codec or second application controller.
+Приложение сканирует по фирменному Service UUID:
 
-## Entry points
+`7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`
 
-Android:
+Radio name имеет вид `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит serial. Этот суффикс используется только для отображения и **не считается полным deviceId**.
 
-```text
-MainActivity
-  → DplsApplication.client (DplsClient + Android adapters)
-  → DplsApp (commonMain Compose)
-```
+Полный 32-битный `NodeId` становится известен только после `DEVICE_INFO_REPORT`.
 
-iOS:
+Manufacturer Specific Data в текущем контракте нет. Firmware version/status не читаются из advertising.
 
-```text
-TestDPLSApp.swift (bootstrap only)
-  → IosAppKt.MainViewController()
-  → DplsClient(IosBleTransport, IosPlatformServices)
-  → DplsApp (commonMain Compose)
-```
+## Credentials
 
-The generated Apple framework is named `DplsCore`.
+Verifier долговременно привязывается к подтверждённому `NodeId` (`node:<serial>`). До первого `DEVICE_INFO_REPORT` после commissioning допустим временный cache `endpoint:<BLE endpoint>`, необходимый для reconnect после reboot платы.
 
-## Fastest local workflow
+Старые migration aliases `id:`, `addr:` и `legacy-addr:` не поддерживаются.
 
-From the repository root:
+## Android
+
+`AndroidBleTransport` отвечает за:
+
+- service-UUID scan;
+- `BluetoothGatt` lifecycle;
+- MTU;
+- CCCD;
+- bonding по `INSUFFICIENT_AUTHENTICATION/ENCRYPTION`;
+- transient retries и stale-bond recovery.
+
+Pairing не определяется по advertising: TX CCCD на firmware требует encrypted write.
+
+## iOS
+
+`IosBleTransport` использует CoreBluetooth. iOS не предоставляет приложению BLE MAC; transport endpoint — `CBPeripheral.identifier`.
+
+CoreBluetooth инициирует pairing, когда защищённая GATT операция требует encryption/authentication.
+
+## Быстрый цикл разработки
 
 ```sh
 bash tools/check_mobile.sh
 ```
 
-The script runs shared JVM tests, core/Android lint and assembles the debug APK. On macOS it also executes Kotlin/Native simulator tests, links `DplsCore` and runs the Xcode integration smoke test.
-
-Individual commands:
+Отдельно Android/JVM:
 
 ```sh
 cd mobile
@@ -67,41 +79,18 @@ macOS/iOS:
 open ios/TestDPLS.xcodeproj
 ```
 
-## Adding a feature
+Для Gradle/Xcode integration требуется Java 17.
 
-- Screen/presentation or application flow → `core/src/commonMain/.../app/`.
-- Protocol field/message/auth contract → `core/src/commonMain/.../protocol/` plus `commonTest` byte-contract tests.
-- Secret/session runtime rule → `core/src/commonMain/.../session/`.
-- Android Bluetooth/lifecycle quirk → `core/src/androidMain/`
-- iOS CoreBluetooth/lifecycle quirk → `core/src/iosMain/`
-- Xcode signing/assets/capabilities → `ios/` only.
+## GATT
 
-An ordinary product feature should normally touch one shared Kotlin area. Do not add compatibility facades or platform controllers unless an OS API genuinely requires a new boundary.
-
-## Test strategy
-
-The reusable layer carries the behavior-heavy tests:
-
-- CRC-16/CCITT-FALSE known-answer vectors;
-- encode/decode round trips for every message type;
-- 10,000 malformed/random decoder inputs and 2,000 random valid round trips;
-- auth/command/state/device-info/journal binary contracts;
-- SHA-256/HMAC/PBKDF2 known-answer vectors;
-- shared `DplsClient` fake-transport flows including stale command-id rejection and Bluetooth-loss safety;
-- session secret/reset tests.
-
-The same common tests execute for JVM/Android and Kotlin/Native. Platform validation focuses on Bluetooth/framework integration rather than re-testing protocol rules twice.
-
-Without a physical phone, `bash tools/soft_ble_e2e.sh` runs the product `DplsClient` against `dpls_simulator`. The wasm phone is the same UI over WebSocket; it is not a second client.
-
-## BLE service
-
-| Item | UUID |
+| Элемент | UUID |
 |---|---|
 | Service | `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001` |
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-Pairing is driven by the encrypted CCCD write required by current firmware; the mobile app does not infer security requirements from Manufacturer Specific Data.
+UI считает hardware mode подтверждённым только после matching `COMMAND_RESULT` и `STATE_REPORT`, а не после успешного GATT write.
 
-A mode is application-visible only after firmware returns the matching `COMMAND_RESULT` and the following `STATE_REPORT`; a successful GATT write is never treated as proof of hardware state.
+## Тестовая стратегия
+
+Общие tests покрывают wire/CRC/crypto, binary contracts, session transitions, reconnect, stale responses, settings, journal и malformed/random frames. Platform tests проверяют интеграцию OS API, а реальное BLE/pairing остаётся hardware E2E.
