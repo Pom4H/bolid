@@ -32,13 +32,13 @@ PHY6252 runtime coordinator
 
 ### `dpls_phy6252_transport`
 
-Владеет BLE connection handle, RX/TX очередями, pacing одного PDU in-flight, контролем encryption timeout и bond-desync эвристикой. GATT write callback только копирует frame в очередь и будит OSAL event.
+Владеет BLE connection handle, RX/TX очередями, pacing одного PDU in-flight, контролем encryption timeout и bond-desync эвристикой. GATT write callback только копирует frame в очередь и будит OSAL event. Runtime получает указатель на head RX-очереди на время одного OSAL turn и после обработки явно consume-ит его — второго 96-байтного RX-буфера нет.
 
-### `dpls_phy6252_storage`
+### Storage layer
 
-Единственный владелец `osal_snv_read/write`. Настройки, auth-lock, calibration и event journal физически проходят только через этот модуль.
+`dpls_phy6252_storage.c` владеет settings, auth-lock, calibration и event journal. `dpls_phy6252_storage_ble.c` владеет SNV-копиями BLE IRK/CSRK. Другим PHY6252-модулям `osal_snv_read/write` запрещён architecture guard-ом.
 
-События журнала во время активного BLE link складываются в RAM write-behind queue. Flash journal пишется только после disconnect отдельным `DPLS_PHY6252_STORAGE_EVT`, по одному SNV-блоку за OSAL turn.
+События журнала во время активного BLE link складываются в RAM write-behind queue. Flash journal пишется только после disconnect отдельным `DPLS_PHY6252_STORAGE_EVT`, по одному SNV-блоку за OSAL turn. Один 120-байтный journal cache используется и для чтения, и для disconnected write-back — параллельный service buffer не нужен.
 
 Настройки и пароль имеют синхронную durability-семантику по протоколу, поэтому их SNV transaction разрешена в сессии, но выполняется через supervisor с расширенным watchdog budget.
 
@@ -60,7 +60,7 @@ PHY6252 runtime coordinator
 
 ## Инварианты
 
-1. `osal_snv_read/write` запрещены вне `dpls_phy6252_storage.c`.
+1. `osal_snv_read/write` разрешены только storage layer (`dpls_phy6252_storage*.c`).
 2. `hal_watchdog_feed/watchdog_config` запрещены вне `dpls_phy6252_supervisor.c`.
 3. `hal_adc_*` и `adc.h` запрещены вне `dpls_phy6252_measurements.c`.
 4. BLE RX callback не выполняет protocol/domain work.
@@ -73,7 +73,7 @@ PHY6252 runtime coordinator
 
 ## Ограничение write-behind журнала
 
-RAM queue рассчитана на 32 события одной непрерывной BLE-сессии. При переполнении `events.append` возвращает ошибку доменному серверу вместо скрытой flash-записи в radio-critical path. Это намеренный fail-visible режим. Если реальные сценарии покажут, что 32 событий недостаточно, следующий шаг — отдельный append-only flash journal/FRAM, а не возврат `osal_snv_write()` в BLE path.
+RAM queue рассчитана на 24 события одной непрерывной BLE-сессии. При переполнении `events.append` возвращает ошибку доменному серверу вместо скрытой flash-записи в radio-critical path. Это намеренный fail-visible режим. Если реальные сценарии покажут, что 24 событий недостаточно, следующий шаг — отдельный append-only flash journal/FRAM, а не возврат `osal_snv_write()` в BLE path.
 
 ## Hardware acceptance после рефакторинга
 
