@@ -14,7 +14,7 @@ Test-DPLS has one Kotlin Multiplatform application for Android and iOS.
 | `ios/` | Xcode project, plist/assets and one minimal Swift bootstrap |
 | `web/` | wasm Compose host (`LabBleTransport`) |
 
-Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`), matching firmware `DPLS_FW_VERSION_*`.
+Phone version is **1.4.1** (`versionName` / `MARKETING_VERSION`). Current PHY6252 firmware is **1.4.2**; both use DPLS wire protocol v2, and the scan list reads the firmware version from BLE manufacturer data before connecting.
 
 The rule is simple: **if Android and iOS should produce the same answer or show the same product behavior, put it in `commonMain`.** Platform code only translates operating-system APIs into `DplsTransport` events.
 
