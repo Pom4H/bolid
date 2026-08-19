@@ -15,10 +15,6 @@ void dpls_ble_identity_prepare(void);
 /* Sync the selected public/static identity address after GAP_DeviceInit. */
 void dpls_ble_identity_on_stack_started(void);
 
-/* Clears runtime copies of BLE identity keys in SNV. Factory keys are not
- * touched and are restored from the mandatory factory record on reboot. */
-void dpls_ble_identity_reset_bonding_keys(void);
-
 /* Stable 32-bit production serial number from the factory record. */
 uint32_t dpls_ble_identity_device_id(void);
 
