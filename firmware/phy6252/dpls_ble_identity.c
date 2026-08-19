@@ -146,6 +146,17 @@ static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
     return true;
 }
 
+static bool configure_static_identity_addr(const uint8_t mac[B_ADDR_LEN])
+{
+    uint8_t controller_addr[B_ADDR_LEN];
+
+    /* GAP_DeviceInit snapshots the local address used by the peripheral role.
+     * Static-random identity therefore has to be configured before
+     * GAPRole_StartDevice(), not after GAPROLE_STARTED. */
+    display_to_controller_addr(mac, controller_addr);
+    return GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, controller_addr) == SUCCESS;
+}
+
 static bool select_identity_address(const dpls_factory_identity_t *factory,
                                     uint8_t mac[B_ADDR_LEN],
                                     uint8_t *addr_type)
@@ -176,6 +187,11 @@ void dpls_ble_identity_prepare(void)
     if (!factory_identity_load(&factory)) return;
     if (!select_identity_address(&factory, mac, &addr_type)) return;
 
+    /* Static-random address selection is a GAP initialization input. The PHY6252
+     * role captures its local address during GAP_DeviceInit(), so configure it
+     * here while SimpleBLEPeripheral_Init() is still before GAPRole_StartDevice(). */
+    if (addr_type == ADDRTYPE_STATIC && !configure_static_identity_addr(mac)) return;
+
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_addr_type = addr_type;
     s_device_id = factory.serial_number;
@@ -190,28 +206,21 @@ void dpls_ble_identity_on_stack_started(void)
     uint8_t irk[KEYLEN];
     uint8_t hci_addr[B_ADDR_LEN];
     uint8_t zero_irk[KEYLEN];
-    uint8_t static_controller_addr[B_ADDR_LEN];
 
     s_identity_ready = false;
     if (!s_identity_mac_valid) dpls_ble_identity_prepare();
     if (!s_identity_mac_valid) return;
 
-    /* PR #32: PHY6252 may reject HCI_EXT_SetBDADDRCmd before the controller has
-     * fully started. Apply public identity after GAPROLE_STARTED and let the
-     * idle tick retry this function if the controller is temporarily busy. */
-    if (s_identity_addr_type == ADDRTYPE_PUBLIC && !set_controller_public_addr(s_identity_mac)) return;
+    /* Public identity still needs the controller to be live: PHY6252 may reject
+     * HCI_EXT_SetBDADDRCmd before GAPROLE_STARTED. Static identity was already
+     * configured before GAP_DeviceInit and must not be changed here. */
+    if (s_identity_addr_type == ADDRTYPE_PUBLIC) {
+        if (!set_controller_public_addr(s_identity_mac)) return;
+        if (GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL) != SUCCESS) return;
+    }
 
     GAPRole_GetParameter(GAPROLE_IRK, irk);
     if (key_is_invalid(irk)) return;
-
-    if (s_identity_addr_type == ADDRTYPE_STATIC) {
-        /* Factory data is stored in human/display order (C2:34:...). GAP uses
-         * the SDK B_ADDR byte layout, therefore feed it the reversed array. */
-        display_to_controller_addr(s_identity_mac, static_controller_addr);
-        if (GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, static_controller_addr) != SUCCESS) return;
-    } else if (GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL) != SUCCESS) {
-        return;
-    }
 
     GAPRole_GetParameter(GAPROLE_BD_ADDR, hci_addr);
     if (mac_is_invalid(hci_addr)) return;
