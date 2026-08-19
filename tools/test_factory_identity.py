@@ -20,6 +20,7 @@ def assert_source_contract() -> None:
     gatt = Path("firmware/phy6252/dpls_gatt_service.c").read_text(encoding="utf-8")
     scatter = Path("firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
     gcc_ld = Path("firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
+    flash_factory = Path("tools/flash_factory_identity.sh").read_text(encoding="utf-8")
 
     # Production firmware may consume randomness for keys, but must never mint
     # a new BLE address at boot or persist one into the legacy 0x82 slot.
@@ -54,10 +55,18 @@ def assert_source_contract() -> None:
     assert "0x1103C000" in gcc_ld
     assert "0x1103F000" in gcc_ld
 
+    # Factory data must be written as a raw 64-byte record at flash offset
+    # 0x3F000. The generic `wh` path rewrites the application segment table.
+    assert "FACTORY_OFFSET=0x3F000" in flash_factory
+    assert "FACTORY_SIZE=64" in flash_factory
+    assert ' -r we "$FACTORY_OFFSET" "$BIN"' in flash_factory
+    assert " -r wh " not in flash_factory
+
 
 def main() -> int:
     chip_record = factory.make_record(0x12345678, 2, None)
     assert len(chip_record) == factory.RECORD_SIZE
+    assert factory.FLASH_OFFSET == 0x3F000
     assert struct.unpack_from("<I", chip_record, 0)[0] == factory.MAGIC
     assert struct.unpack_from("<H", chip_record, 4)[0] == factory.VERSION
     assert struct.unpack_from("<H", chip_record, 6)[0] == factory.RECORD_SIZE
