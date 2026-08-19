@@ -12,9 +12,12 @@ void dpls_phy6252_transport_pairing_state(uint8 state, uint8 status);
 bool dpls_phy6252_transport_connected_now(void);
 uint16 dpls_phy6252_transport_connection_handle(void);
 
-/* GATT RX callback: enqueue only, never execute protocol work in the ATT write turn. */
+/* GATT RX callback: enqueue only, never execute protocol work in the ATT write turn.
+ * Runtime borrows the queue head for one OSAL turn, then consumes it explicitly;
+ * there is no second 96-byte copy buffer. */
 uint8 dpls_phy6252_transport_receive_frame(const uint8 *data, uint16 length);
-bool dpls_phy6252_transport_pop_rx(uint8 *out, uint16 *length, uint16 capacity);
+bool dpls_phy6252_transport_peek_rx(const uint8 **data, uint16 *length);
+void dpls_phy6252_transport_consume_rx(void);
 
 /* dpls_link_hal_t implementation. */
 bool dpls_phy6252_transport_encrypted(void *context);
