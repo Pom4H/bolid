@@ -6,6 +6,7 @@
 void dpls_phy6252_runtime_init(uint8 task_id);
 void dpls_phy6252_runtime_connected(uint16 conn_handle);
 void dpls_phy6252_runtime_disconnected(void);
+void dpls_phy6252_runtime_pairing_state(uint8 state, uint8 status);
 void dpls_phy6252_runtime_process_rx(void);
 void dpls_phy6252_runtime_process_adc(void);
 void dpls_phy6252_runtime_process_tx(void);
