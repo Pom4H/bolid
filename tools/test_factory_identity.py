@@ -33,6 +33,7 @@ def assert_source_contract() -> None:
     advertisement = Path(
         "mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsAdvertisement.kt"
     ).read_text(encoding="utf-8")
+    lab_ble = Path("tools/dpls-lab/native/DplsBle.swift").read_text(encoding="utf-8")
 
     # One production identity model only: a valid factory record is mandatory.
     assert "DPLS_LEGACY_BLE_MAC" not in identity
@@ -55,7 +56,7 @@ def assert_source_contract() -> None:
     # Provisioned records are complete identities, not just serial-number tags.
     assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
 
-    # No Bluetooth SIG Company ID or old manufacturer payload in current firmware/mobile.
+    # No Bluetooth SIG Company ID or old manufacturer payload anywhere in the current BLE path.
     assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
     assert "0x01, 0x0b" not in peripheral.lower()
     assert "MANUFACTURER_ID" not in mobile_ble
@@ -64,6 +65,9 @@ def assert_source_contract() -> None:
     assert "CBAdvertisementDataManufacturerDataKey" not in ios_ble
     assert "COMPANY_ID" not in advertisement
     assert "fun parse(raw:" not in advertisement
+    assert "companyId" not in lab_ble
+    assert "parseManufacturer" not in lab_ble
+    assert "CBAdvertisementDataManufacturerDataKey" not in lab_ble
 
     # Pairing/security is expressed by GATT permissions, not by an advertising marker.
     assert (
