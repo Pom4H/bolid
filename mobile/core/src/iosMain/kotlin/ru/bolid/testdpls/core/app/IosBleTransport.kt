@@ -93,7 +93,7 @@ internal class IosBleTransport : DplsTransport {
             error: NSError?,
         ) {
             if (!isSelected(didFailToConnectPeripheral)) return
-            deliverLinkFailure(didFailToConnectPeripheral, error)
+            deliverLinkFailure(didFailToConnectPeripheral, "connect", error)
         }
 
         @ObjCSignatureOverride
@@ -107,7 +107,7 @@ internal class IosBleTransport : DplsTransport {
             rx = null
             subscribed = false
             resetWrites()
-            deliverLinkFailure(didDisconnectPeripheral, error)
+            deliverLinkFailure(didDisconnectPeripheral, "disconnect", error)
         }
 
         @ObjCSignatureOverride
@@ -260,15 +260,11 @@ internal class IosBleTransport : DplsTransport {
                 listener?.onConnected()
                 target.discoverServices(listOf(serviceUuid))
             }
+            // CoreBluetooth keeps an outstanding connection request pending until
+            // it succeeds or fails. A second connectPeripheral() for the same
+            // peripheral is not a retry and can perturb the in-flight attempt.
             CBPeripheralStateConnecting -> Unit
             else -> central.connectPeripheral(target, options = null)
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, GAP_CONNECT_NUDGE_NS), dispatch_get_main_queue()) {
-            val pending = peripheral ?: return@dispatch_after
-            if (!isSelected(pending)) return@dispatch_after
-            if (pending.state == CBPeripheralStateConnecting) {
-                central.connectPeripheral(pending, options = null)
-            }
         }
         return true
     }
@@ -356,12 +352,13 @@ internal class IosBleTransport : DplsTransport {
         central.cancelPeripheralConnection(peripheral)
     }
 
-    private fun deliverLinkFailure(peripheral: CBPeripheral, error: NSError?) {
+    private fun deliverLinkFailure(peripheral: CBPeripheral, stage: String, error: NSError?) {
         if (error != null && isStaleBondError(error)) {
             reportStaleBond(peripheral)
             return
         }
-        listener?.onDisconnected(error?.localizedDescription)
+        val detail = error?.let { "$stage: ${it.domain}/${it.code}: ${it.localizedDescription}" }
+        listener?.onDisconnected(detail)
     }
 
     private fun deliverNsError(peripheral: CBPeripheral, prefix: String, error: NSError) {
@@ -369,7 +366,7 @@ internal class IosBleTransport : DplsTransport {
             reportStaleBond(peripheral)
             return
         }
-        listener?.onTransportError("$prefix: ${error.localizedDescription}")
+        listener?.onTransportError("$prefix: ${error.domain}/${error.code}: ${error.localizedDescription}")
     }
 
     private fun isPairingWriteError(error: NSError): Boolean {
@@ -395,6 +392,5 @@ internal class IosBleTransport : DplsTransport {
         private const val CBERROR_ENCRYPTION_TIMED_OUT = 15L
         private const val PAIRING_WRITE_RETRIES = 60
         private const val PAIRING_RETRY_NS = 50_000_000L
-        private const val GAP_CONNECT_NUDGE_NS = 2_000_000_000L
     }
 }
