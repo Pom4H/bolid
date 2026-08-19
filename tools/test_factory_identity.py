@@ -45,10 +45,13 @@ def assert_source_contract() -> None:
         "GATT_PERMIT_ENCRYPT_WRITE"
     ) in gatt
 
-    # Both production linkers must leave the final 4 KiB sector untouched.
-    assert "0x01F000" in scatter
+    # Application XIP must stop before SNV. The three SNV sectors and the final
+    # factory sector are persistent data, never linker spill space.
+    assert "0x01C000" in scatter
+    assert "0x1103C000" in scatter
     assert "0x1103F000" in scatter
-    assert "LENGTH = 0x1f000" in gcc_ld
+    assert "LENGTH = 0x1c000" in gcc_ld
+    assert "0x1103C000" in gcc_ld
     assert "0x1103F000" in gcc_ld
 
 
