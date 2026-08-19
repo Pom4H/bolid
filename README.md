@@ -124,7 +124,7 @@ Same Compose `DplsApp` as Android/iOS (`mobile/web`). Details: [tools/dpls-lab/R
 
 The chip hex runner is a git submodule (`third_party/phy6252-emu`); Bolid does not launch it. See [docs/chip-emulator.md](docs/chip-emulator.md).
 
-Current firmware and phone version is **1.4.1** (`DPLS_FW_VERSION_*` and Android/iOS `versionName`). Protocol framing remains v2.
+Current PHY6252 firmware is **1.4.2**; Android/iOS remain **1.4.1**. Both use DPLS wire protocol v2. Firmware 1.4.2 advertises `deviceId + status + firmware version` as one BLE manufacturer payload so the phone can identify the board and show its firmware before connecting.
 
 ### Capture real phone↔board sessions (for simulator fidelity)
 
