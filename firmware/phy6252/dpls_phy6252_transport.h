@@ -8,6 +8,7 @@
 void dpls_phy6252_transport_init(uint8 task_id);
 void dpls_phy6252_transport_connected(uint16 conn_handle);
 void dpls_phy6252_transport_disconnected(bool authenticated);
+void dpls_phy6252_transport_pairing_state(uint8 state, uint8 status);
 bool dpls_phy6252_transport_connected_now(void);
 uint16 dpls_phy6252_transport_connection_handle(void);
 
