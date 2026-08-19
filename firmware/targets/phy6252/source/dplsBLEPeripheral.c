@@ -115,8 +115,7 @@ static void rssi_changed(int8 rssi) { (void)rssi; }
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
     (void)conn_handle;
-    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS)
-        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+    dpls_phy6252_runtime_pairing_state(state, status);
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
