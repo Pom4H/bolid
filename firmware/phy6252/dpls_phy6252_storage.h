@@ -35,7 +35,9 @@ bool dpls_phy6252_storage_event_read(void *context, uint32_t sequence, dpls_even
 void dpls_phy6252_storage_load_calibration(dpls_calib_t *line, dpls_calib_t *vcap,
                                            bool *line_from_nv);
 
-/* Physical factory reset transaction. */
+/* Physical factory reset and BLE stack-key transactions. Factory identity itself
+ * lives in the protected factory sector and is never erased here. */
 bool dpls_phy6252_storage_clear_settings(void);
+void dpls_phy6252_storage_reset_ble_bonding_keys(void);
 
 #endif
