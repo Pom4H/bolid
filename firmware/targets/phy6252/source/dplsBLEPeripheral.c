@@ -80,7 +80,7 @@ static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED: {
-        uint8 enabled = TRUE;
+        uint8 enabled = dpls_ble_identity_is_ready() ? TRUE : FALSE;
         dpls_ble_identity_on_stack_started();
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
@@ -97,7 +97,7 @@ static void state_changed(gaprole_States_t state)
     }
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT: {
-        uint8 enabled = TRUE;
+        uint8 enabled = dpls_ble_identity_is_ready() ? TRUE : FALSE;
         link_up = FALSE;
         dpls_phy6252_disconnected();
         schedule_led_if_needed(); /* turn an interrupted identify off immediately */
