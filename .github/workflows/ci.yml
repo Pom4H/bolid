@@ -148,10 +148,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install GNU Arm Embedded
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Setup cached ARM GNU Toolchain
+        uses: ./.github/actions/setup-arm-gcc
       - name: Build production PHY6252 HEX
         run: |
           mkdir -p tmp
@@ -207,10 +205,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-      - name: Install GNU Arm Embedded
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+      - name: Setup cached ARM GNU Toolchain
+        uses: ./.github/actions/setup-arm-gcc
       - name: Fetch pinned PHY62XX SDK 3.1.2
         run: bash tools/fetch_phy6252_sdk.sh
       - name: Build
