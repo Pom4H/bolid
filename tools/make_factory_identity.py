@@ -56,14 +56,14 @@ def generate_static_mac() -> bytes:
     return bytes(mac)
 
 
-def make_record(serial: int, hw_revision: int, static_mac: bytes | None, factory_keys: bool) -> bytes:
+def make_record(serial: int, hw_revision: int, static_mac: bytes | None) -> bytes:
     if not 1 <= serial <= 0xFFFFFFFE:
         raise ValueError("serial должен быть в диапазоне 1..4294967294")
     if not 0 <= hw_revision <= 0xFFFF:
         raise ValueError("hw_revision должен быть в диапазоне 0..65535")
 
     raw = bytearray(b"\xff" * RECORD_SIZE)
-    flags = 0
+    flags = FLAG_IRK | FLAG_CSRK
     ble_addr_type = BLE_ADDR_CHIP_PUBLIC
     ble_addr = b"\xff" * 6
 
@@ -74,12 +74,10 @@ def make_record(serial: int, hw_revision: int, static_mac: bytes | None, factory
         ble_addr_type = BLE_ADDR_STATIC
         ble_addr = static_mac
 
-    irk = b"\xff" * 16
-    csrk = b"\xff" * 16
-    if factory_keys:
-        irk = secrets.token_bytes(16)
-        csrk = secrets.token_bytes(16)
-        flags |= FLAG_IRK | FLAG_CSRK
+    # Identity keys are mandatory in a production record. Development boards
+    # without a record continue to use the legacy SNV key path in firmware.
+    irk = secrets.token_bytes(16)
+    csrk = secrets.token_bytes(16)
 
     struct.pack_into("<IHHIHH", raw, 0, MAGIC, VERSION, RECORD_SIZE, serial, hw_revision, flags)
     raw[16:22] = ble_addr
@@ -115,11 +113,6 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--static-address", type=parse_mac, help="заданный BLE static random address")
     group.add_argument("--generate-static-address", action="store_true", help="сгенерировать BLE static random address")
-    parser.add_argument(
-        "--no-factory-keys",
-        action="store_true",
-        help="не записывать IRK/CSRK (только для разработки; в серии не использовать)",
-    )
     parser.add_argument("--metadata", type=Path, help="записать JSON без секретных ключей")
     args = parser.parse_args()
 
@@ -127,7 +120,7 @@ def main() -> int:
     if args.generate_static_address:
         static_mac = generate_static_mac()
 
-    record = make_record(args.serial, args.hw_revision, static_mac, not args.no_factory_keys)
+    record = make_record(args.serial, args.hw_revision, static_mac)
     # Самопроверка тем же форматом, который проверяет firmware.
     if struct.unpack_from("<H", record, 62)[0] != crc16_ccitt_false(record[:62]):
         raise RuntimeError("внутренняя ошибка CRC factory identity")
@@ -142,7 +135,7 @@ def main() -> int:
         "record_size": RECORD_SIZE,
         "ble_address_source": "static_random" if static_mac is not None else "phy6252_factory_public",
         "ble_address": static_mac.hex(":").upper() if static_mac is not None else None,
-        "factory_keys": not args.no_factory_keys,
+        "factory_keys": True,
         "record_sha256": hashlib.sha256(record).hexdigest(),
     }
     if args.metadata:
