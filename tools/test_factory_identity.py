@@ -24,6 +24,9 @@ def assert_source_contract() -> None:
     mobile_ble = Path(
         "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt"
     ).read_text(encoding="utf-8")
+    credentials = Path(
+        "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsCredentials.kt"
+    ).read_text(encoding="utf-8")
     android_ble = Path(
         "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
     ).read_text(encoding="utf-8")
@@ -55,6 +58,18 @@ def assert_source_contract() -> None:
 
     # Provisioned records are complete identities, not just serial-number tags.
     assert "DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK" in identity
+
+    # The 4-hex air-name suffix is only a display hint. It must never become the
+    # authoritative 32-bit NodeId before DEVICE_INFO_REPORT.
+    assert "deviceId = null" in mobile_ble
+    assert "authoritative deviceId" in mobile_ble
+
+    # Current credential storage has one canonical production key plus a temporary
+    # endpoint bootstrap key used only until DEVICE_INFO confirms the NodeId.
+    assert 'add("endpoint:$it")' in credentials
+    assert 'add("id:${nodeId.value}")' not in credentials
+    assert 'add("addr:$it")' not in credentials
+    assert 'add("legacy-addr:$it")' not in credentials
 
     # No Bluetooth SIG Company ID or old manufacturer payload anywhere in the current BLE path.
     assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
