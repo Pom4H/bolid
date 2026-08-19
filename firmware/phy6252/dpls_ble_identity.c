@@ -24,6 +24,7 @@ extern chipMAddr_t g_chipMAddr;
 
 static uint8_t s_identity_mac[B_ADDR_LEN];
 static bool s_identity_mac_valid;
+static bool s_identity_ready;
 
 static bool buffer_is_fill(const uint8_t *buf, uint8_t value, uint8_t length)
 {
@@ -148,11 +149,20 @@ void dpls_ble_identity_prepare(void)
     uint8_t mac[B_ADDR_LEN];
     uint8_t irk[KEYLEN];
     uint8_t srk[KEYLEN];
-    if (!ensure_mac(mac) || !ensure_identity_keys(irk, srk)) return;
+
+    s_identity_ready = false;
+    if (!ensure_mac(mac)) {
+        s_identity_mac_valid = false;
+        return;
+    }
+
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_mac_valid = true;
+    if (!ensure_identity_keys(irk, srk)) return;
+
     (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, irk);
     (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, srk);
+    s_identity_ready = true;
 }
 
 void dpls_ble_identity_on_stack_started(void)
@@ -162,17 +172,33 @@ void dpls_ble_identity_on_stack_started(void)
     uint8_t zero_irk[KEYLEN];
     uint8_t addr_type;
 
-    if (!s_identity_mac_valid) return;
+    /* HCI_EXT_SetBDADDRCmd can fail while the controller is still coming up.
+     * Retry the complete persisted identity once GAP has actually started; the
+     * radio must not advertise using a controller default such as FF:FF:... . */
+    if (!s_identity_ready) dpls_ble_identity_prepare();
+    if (!s_identity_ready || !s_identity_mac_valid) return;
+
     GAPRole_GetParameter(GAPROLE_IRK, irk);
-    if (key_is_invalid(irk)) return;
+    if (key_is_invalid(irk)) {
+        s_identity_ready = false;
+        return;
+    }
 
     addr_type = identity_addr_type(s_identity_mac);
     (void)GAP_ConfigDeviceAddr(addr_type, s_identity_mac);
 
     GAPRole_GetParameter(GAPROLE_BD_ADDR, hci_addr);
-    if (mac_is_invalid(hci_addr)) return;
+    if (mac_is_invalid(hci_addr)) {
+        s_identity_ready = false;
+        return;
+    }
     memset(zero_irk, 0, sizeof(zero_irk));
     (void)HCI_LE_AddDevToResolvingListCmd(addr_type, hci_addr, zero_irk, irk);
+}
+
+bool dpls_ble_identity_ready(void)
+{
+    return s_identity_ready && s_identity_mac_valid;
 }
 
 void dpls_ble_identity_reset_bonding_keys(void)
