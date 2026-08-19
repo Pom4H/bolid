@@ -5,10 +5,12 @@ import ru.bolid.testdpls.core.runtime.NodeId
 import ru.bolid.testdpls.core.runtime.credentialKey
 
 /**
- * Owns the one in-memory verifier and its persistence/zeroization rules.
+ * Владеет единственным verifier в памяти и правилами его хранения/обнуления.
  *
- * The caller may pass only a verified [NodeId]. An advertised candidate id never
- * reaches this type, so it cannot select another device's saved verifier.
+ * Долговременный ключ устройства — только подтверждённый [NodeId]. До получения
+ * DEVICE_INFO verifier может временно храниться по текущему BLE endpoint, чтобы
+ * пережить reboot после первичной настройки. Endpoint — маршрут, а не identity:
+ * после DEVICE_INFO verifier обязательно сохраняется по NodeId.
  */
 internal class DplsCredentials(
     private val platform: DplsPlatformServices,
@@ -27,8 +29,8 @@ internal class DplsCredentials(
         verifier = value
     }
 
-    fun load(nodeId: NodeId?, bleAddress: String?): Boolean {
-        val stored = deviceStorageKeys(nodeId, bleAddress).firstNotNullOfOrNull { key ->
+    fun load(nodeId: NodeId?, bleEndpoint: String?): Boolean {
+        val stored = deviceStorageKeys(nodeId, bleEndpoint).firstNotNullOfOrNull { key ->
             platform.readDeviceVerifier(key)
                 ?.takeIf { it.size == DplsAuth.VERIFIER_SIZE }
         }
@@ -36,15 +38,15 @@ internal class DplsCredentials(
         return stored != null
     }
 
-    fun persist(nodeId: NodeId?, bleAddress: String?) {
+    fun persist(nodeId: NodeId?, bleEndpoint: String?) {
         val stored = verifier
-        deviceStorageKeys(nodeId, bleAddress).forEach { key ->
+        deviceStorageKeys(nodeId, bleEndpoint).forEach { key ->
             platform.writeDeviceVerifier(key, stored)
         }
     }
 
-    fun forget(nodeId: NodeId?, bleAddress: String?) {
-        deviceStorageKeys(nodeId, bleAddress).forEach { key ->
+    fun forget(nodeId: NodeId?, bleEndpoint: String?) {
+        deviceStorageKeys(nodeId, bleEndpoint).forEach { key ->
             platform.writeDeviceVerifier(key, null)
         }
         replace(null)
@@ -61,14 +63,11 @@ internal class DplsCredentials(
     }
 }
 
-/** Stable-node keys first, then BLE migration keys. Candidate node ids are forbidden. */
-internal fun deviceStorageKeys(nodeId: NodeId?, bleAddress: String?): List<String> = buildList {
-    if (nodeId != null) {
-        add(credentialKey(nodeId))
-        add("id:${nodeId.value}")
-    }
-    bleAddress?.takeIf { it.isNotBlank() }?.let {
-        add("legacy-addr:$it")
-        add("addr:$it")
-    }
+/**
+ * Канонические ключи текущей схемы. Старые `id:`, `addr:` и `legacy-addr:`
+ * намеренно не читаются: до выхода в серию миграционная совместимость не нужна.
+ */
+internal fun deviceStorageKeys(nodeId: NodeId?, bleEndpoint: String?): List<String> = buildList {
+    if (nodeId != null) add(credentialKey(nodeId))
+    bleEndpoint?.takeIf { it.isNotBlank() }?.let { add("endpoint:$it") }
 }.distinct()
