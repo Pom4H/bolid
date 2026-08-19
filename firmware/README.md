@@ -1,6 +1,6 @@
 # Test-DPLS firmware
 
-PHY6252 firmware for the Test-DPLS device, version **1.4.1** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
+PHY6252 firmware for the Test-DPLS device, version **1.4.2** (`DPLS_FW_VERSION_*` in `include/dpls_server.h`). The code is split into a portable C99 server and a narrow PHY6252 adapter so protocol/safety logic can be tested on the host without the vendor SDK.
 
 ## Layout
 
@@ -30,6 +30,7 @@ Firmware is the safety boundary; the mobile client cannot bypass these rules.
 - Session tokens/nonces are cleared when a link is reset.
 - TX is one PDU in flight. Indicate-only waits for ATT confirmation (2 s fail-safe). Samsung CCCD 0x03 uses `GATT_Notification` and advances on the 80 ms notify-pace tick. That chip behaviour lives in `phy6252_emu/`; the DPLS host/zmu board calls it instead of duplicating queues.
 - Proof verification is HMAC-SHA256 of the session transcript against the stored verifier (factory E2E password `TestDpls01` on the simulator).
+- A valid factory identity is mandatory before BLE advertising: no runtime MAC generation and no fallback identity from SNV.
 
 ## Host build, tests and static analysis
 
@@ -87,6 +88,8 @@ Frame format: `version / type / flags / sequence / length / payload / CRC16-CCIT
 
 Application authentication is challenge-response. Five failed attempts lock authentication for 300 seconds; persistent lock state uses SNV record `0x84`.
 
+BLE discovery uses the project 128-bit Service UUID and `Test-DPLS-XXXX` local name. Firmware version, full serial number, hardware revision, capabilities and the user-assigned name are returned by `DEVICE_INFO_REPORT` after connection; no Bluetooth SIG Manufacturer Specific Data is used.
+
 ## Revision 2 board mapping
 
 Source of truth: `phy6252/dpls_board.h`.
@@ -116,12 +119,11 @@ SNV allocation:
 | `0x20..0x5F` | BLE bonds |
 | `0x80` | settings |
 | `0x81` | initialization marker |
-| `0x82` | device address |
 | `0x83` | ADC calibration |
 | `0x84` | authentication lock |
 | `0x90..0xA3` | event journal |
 
-The filesystem uses three sectors at `0x1103C000`. Flashing with `--erase` clears SNV as well as application flash.
+The SNV filesystem uses three sectors at `0x1103C000..0x1103EFFF`. Factory identity occupies the separate sector `0x1103F000..0x1103FFFF` and is provisioned with `tools/flash_factory_identity.sh`. Application XIP ends before SNV, so linker growth cannot overwrite persistent data.
 
 ## PHY6252 integration notes
 
@@ -129,7 +131,8 @@ The target compensates for several SDK-specific behaviors in `targets/phy6252/so
 
 - SRAM0+SRAM1+SRAM2 must remain retained during sleep to avoid a wake/reset loop;
 - the filesystem must be mounted with `hal_fs_init(0x1103C000, 3)` before SNV use;
-- watchdog feeding occurs from the IRQ path, so watchdog behavior must not be interpreted as a task-liveness proof.
+- watchdog feeding occurs from the IRQ path, so watchdog behavior must not be interpreted as a task-liveness proof;
+- public BLE address application is retried after `GAPROLE_STARTED`; advertising stays disabled until the identity is confirmed.
 
 Sleep is blocked only while a dangerous mode is energized. In `NORMAL`, the MCU can sleep and the LED timer does not run unnecessarily.
 
