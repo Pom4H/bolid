@@ -1,30 +1,52 @@
 # Серийная идентификация Test-DPLS
 
-Этот документ описывает схему идентификации устройства для серийного производства Test-DPLS на PHY6252/PB-03F.
+Этот документ описывает единственную актуальную схему идентификации Test-DPLS на PHY6252/PB-03F.
 
-Цель: серийный номер прибора, BLE identity и долговременные BLE-ключи создаются один раз при выпуске платы и не зависят от версии прошивки, пользовательских настроек, журнала и factory reset.
+До выхода в серию обратная совместимость со старыми экспериментальными способами идентификации намеренно не поддерживается. Плата без корректного factory record считается непровиженной и не должна начинать BLE advertising.
 
-## 1. Что считается идентичностью прибора
+## 1. Состав идентичности
 
-Идентичность разделена на независимые сущности:
+Идентичность прибора разделена на независимые сущности:
 
-| Сущность | Назначение | Может меняться при эксплуатации |
+| Сущность | Назначение | Меняется при эксплуатации |
 |---|---|---|
-| `serial_number` | главный ID прибора в приложении, протоколе и производственной БД | нет |
+| `serial_number` | основной ID прибора в протоколе, приложении и производственной БД | нет |
 | BLE address | транспортный адрес Bluetooth LE | нет |
-| IRK / CSRK | долговременные BLE identity/signing keys | нет |
-| пользовательское имя | удобное имя, задаваемое приложением | да |
+| IRK / CSRK | постоянные BLE identity/signing keys | нет |
+| hardware revision | ревизия платы | нет |
+| пользовательское имя | имя, задаваемое приложением | да |
 | пароль/верификатор | прикладная аутентификация Test-DPLS | да |
-| bonds | состояние сопряжения конкретных телефонов | да |
+| bonds | сопряжения телефонов | да |
 | журнал | эксплуатационные события | да |
 
-`device_id` протокола остаётся 32-битным ради совместимости с существующим мобильным приложением, но теперь его источником является `serial_number`, а не первые четыре байта MAC.
+`device_id` в wire-протоколе остаётся 32-битным и равен `serial_number` из factory record.
 
-Имя в эфире остаётся `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит серийного номера в HEX. Полный 32-битный номер читается после подключения через `DEVICE_INFO_REPORT`.
+BLE MAC больше не используется как бизнес-идентификатор прибора.
 
-## 2. Карта постоянной памяти
+## 2. Что находится в эфире
 
-Persistent data физически исключены из разрешённой linker-области приложения:
+Текущая прошивка рекламирует только:
+
+- стандартные BLE flags;
+- фирменный 128-bit Service UUID `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`;
+- local name `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит `serial_number` в HEX.
+
+Manufacturer Specific Data не используется. В частности, прошивка не передаёт `0x0B01` и мобильное приложение не содержит parser старого manufacturer payload.
+
+Полная информация о приборе читается после подключения через `DEVICE_INFO_REPORT`:
+
+- полный `device_id` / `serial_number`;
+- версия wire protocol;
+- версия firmware;
+- hardware revision;
+- capabilities;
+- пользовательское имя.
+
+Именно эти данные должны использоваться экраном «Об устройстве». Для firmware 1.4.2 приложение после подключения получает `1.4.2` из `DEVICE_INFO_REPORT`; версия больше не зависит от BLE manufacturer data.
+
+## 3. Карта flash
+
+Persistent data физически исключены из linker-области приложения:
 
 ```text
 0x11020000 ─┐
@@ -41,25 +63,25 @@ Persistent data физически исключены из разрешённо�
 0x1103FFFF ─┘
 ```
 
-Linker-файлы `scatter_load.sct` и `phy6252.ld` заканчивают application XIP на `0x1103BFFF`. Поэтому рост прошивки не может молча занять SNV или factory identity: linker должен сообщить overflow вместо повреждения persistent data.
+`scatter_load.sct` и `phy6252.ld` заканчивают application XIP на `0x1103BFFF`. Рост прошивки поэтому должен привести к linker overflow, а не к перезаписи SNV или factory identity.
 
-Firmware только **читает** factory record из `0x1103F000`. API записи или стирания factory identity в рабочей прошивке нет.
+Рабочая firmware только читает factory record. API изменения или стирания factory identity в приложении нет.
 
-Важно: factory sector логически неизменяемый, но это не OTP/eFuse. Полное chip erase физически стирает его. Поэтому `tools/flash_firmware.sh --erase` заблокирован без явного `DPLS_ALLOW_FACTORY_ERASE=1`.
+Factory sector не является OTP/eFuse: полный chip erase стирает его физически. Поэтому `tools/flash_firmware.sh --erase` требует явного `DPLS_ALLOW_FACTORY_ERASE=1`.
 
-## 3. Формат factory record v1
+## 4. Factory record v1
 
-В начале сектора хранится 64-байтная запись. Остаток сектора зарезервирован для будущих версий.
+В начале `0x1103F000` хранится 64-байтная запись:
 
 | Offset | Размер | Поле |
 |---:|---:|---|
 | `0` | 4 | magic `DID1` |
-| `4` | 2 | версия формата = `1` |
-| `6` | 2 | размер записи = `64` |
+| `4` | 2 | версия = `1` |
+| `6` | 2 | размер = `64` |
 | `8` | 4 | `serial_number`, LE32 |
 | `12` | 2 | hardware revision |
 | `14` | 2 | flags |
-| `16` | 6 | BLE static address или `FF..FF` |
+| `16` | 6 | BLE static-random address или `FF..FF` |
 | `22` | 1 | BLE address source/type |
 | `23` | 1 | reserved |
 | `24` | 16 | IRK |
@@ -70,63 +92,88 @@ Firmware только **читает** factory record из `0x1103F000`. API з�
 Flags v1:
 
 ```text
-bit 0  BLE static-random address записан в record
+bit 0  в record записан BLE static-random address
 bit 1  IRK присутствует
 bit 2  CSRK присутствует
 ```
 
-Для валидной **серийной** записи обязательны `IRK` и `CSRK`. Firmware отклоняет record с неизвестными flags, отсутствующими ключами, нулевым/`0xFFFFFFFF` serial, ошибочным типом адреса или CRC.
+Валидная запись обязана содержать:
 
-## 4. BLE address
+- serial в диапазоне `1..0xFFFFFFFE`;
+- корректный CRC;
+- только известные flags;
+- IRK и CSRK;
+- корректный тип BLE address.
 
-Приоритет адреса в серийном приборе:
+При любой ошибке record отклоняется целиком.
+
+## 5. BLE address
+
+Алгоритм выбора адреса только один:
 
 ```text
-factory record содержит static-random BLE address
-        ↓ да
-использовать его как ADDRTYPE_STATIC
-
-        ↓ нет
-валидный заводской MAC PHY6252
-        ↓ да
-использовать его как ADDRTYPE_PUBLIC
-
-        ↓ нет
-identity не готова → BLE advertising не запускается
+валидный factory record?
+        │
+        ├─ нет → identity не готова → advertising запрещён
+        │
+        └─ да
+             │
+             ├─ record содержит static-random address
+             │      → ADDRTYPE_STATIC
+             │
+             └─ static address не задан
+                    → использовать заводской public MAC PHY6252
+                    → если MAC невалиден, identity не готова
 ```
 
-Для обычных PB-03F предпочтительный вариант — заводской PHY6252 MAC. Его не нужно дублировать в factory record.
+Runtime-генерации MAC нет. SNV не является источником BLE identity.
 
-Если конкретная партия чипов не имеет пригодного заводского MAC, при provisioning генерируется BLE **static random** address. Его два старших бита должны быть `11`; адрес записывается в factory record и больше не меняется.
+Для обычной PB-03F предпочтительно использовать заводской public MAC чипа и не дублировать его в record.
 
-Firmware больше не генерирует случайный public-looking MAC при загрузке.
+Если конкретная партия не имеет пригодного заводского MAC, provisioning генерирует BLE static-random address. Его два старших бита должны быть `11`.
 
-### Старт PHY6252
+Factory record хранит адрес в человекочитаемом порядке, например `C2:34:56:78:9A:BC`. Перед передачей в PHY6252 SDK адрес явно переводится в `B_ADDR` byte order.
 
-На PHY6252 `HCI_EXT_SetBDADDRCmd()` может временно не принять public address до полного старта контроллера. Поэтому material factory identity читается заранее, а применение адреса выполняется после `GAPROLE_STARTED`. Пока controller address не подтверждён, advertising остаётся выключенным. Idle tick повторяет применение identity, если первая post-start попытка временно не удалась.
+## 6. Старт PHY6252 и фикс из PR #32
 
-### Совместимость со старыми прототипами
+PR #32 выявил реальную гонку старта PHY6252: `HCI_EXT_SetBDADDRCmd()` может временно отклонить установку public address до полного запуска BLE controller.
 
-Если factory record отсутствует, текущая прошивка оставляет migration path:
+Текущая схема учитывает это:
 
-1. заводской PHY6252 MAC;
-2. старый сохранённый SNV record `0x82`, если заводского MAC нет и legacy record выглядит как public address.
+1. factory record читается до `GAPRole_StartDevice()`;
+2. после `GAPROLE_STARTED` выполняется применение BLE address;
+3. адрес проверяется через GAP/HCI state;
+4. только после успешного применения identity разрешается advertising;
+5. если controller временно не готов, idle tick повторяет применение identity.
 
-Новый MAC в migration mode не генерируется. Для непривиженного прототипа `device_id` временно выводится из MAC, как в предыдущей версии.
+Поэтому устройство не должно появляться в эфире с дефолтным/нулевым/`FF:FF:...` адресом или как `Test-DPLS-0000`.
 
-**Серийный прибор считается готовым только при наличии валидного factory record.** Метод `dpls_ble_identity_is_provisioned()` отличает серийную идентичность от migration mode.
+## 7. IRK и CSRK
 
-## 5. IRK и CSRK
+IRK и CSRK создаются один раз на производственной станции криптографическим RNG и записываются в factory record.
 
-Для серийного изделия `IRK` и `CSRK` генерируются на производстве криптографическим RNG и являются обязательной частью factory record.
+Firmware загружает только factory keys. Генерации identity keys при первом boot и fallback на SNV нет.
 
-Firmware всегда использует factory keys у провиженного устройства. Очистка пользовательских BLE bonds или SNV не меняет эти ключи: после reboot они снова загружаются из factory sector.
+Factory reset может очистить runtime/SNV копии, но после reboot те же IRK/CSRK снова загружаются из factory sector.
 
-Для старого непривиженного прототипа сохранён legacy-режим: ключи читаются из SNV либо один раз создаются RNG PHY6252 и сохраняются в SNV.
+## 8. Pairing
 
-## 6. Подготовка factory record
+Pairing не определяется по advertising marker.
 
-Для штатного PHY62x2 programmer нужен **64-байтный BIN**, а не отдельный application HEX:
+CCCD Test-DPLS требует `GATT_PERMIT_ENCRYPT_WRITE`. Поэтому штатный поток выглядит так:
+
+1. телефон подключается к Service UUID;
+2. обнаруживает RX/TX;
+3. пытается записать CCCD;
+4. PHY6252 возвращает authentication/encryption error, если link ещё не защищён;
+5. Android запускает bonding и повторяет CCCD;
+6. iOS/CoreBluetooth инициирует системный security flow при доступе к защищённому атрибуту.
+
+Так security boundary задана самим GATT, а не форматом рекламы.
+
+## 9. Генерация factory record
+
+Для штатного PHY62x2 programmer создаётся 64-байтный BIN:
 
 ```sh
 python3 tools/make_factory_identity.py \
@@ -138,14 +185,14 @@ python3 tools/make_factory_identity.py \
 
 По умолчанию:
 
-- BLE использует заводской public MAC PHY6252;
-- IRK и CSRK генерируются случайно один раз и всегда входят в record;
-- BIN содержит ровно 64 байта factory record;
-- BIN содержит секретные IRK/CSRK и создаётся с правами `0600`, где это поддерживает ОС;
-- JSON не содержит секретные ключи;
-- в metadata сохраняется SHA-256 factory record для контроля экземпляра.
+- используется заводской public MAC PHY6252;
+- IRK и CSRK генерируются один раз;
+- BIN содержит ровно 64 байта;
+- BIN содержит секретные ключи и создаётся с правами `0600`, где ОС это поддерживает;
+- metadata JSON не содержит IRK/CSRK;
+- metadata содержит SHA-256 factory record.
 
-Если заводского MAC нет:
+Если нужен static-random address:
 
 ```sh
 python3 tools/make_factory_identity.py \
@@ -155,7 +202,7 @@ python3 tools/make_factory_identity.py \
   --metadata tmp/factory-00012874.json
 ```
 
-Можно передать заранее выделенный static random address:
+Или можно передать заранее выделенный адрес:
 
 ```sh
 python3 tools/make_factory_identity.py \
@@ -164,45 +211,44 @@ python3 tools/make_factory_identity.py \
   --binary-output tmp/factory-00012874.bin
 ```
 
-Для внешнего программатора, который умеет писать Intel HEX без генерации собственного application header, дополнительно можно получить HEX:
+## 10. Почему factory data не шьётся через `wh`
 
-```sh
-python3 tools/make_factory_identity.py \
-  --serial 12874 \
-  --binary-output tmp/factory-00012874.bin \
-  --hex-output tmp/factory-00012874.hex
-```
+`rdwr_phy62x2.py wh` предназначен для application HEX. Он строит application segment table и пишет служебный header.
 
-## 7. Почему factory HEX нельзя шить через `rdwr_phy62x2.py wh`
+Поэтому standalone factory HEX нельзя передавать в `wh`: даже HEX только с `0x1103F000` способен изменить application header.
 
-Операция `wh` в используемой утилите PHY62x2 предназначена для **application image**. Она разбирает HEX, строит таблицу сегментов приложения (`HexfHeader`) и записывает служебный header в flash.
-
-Поэтому команда вида:
+Штатный provisioning использует raw binary write:
 
 ```text
-rdwr_phy62x2.py ... wh factory.hex
+rdwr_phy62x2.py -r we 0x3F000 factory.bin
 ```
 
-для независимого provisioning запрещена: даже если HEX содержит только `0x1103F000`, `wh` всё равно создаёт application segment table и может изменить boot/application header.
+Для этого есть отдельный скрипт:
 
-Штатный provisioning использует raw binary write `we` по flash offset `0x3F000`. Для 64-байтной записи `we` автоматически стирает только затронутый 4-КиБ sector и не трогает application header или SNV.
+```sh
+tools/flash_factory_identity.sh tmp/factory-00012874.bin
+```
 
-Эта граница закреплена отдельным скриптом и contract test.
+Скрипт принимает только файл размером ровно 64 байта и пишет его в сектор `0x3F000`, не затрагивая application header и SNV.
 
-## 8. Прошивка на производстве
+## 11. Производственный поток
 
-Рекомендуемый порядок для каждой платы:
+Для каждой платы:
 
-1. получить следующий уникальный `serial_number` из производственной БД;
-2. сформировать индивидуальный factory BIN и metadata JSON;
-3. прошить application firmware обычным способом;
-4. записать factory BIN отдельной provisioning-командой;
-5. перезапустить плату;
-6. проверить имя `Test-DPLS-XXXX`;
-7. подключиться по фирменному 128-bit Service UUID;
-8. прочитать `DEVICE_INFO_REPORT` и проверить `device_id == serial_number`;
-9. выполнить BLE pairing/auth smoke test;
-10. записать фактически прочитанный BLE address и результат тестов в производственную БД.
+1. производственная БД выдаёт следующий уникальный `serial_number`;
+2. станция формирует factory BIN и metadata JSON;
+3. прошивается application firmware;
+4. отдельной командой записывается factory BIN;
+5. плата перезапускается;
+6. проверяется BLE name `Test-DPLS-XXXX`;
+7. проверяется фактический BLE address;
+8. выполняется подключение по Service UUID;
+9. выполняется pairing;
+10. читается `DEVICE_INFO_REPORT`;
+11. проверяется полный `device_id == serial_number`;
+12. проверяется firmware version `1.4.2`;
+13. проверяется hardware revision;
+14. результат записывается в production DB.
 
 Для текущего стенда:
 
@@ -211,36 +257,18 @@ tools/flash_firmware.sh tmp/test-dpls.hex
 tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-`tools/flash_factory_identity.sh` проверяет размер файла (`64` байта) и вызывает:
+Не использовать полный erase между этими шагами.
 
-```text
-rdwr_phy62x2.py -r we 0x3F000 factory.bin
-```
+## 12. Производственная БД
 
-Не использовать `--erase` между этими шагами.
-
-### Секретность временного BIN
-
-Factory BIN содержит IRK/CSRK. Его нельзя прикладывать к GitHub Actions artifacts, коммитить в репозиторий, отправлять в обычный production CSV или оставлять в общей папке оператора.
-
-Практический production flow:
-
-1. сгенерировать BIN непосредственно на станции;
-2. прошить плату;
-3. проверить record/device;
-4. сохранить только metadata без ключей;
-5. удалить временный BIN, если компания отдельно не приняла решение о защищённом escrow ключей.
-
-## 9. Производственная БД
-
-Минимальная запись на единицу продукции:
+Минимальные поля на прибор:
 
 ```text
 serial_number
 hardware_revision
 chip_factory_mac
 ble_address_source       # chip_public / static_random
-ble_address              # фактически проверенный адрес
+ble_address              # фактически прочитанный адрес
 factory_record_sha256
 firmware_version_at_test
 production_timestamp
@@ -248,85 +276,69 @@ test_station
 test_result
 ```
 
-IRK/CSRK не следует писать в обычные логи или CSV оператора. Если компании требуется резервное хранение секретов, оно должно быть отдельным защищённым хранилищем с контролем доступа.
+IRK/CSRK нельзя писать в обычные логи, CSV оператора или GitHub artifacts.
 
-Уникальность `serial_number` обеспечивает производственная система **до** формирования factory record. Firmware не пытается самостоятельно «занять следующий номер».
+Если резервное хранение секретов понадобится, оно должно быть отдельным защищённым хранилищем с контролем доступа.
 
-## 10. Factory reset и обновление firmware
+## 13. Factory reset и обновление firmware
 
-Обычный factory reset устройства может очистить:
+Обычный factory reset может очищать:
 
-- пароль/верификатор;
+- пользовательский пароль/верификатор;
 - пользовательское имя;
 - bonds;
 - runtime lock state;
 - прочие пользовательские настройки.
 
-Он **не должен** менять:
+Он не должен менять:
 
 - `serial_number`;
 - BLE address;
 - factory IRK/CSRK;
-- hardware revision из factory record.
+- hardware revision.
 
-Обычное обновление firmware также не затрагивает `0x1103F000`.
+Обычная перепрошивка application image также не затрагивает `0x1103F000`.
 
-Полный chip erase — сервисная/производственная операция. После него прибор нельзя выпускать или возвращать заказчику, пока factory identity не восстановлена из производственной записи и не пройдена повторная проверка.
+После намеренного chip erase factory identity должна быть заново восстановлена из производственных данных и полностью перепроверена до эксплуатации прибора.
 
-## 11. Advertising, discovery и pairing
+## 14. Автоматические проверки
 
-Новая прошивка не отправляет Manufacturer Specific Data с `0x0B01`.
+`tools/test_factory_identity.py` фиксирует архитектурные инварианты:
 
-В эфире остаются:
-
-- стандартные BLE flags;
-- фирменный 128-bit Service UUID `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`;
-- имя `Test-DPLS-XXXX` в scan response.
-
-Это соответствует ТЗ: приложение обнаруживает Test-DPLS по фирменному Service UUID, а серийный номер и состояние получает через имя/GATT.
-
-Pairing больше не определяется косвенно по наличию manufacturer payload. CCCD сервиса Test-DPLS требует `GATT_PERMIT_ENCRYPT_WRITE`; существующий Android transport уже обрабатывает `GATT_INSUFFICIENT_AUTHENTICATION`/`GATT_INSUFFICIENT_ENCRYPTION`, запускает системное сопряжение и повторяет CCCD write. Таким образом, необходимость защищённого соединения задаётся самим GATT-контрактом.
-
-Мобильный parser пока может читать старый manufacturer payload для обратной совместимости с ранними прототипами, но новая серийная прошивка его больше не создаёт.
-
-## 12. Что намеренно не добавлено
-
-Отдельный `device_secret` сейчас не вводится: в существующем протоколе Test-DPLS для него нет потребителя. Хранить дополнительный секрет «на будущее» без определённого криптографического назначения — лишний lifecycle и риск утечки. Если появится device attestation, secure provisioning backend или подпись производственных данных, формат factory record нужно расширить новой версией с конкретной моделью ключей.
-
-## 13. Автоматические проверки
-
-`tools/test_factory_identity.py` проверяет:
-
-- бинарный factory record и CRC;
-- обязательные IRK/CSRK;
-- генерацию корректного static-random address;
-- Intel HEX и checksums для внешних production tools;
-- отсутствие runtime MAC generation;
-- отсутствие `0x0B01` в новой PHY6252 рекламе;
+- обязательный factory record;
+- отсутствие SNV-MAC fallback;
+- отсутствие `device_id` из MAC;
+- отсутствие runtime-генерации identity keys;
+- CRC и обязательные IRK/CSRK;
+- корректный static-random address;
+- явный перевод display address → PHY6252 `B_ADDR`;
+- post-`GAPROLE_STARTED` retry из PR #32;
+- запрет advertising до готовности identity;
+- отсутствие Manufacturer Specific Data / `0x0B01`;
+- отсутствие manufacturer parser в Android/iOS/common mobile;
 - encrypted CCCD;
-- post-GAP identity retry;
-- что linker заканчивает XIP до `0x1103C000` и не может занять SNV/factory sectors;
-- что штатный factory flasher использует `we 0x3F000`, принимает только 64-байтный BIN и не использует application `wh`.
+- границы application/SNV/factory в linker;
+- безопасный raw provisioning через `we 0x3F000`.
 
-Тест включён в `tools/check_all.sh`.
+Тест входит в `tools/check_all.sh`.
 
-## 14. Критерии готовности к серии
+## 15. Критерии готовности к серии
 
-Перед первым серийным выпуском проверить на реальном стенде:
+Перед выпуском серии на реальном стенде проверить:
 
-- минимум 10 плат получают разные `serial_number`;
+- минимум 10 плат получают разные serial;
+- плата без factory record не появляется в BLE scan;
+- повреждённый CRC блокирует advertising;
+- `device_id` совпадает с production serial;
 - `device_id` не меняется после reboot;
-- `device_id` не меняется после обычной перепрошивки;
-- BLE address не меняется после reboot/перепрошивки;
-- factory reset не меняет serial/address/IRK/CSRK;
-- удаление SNV не меняет identity у провиженного прибора;
-- прибор с повреждённой/неполной identity не начинает BLE advertising;
-- полный erase блокируется сервисным скриптом без override;
-- factory provisioning не изменяет application header и SNV;
-- после намеренного chip erase и повторного provisioning прибор возвращает тот же serial;
-- две платы с одинаковым serial не могут пройти производственный acceptance;
-- приложение фильтрует приборы по Service UUID и корректно показывает `Test-DPLS-XXXX`;
-- Android/iOS pairing проверен на реальном PHY6252 без legacy manufacturer payload;
-- Keil/GCC target build подтверждает, что текущий XIP footprint помещается до `0x1103C000`.
+- BLE address не меняется после reboot;
+- обычная перепрошивка не меняет serial/address/IRK;
+- factory reset не меняет serial/address/IRK;
+- удаление SNV не меняет factory identity;
+- firmware `1.4.2` корректно отображается в «Об устройстве» после `DEVICE_INFO_REPORT`;
+- пользовательское имя, записанное через `NAME_SET`, читается с самой платы на другом телефоне после `DEVICE_INFO_REPORT`;
+- Android и iOS успешно проходят pairing без Manufacturer Specific Data;
+- factory provisioning не меняет application header и SNV;
+- две платы с одинаковым serial не могут пройти production acceptance.
 
-После этого источником истины по идентичности считается производственная БД + factory record, а MAC больше не используется как бизнес-идентификатор прибора.
+После выполнения этих проверок источником истины являются production DB + factory record. BLE MAC остаётся только транспортным адресом.
