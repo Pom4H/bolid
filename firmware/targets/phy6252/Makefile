@@ -162,7 +162,7 @@ $(foreach src,$(SDK_SOURCES),$(eval $(call COMPILE_SDK,$(src))))
 
 define COMPILE_APP
 $(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
-	$(CC) $(APP_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
+	$(CC) $$(APP_CFLAGS) $(DEFS) $(INCLUDES) -MMD -MP -c $$< -o $$@
 endef
 $(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 
