@@ -1,0 +1,41 @@
+#ifndef DPLS_PHY6252_STORAGE_H
+#define DPLS_PHY6252_STORAGE_H
+
+#include "dpls_calib.h"
+#include "dpls_server.h"
+#include "types.h"
+
+void dpls_phy6252_storage_init(void);
+void dpls_phy6252_storage_set_link_active(bool active);
+bool dpls_phy6252_storage_has_pending_journal(void);
+/* Persist at most one journal flash block. Returns true while more work remains. */
+bool dpls_phy6252_storage_service_journal(void);
+
+/* Domain HAL: settings. */
+dpls_settings_state_t dpls_phy6252_storage_settings_state(void *context);
+void dpls_phy6252_storage_settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
+bool dpls_phy6252_storage_write_settings(void *context, const char *name,
+                                         const uint8_t salt[16], const uint8_t verifier[32]);
+void dpls_phy6252_storage_settings_name(void *context, char out[DPLS_NAME_MAX + 1u]);
+bool dpls_phy6252_storage_set_name(void *context, const char *name);
+bool dpls_phy6252_storage_set_password(void *context, const uint8_t salt[16],
+                                       const uint8_t verifier[32]);
+bool dpls_phy6252_storage_copy_verifier(uint8_t out[DPLS_AUTH_PROOF_SIZE]);
+
+/* Domain HAL: persistent brute-force lock. */
+bool dpls_phy6252_storage_auth_lock_read(void *context);
+bool dpls_phy6252_storage_auth_lock_write(void *context, bool locked);
+
+/* Domain HAL: event journal. Appends are RAM-only while a BLE link exists. */
+bool dpls_phy6252_storage_events_init(void *context, uint16_t *count, uint32_t *next_sequence);
+bool dpls_phy6252_storage_event_append(void *context, const dpls_event_t *event);
+bool dpls_phy6252_storage_event_read(void *context, uint32_t sequence, dpls_event_t *event);
+
+/* Calibration remains a storage concern even though measurements consumes it. */
+void dpls_phy6252_storage_load_calibration(dpls_calib_t *line, dpls_calib_t *vcap,
+                                           bool *line_from_nv);
+
+/* Physical factory reset transaction. */
+bool dpls_phy6252_storage_clear_settings(void);
+
+#endif
