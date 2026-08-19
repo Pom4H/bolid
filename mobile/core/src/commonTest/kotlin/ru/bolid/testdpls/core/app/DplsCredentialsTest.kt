@@ -21,20 +21,23 @@ class DplsCredentialsTest {
     }
 
     @Test
-    fun provisionalCredentialUsesOnlyBleAddressUntilNodeIsVerified() {
+    fun provisionalCredentialUsesCurrentEndpointUntilNodeIsVerified() {
         val platform = FakePlatform()
         val credentials = DplsCredentials(platform)
         val verifier = ByteArray(32) { it.toByte() }
         credentials.replace(verifier)
 
-        credentials.persist(nodeId = null, bleAddress = "ble-1")
+        credentials.persist(nodeId = null, bleEndpoint = "ble-1")
 
-        assertTrue(platform.contains("addr:ble-1"))
+        assertTrue(platform.contains("endpoint:ble-1"))
+        assertFalse(platform.contains("addr:ble-1"))
+        assertFalse(platform.contains("legacy-addr:ble-1"))
         assertFalse(platform.contains("node:4660"))
 
-        credentials.persist(nodeId = NodeId(0x1234), bleAddress = "ble-1")
+        credentials.persist(nodeId = NodeId(0x1234), bleEndpoint = "ble-1")
 
         assertTrue(platform.contains("node:4660"))
+        assertTrue(platform.contains("endpoint:ble-1"))
     }
 
     private class FakePlatform : DplsPlatformServices {
