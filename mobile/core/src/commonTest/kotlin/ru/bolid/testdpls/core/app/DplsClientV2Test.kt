@@ -105,7 +105,7 @@ class DplsClientV2Test {
     }
 
     @Test
-    fun setupDisconnectKeepsAddressCredentialUntilIdentityProof() {
+    fun setupDisconnectKeepsEndpointCredentialUntilIdentityProof() {
         val transport = FakeTransport()
         val platform = FakePlatform()
         val client = newClient(transport, platform)
@@ -119,7 +119,7 @@ class DplsClientV2Test {
         val setup = transport.lastFrame()
         transport.reply(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(3, 0, 0), setup.sequence)
         assertEquals(ConnectionPhase.RECONNECTING, client.uiState.value.phase)
-        assertTrue(platform.hasVerifier("addr:ble-1"))
+        assertTrue(platform.hasVerifier("endpoint:ble-1"))
         assertFalse(platform.hasVerifier("node:4660"))
         transport.dropped()
         assertEquals(1, transport.reconnectCalls)
