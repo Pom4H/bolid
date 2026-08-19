@@ -17,6 +17,7 @@
 #define DPLS_SIM_TRANSPORT_CCCD_NOTIFY 0x0001u
 #define DPLS_SIM_TRANSPORT_CCCD_INDICATE 0x0002u
 #define DPLS_SIM_TRANSPORT_CCCD_SAMSUNG 0x0003u
+#define DPLS_SIM_TRANSPORT_DIAGNOSTIC_STACK_BYTES 1024u
 
 typedef struct {
     uint8_t data[DPLS_SIM_TRANSPORT_RX_SLOT];
@@ -59,6 +60,9 @@ typedef struct {
     uint16_t cccd;
     uint32_t now_ms;
     unsigned att_sent;
+    /* Kept only because the existing simulator JSON exposes this diagnostic.
+     * The private transport has no SNV implementation, so it remains false. */
+    bool snv_dirty;
 } dpls_sim_transport_t;
 
 void dpls_sim_transport_init(dpls_sim_transport_t *transport,
@@ -78,9 +82,8 @@ void dpls_sim_transport_att_cfm(dpls_sim_transport_t *transport);
 void dpls_sim_transport_tick(dpls_sim_transport_t *transport, uint32_t now_ms);
 void dpls_sim_transport_run_after_write(dpls_sim_transport_t *transport);
 
-/* Existing product-simulator code used these names when the transport lived in
- * a standalone PHY6252 emulator directory. Keep source churn local while the
- * implementation and ownership are now entirely under firmware/sim. */
+/* Source-compatibility aliases for the product simulator only. There is no
+ * standalone PHY6252 emulator implementation or directory in Bolid anymore. */
 typedef dpls_sim_transport_t phy6252_emu_t;
 typedef dpls_sim_transport_hooks_t phy6252_emu_hooks_t;
 #define PHY6252_EMU_RX_DEPTH DPLS_SIM_TRANSPORT_RX_DEPTH
@@ -89,6 +92,7 @@ typedef dpls_sim_transport_hooks_t phy6252_emu_hooks_t;
 #define PHY6252_EMU_TX_SLOT DPLS_SIM_TRANSPORT_TX_SLOT
 #define PHY6252_EMU_NOTIFY_PACE_MS DPLS_SIM_TRANSPORT_NOTIFY_PACE_MS
 #define PHY6252_EMU_INDICATE_TIMEOUT_MS DPLS_SIM_TRANSPORT_INDICATE_TIMEOUT_MS
+#define PHY6252_EMU_APP_STACK_BYTES DPLS_SIM_TRANSPORT_DIAGNOSTIC_STACK_BYTES
 #define PHY6252_EMU_CCCD_NOTIFY DPLS_SIM_TRANSPORT_CCCD_NOTIFY
 #define PHY6252_EMU_CCCD_INDICATE DPLS_SIM_TRANSPORT_CCCD_INDICATE
 #define PHY6252_EMU_CCCD_SAMSUNG DPLS_SIM_TRANSPORT_CCCD_SAMSUNG
