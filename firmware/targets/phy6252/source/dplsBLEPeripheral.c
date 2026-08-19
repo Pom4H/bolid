@@ -67,6 +67,20 @@ static void apply_identity_to_adv(void)
     device_name[14] = '\0';
 }
 
+/* Refresh every identity-bearing GAP value immediately before advertising.
+ * A failed early PHY6252 HCI address update must never leak a controller
+ * default address or Test-DPLS-0000 into the air. */
+static bool enable_advertising_if_identity_ready(void)
+{
+    uint8 enabled = TRUE;
+    if (!dpls_ble_identity_is_ready()) return false;
+    apply_identity_to_adv();
+    GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
+    GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+    return true;
+}
+
 /* Steps the LED and re-arms the timer only while there is something to show, so
  * Norma costs no wake-ups. Call from anywhere the scene can change. */
 static void schedule_led_if_needed(void)
@@ -79,14 +93,14 @@ static void schedule_led_if_needed(void)
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
-    case GAPROLE_STARTED: {
-        uint8 enabled = dpls_ble_identity_is_ready() ? TRUE : FALSE;
+    case GAPROLE_STARTED:
+        /* HCI_EXT_SetBDADDRCmd may reject a pre-start request. Identity is
+         * applied after GAP is live and advertising stays disabled until ready. */
         dpls_ble_identity_on_stack_started();
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+        (void)enable_advertising_if_identity_ready();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
-    }
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
@@ -96,14 +110,12 @@ static void state_changed(gaprole_States_t state)
         break;
     }
     case GAPROLE_WAITING:
-    case GAPROLE_WAITING_AFTER_TIMEOUT: {
-        uint8 enabled = dpls_ble_identity_is_ready() ? TRUE : FALSE;
+    case GAPROLE_WAITING_AFTER_TIMEOUT:
         link_up = FALSE;
         dpls_phy6252_disconnected();
         schedule_led_if_needed(); /* turn an interrupted identify off immediately */
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
+        (void)enable_advertising_if_identity_ready();
         break;
-    }
     default:
         break;
     }
@@ -224,6 +236,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
+        if (!link_up && !dpls_ble_identity_is_ready()) {
+            dpls_ble_identity_on_stack_started();
+            (void)enable_advertising_if_identity_ready();
+        }
         dpls_phy6252_tick();
         schedule_led_if_needed();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
