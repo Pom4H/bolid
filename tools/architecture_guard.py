@@ -100,7 +100,7 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
     source = text(path)
     for forbidden in ("kotlinx.coroutines", "android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
         if forbidden in source:
-            fail(path, f"wire dependency leak: {forbidden}")
+            fail(path, f"runtime dependency leak: {forbidden}")
 require_text(ANDROID_BLE,
              "BluetoothDevice.PHY_LE_1M_MASK,\n            handler,",
              "connectGatt callbacks must be main-Handler confined")
@@ -142,6 +142,23 @@ require_text(MEASUREMENTS, "ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))",
 require_text(MEASUREMENTS, "ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))",
              "rev2 reserve ADC contract missing")
 require_text(MEASUREMENTS, "DPLS_ADC_NEED_ALL", "connected sessions must sample all four channels")
+require_text(MEASUREMENTS, "hal_pwrmgr_lock(MOD_USR2)",
+             "ADC conversion series must block PHY6252 sleep with its own lock")
+require_text(MEASUREMENTS, "hal_pwrmgr_unlock(MOD_USR2)",
+             "ADC conversion series must release its own sleep lock")
+
+# Power locks are independent. Sharing one module would let an ADC completion or
+# an output transition accidentally re-enable sleep while another subsystem is
+# still timing-critical.
+require_text(TARGET, "hal_pwrmgr_register(MOD_USR0", "BLE link power lock must be registered")
+require_text(TARGET, "hal_pwrmgr_register(MOD_USR1", "power-output sleep lock must be registered")
+require_text(TARGET, "hal_pwrmgr_register(MOD_USR2", "ADC sleep lock must be registered")
+require_text(TARGET, "hal_pwrmgr_lock(MOD_USR0)",
+             "active BLE link must preserve the proven no-sleep hardware invariant")
+require_text(TARGET, "hal_pwrmgr_unlock(MOD_USR0)",
+             "BLE link power lock must be released after disconnect")
+require_text(OUTPUTS, "hal_pwrmgr_lock(MOD_USR1)", "energized outputs need their own sleep lock")
+require_text(OUTPUTS, "hal_pwrmgr_unlock(MOD_USR1)", "output sleep lock must release in Norma")
 
 # Runtime coordinates state machines only; it must not own driver details.
 for forbidden in ('#include "adc.h"', '#include "osal_snv.h"', "osal_snv_", "hal_adc_", "GATT_Notification"):
