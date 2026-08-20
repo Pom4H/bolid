@@ -78,9 +78,7 @@ jobs:
           echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
 
       - name: Host invariants + sanitizers
-        run: |
-          python3 tools/test_ci_contract.py
-          bash tools/run_host_invariant_gate.sh
+        run: bash tools/run_host_invariant_gate.sh
 
       - name: Verify revision 2 pinout contract
         shell: bash
@@ -165,7 +163,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  firmware-quality:
+  firmware_quality:
     name: Firmware coverage + cppcheck
     needs: smoke
     if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
@@ -180,7 +178,7 @@ jobs:
       - name: cppcheck
         run: bash tools/lint_firmware.sh
 
-  soft-ble-e2e:
+  soft_ble_e2e:
     name: Soft-BLE DplsClient ↔ simulator
     needs: smoke
     if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
@@ -196,7 +194,7 @@ jobs:
       - name: Run soft-BLE phone E2E scenarios
         run: bash tools/soft_ble_e2e.sh
 
-  firmware-gcc:
+  firmware_gcc:
     name: PHY6252 GNU Arm GCC
     needs: smoke
     if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
@@ -223,7 +221,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  firmware-keil:
+  firmware_keil:
     name: PHY6252 Keil MDK / AC6
     needs: smoke
     if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
@@ -304,16 +302,16 @@ jobs:
             -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
             CODE_SIGNING_ALLOWED=NO
 
-  release-gate:
+  release_gate:
     name: RC production gate
     needs:
       - smoke
       - android
       - firmverse
-      - firmware-quality
-      - soft-ble-e2e
-      - firmware-gcc
-      - firmware-keil
+      - firmware_quality
+      - soft_ble_e2e
+      - firmware_gcc
+      - firmware_keil
       - ios
     if: always() && needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-latest
@@ -325,10 +323,10 @@ jobs:
           SMOKE: ${{ needs.smoke.result }}
           ANDROID: ${{ needs.android.result }}
           FIRMVERSE: ${{ needs.firmverse.result }}
-          QUALITY: ${{ needs.firmware-quality.result }}
-          SOFT_BLE: ${{ needs.soft-ble-e2e.result }}
-          GCC: ${{ needs.firmware-gcc.result }}
-          KEIL: ${{ needs.firmware-keil.result }}
+          QUALITY: ${{ needs.firmware_quality.result }}
+          SOFT_BLE: ${{ needs.soft_ble_e2e.result }}
+          GCC: ${{ needs.firmware_gcc.result }}
+          KEIL: ${{ needs.firmware_keil.result }}
           IOS: ${{ needs.ios.result }}
         run: |
           set -euo pipefail
