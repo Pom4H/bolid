@@ -45,6 +45,12 @@ add_executable(dpls_simulator
 target_include_directories(dpls_simulator PRIVATE sim)
 target_link_libraries(dpls_simulator PRIVATE test_dpls_server)
 target_compile_options(dpls_simulator PRIVATE -Wall -Wextra -Werror)
+if(ENABLE_COVERAGE)
+    # The simulator links the instrumented production-core archive too. Without
+    # the gcov runtime here the coverage configuration fails before tests run.
+    target_compile_options(dpls_simulator PRIVATE --coverage)
+    target_link_options(dpls_simulator PRIVATE --coverage)
+endif()
 
 function(dpls_add_test name)
     add_executable(${name} ${ARGN})
