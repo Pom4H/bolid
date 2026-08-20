@@ -312,8 +312,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                         pairingTrigger = null
                         cancelPairingTimeout()
                         scheduleOpenGatt(REOPEN_DELAY_MS)
-                    } else {
-                        failPairingNotConfirmed()
                     }
                     return
                 }
