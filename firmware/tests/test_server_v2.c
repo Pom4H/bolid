@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define FULL_SAFETY_VALIDITY \
+    (DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_RESERVE_VOLTAGE_VALID | \
+     DPLS_STATE_POWER_VALID | DPLS_STATE_AUTOISO_VALID)
+
 typedef struct {
     bool encrypted;
     bool initialized;
@@ -17,7 +21,9 @@ typedef struct {
     bool fail_set_name;
     bool fail_set_password;
     bool fail_storage_read;
+    bool fail_storage_append;
     bool auth_locked;
+    uint8_t measurement_validity;
     unsigned apply_count;
     unsigned disconnect_count;
     unsigned diagnostic_count;
@@ -50,7 +56,7 @@ static bool reserve_low(void *c) {
     ++((fake_t *)c)->reserve_read_count;
     return ((fake_t *)c)->low_reserve;
 }
-static uint8_t validity(void *c) { (void)c; return DPLS_STATE_LINE_VOLTAGE_VALID | DPLS_STATE_POWER_VALID; }
+static uint8_t validity(void *c) { return ((fake_t *)c)->measurement_validity; }
 static void identify(void *c, bool enabled) { ((fake_t *)c)->identify_active = enabled; }
 static bool random_bytes(void *c, uint8_t *out, size_t length) {
     size_t i;
@@ -124,6 +130,7 @@ static void diagnostic(void *c, bool critical) {
 }
 static bool storage_append(void *c, const dpls_event_t *event) {
     fake_t *f = c;
+    if (f->fail_storage_append) return false;
     if (f->event_count == DPLS_EVENT_CAPACITY) {
         memmove(f->events, f->events + 1, (DPLS_EVENT_CAPACITY - 1u) * sizeof(*f->events));
         --f->event_count;
@@ -233,6 +240,7 @@ static void init_server(fake_t *fake, dpls_server_t *server, bool initialized) {
     memset(fake, 0, sizeof(*fake));
     fake->encrypted = true;
     fake->initialized = initialized;
+    fake->measurement_validity = FULL_SAFETY_VALIDITY;
     fake->next_sequence = 1u;
     h = hal(fake);
     dpls_server_init(server, &h, 0u);
@@ -480,6 +488,7 @@ static void test_auth_lockout_and_rng_failure(void) {
     length = request(DPLS_MSG_AUTH_PROOF, 83u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 3u));
     assert(server.critical_fault && fake.diagnostic_count == 1u);
+    assert(fake.disconnect_count == 1u);
     assert(response_status(&fake, DPLS_MSG_AUTH_RESULT) == 4u);
 }
 
@@ -489,32 +498,73 @@ static void test_mode_failures_and_safety_returns(void) {
     uint8_t buf[DPLS_MAX_FRAME];
     uint8_t payload[13];
     size_t length;
+    unsigned apply_count;
 
     init_server(&fake, &server, true);
     authenticate(&server, &fake, buf);
     auth_payload(&server, payload);
     payload[12] = DPLS_MODE_OPEN_T;
 
-    fake.fail_apply = true;
-    length = request(DPLS_MSG_MODE_SET, 90u, payload, sizeof(payload), buf);
+    /* Unknown measurements are never interpreted as healthy. */
+    fake.measurement_validity = 0u;
+    apply_count = fake.apply_count;
+    length = request(DPLS_MSG_MODE_SET, 89u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 4u));
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
+    assert(fake.apply_count == apply_count && server.safety.mode == DPLS_MODE_NORMAL);
+
+    fake.measurement_validity = FULL_SAFETY_VALIDITY;
+    fake.low_reserve = true;
+    length = request(DPLS_MSG_MODE_SET, 90u, payload, sizeof(payload), buf);
+    assert(dpls_server_receive(&server, buf, length, 5u));
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
+    assert(server.safety.mode == DPLS_MODE_NORMAL);
+    fake.low_reserve = false;
+
+    fake.fail_apply = true;
+    length = request(DPLS_MSG_MODE_SET, 91u, payload, sizeof(payload), buf);
+    assert(dpls_server_receive(&server, buf, length, 6u));
     assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 4u);
     assert(server.safety.mode == DPLS_MODE_NORMAL);
 
     fake.fail_apply = false;
     fake.short_active = true;
-    dpls_server_tick(&server, 5u);
-    length = request(DPLS_MSG_MODE_SET, 91u, payload, sizeof(payload), buf);
-    assert(dpls_server_receive(&server, buf, length, 6u));
-    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
-
-    fake.short_active = false;
     dpls_server_tick(&server, 7u);
     length = request(DPLS_MSG_MODE_SET, 92u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 8u));
-    fake.low_reserve = true;
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
+
+    fake.short_active = false;
     dpls_server_tick(&server, 9u);
-    assert(server.safety.mode == DPLS_MODE_NORMAL);
+    length = request(DPLS_MSG_MODE_SET, 93u, payload, sizeof(payload), buf);
+    assert(dpls_server_receive(&server, buf, length, 10u));
+    assert(server.safety.mode == DPLS_MODE_OPEN_T);
+    fake.measurement_validity = 0u;
+    dpls_server_tick(&server, 11u);
+    assert(server.safety.mode == DPLS_MODE_NORMAL && fake.normal);
+}
+
+static void test_audit_failure_is_fail_safe(void) {
+    fake_t fake;
+    dpls_server_t server;
+    uint8_t buf[DPLS_MAX_FRAME];
+    uint8_t payload[13];
+    size_t length;
+
+    init_server(&fake, &server, true);
+    authenticate(&server, &fake, buf);
+    auth_payload(&server, payload);
+    payload[12] = DPLS_MODE_SHORT_1;
+    fake.fail_storage_append = true;
+
+    length = request(DPLS_MSG_MODE_SET, 100u, payload, sizeof(payload), buf);
+    assert(dpls_server_receive(&server, buf, length, 4u));
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 4u);
+    assert(server.critical_fault);
+    assert(!dpls_server_authenticated(&server));
+    assert(server.safety.mode == DPLS_MODE_NORMAL && fake.normal);
+    assert(fake.disconnect_count == 1u);
+    assert(fake.diagnostic_count == 1u);
 }
 
 static void test_tick_samples_hardware_once(void) {
@@ -535,8 +585,9 @@ int main(void) {
     test_setup_paths();
     test_auth_lockout_and_rng_failure();
     test_mode_failures_and_safety_returns();
+    test_audit_failure_is_fail_safe();
     test_tick_samples_hardware_once();
 
-    puts("dpls server v2 invariant tests passed");
+    puts("dpls server v2 invariant and fault-injection tests passed");
     return 0;
 }
