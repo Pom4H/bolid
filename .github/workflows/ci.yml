@@ -25,27 +25,32 @@ jobs:
   smoke:
     name: Cheap PR smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     outputs:
       mobile: ${{ steps.changes.outputs.mobile }}
       firmware: ${{ steps.changes.outputs.firmware }}
       replay: ${{ steps.changes.outputs.replay }}
+      release_pr: ${{ steps.changes.outputs.release_pr }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
 
-      - name: Detect changed areas
+      - name: Detect changed areas and RC policy
         id: changes
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
+          release_pr=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
             echo "mobile=true" >> "$GITHUB_OUTPUT"
             echo "firmware=true" >> "$GITHUB_OUTPUT"
             echo "replay=true" >> "$GITHUB_OUTPUT"
+            echo "release_pr=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -57,21 +62,25 @@ jobs:
           firmware=false
           replay=false
           if grep -qE '^mobile/' /tmp/changed.txt; then mobile=true; fi
-          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk)\.sh)' /tmp/changed.txt; then firmware=true; fi
+          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract)\.py)' /tmp/changed.txt; then firmware=true; fi
           if grep -qE '^(tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
+
+          if [[ "$HEAD_REF" == release/* ]]; then
+            release_pr=true
+            mobile=true
+            firmware=true
+            replay=true
+          fi
 
           echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
           echo "replay=$replay" >> "$GITHUB_OUTPUT"
+          echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
 
-      - name: Verify repository layout
-        run: bash tools/check_repo_layout.sh
-      - name: Verify language-neutral wire contract
-        run: python3 tools/test_dpls_protocol_crc.py
-      - name: Verify session capture smoke
-        run: python3 tools/session_capture/test_session_capture.py
-      - name: Verify architecture ownership
-        run: python3 tools/architecture_guard.py
+      - name: Host invariants + sanitizers
+        run: |
+          python3 tools/test_ci_contract.py
+          bash tools/run_host_invariant_gate.sh
 
       - name: Verify revision 2 pinout contract
         shell: bash
@@ -103,29 +112,12 @@ jobs:
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
 
-      - name: Fast firmware host tests
-        if: steps.changes.outputs.firmware == 'true' || steps.changes.outputs.replay == 'true'
-        run: |
-          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Debug
-          cmake --build firmware/build --parallel 2
-          ctest --test-dir firmware/build --output-on-failure
-
-      - name: Differential captured-session replay
-        if: steps.changes.outputs.replay == 'true'
-        shell: bash
-        run: |
-          if [[ -f tools/session_capture/test_differential_replay.py ]]; then
-            DPLS_SIMULATOR="$PWD/firmware/build/dpls_simulator" \
-              python3 tools/session_capture/test_differential_replay.py
-          else
-            echo "differential replay test not present on this branch"
-          fi
-
   android:
     name: Android unit tests
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.mobile == 'true'
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true' || needs.smoke.outputs.mobile == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
@@ -137,15 +129,16 @@ jobs:
         working-directory: mobile
         run: ./gradlew :wire:testDebugUnitTest :runtime:testDebugUnitTest :core:testDebugUnitTest
       - name: Full Android lint + APK
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         working-directory: mobile
         run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
 
   firmverse:
     name: PHY6252 Firmverse
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.firmware == 'true'
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true' || needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - name: Setup cached ARM GNU Toolchain
@@ -174,8 +167,10 @@ jobs:
 
   firmware-quality:
     name: Firmware coverage + cppcheck
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - name: Install cppcheck
@@ -187,8 +182,10 @@ jobs:
 
   soft-ble-e2e:
     name: Soft-BLE DplsClient ↔ simulator
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
@@ -201,8 +198,10 @@ jobs:
 
   firmware-gcc:
     name: PHY6252 GNU Arm GCC
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - name: Setup cached ARM GNU Toolchain
@@ -226,8 +225,10 @@ jobs:
 
   firmware-keil:
     name: PHY6252 Keil MDK / AC6
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - name: Install AC6 runtime dependencies
@@ -263,8 +264,10 @@ jobs:
 
   ios:
     name: iOS adapter + Xcode host
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
     runs-on: macos-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
@@ -300,3 +303,45 @@ jobs:
             -scheme TestDPLS \
             -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
             CODE_SIGNING_ALLOWED=NO
+
+  release-gate:
+    name: RC production gate
+    needs:
+      - smoke
+      - android
+      - firmverse
+      - firmware-quality
+      - soft-ble-e2e
+      - firmware-gcc
+      - firmware-keil
+      - ios
+    if: always() && needs.smoke.outputs.release_pr == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every RC check to pass
+        shell: bash
+        env:
+          SMOKE: ${{ needs.smoke.result }}
+          ANDROID: ${{ needs.android.result }}
+          FIRMVERSE: ${{ needs.firmverse.result }}
+          QUALITY: ${{ needs.firmware-quality.result }}
+          SOFT_BLE: ${{ needs.soft-ble-e2e.result }}
+          GCC: ${{ needs.firmware-gcc.result }}
+          KEIL: ${{ needs.firmware-keil.result }}
+          IOS: ${{ needs.ios.result }}
+        run: |
+          set -euo pipefail
+          printf '%-20s %s\n' \
+            smoke "$SMOKE" \
+            android "$ANDROID" \
+            firmverse "$FIRMVERSE" \
+            firmware-quality "$QUALITY" \
+            soft-ble-e2e "$SOFT_BLE" \
+            firmware-gcc "$GCC" \
+            firmware-keil "$KEIL" \
+            ios "$IOS"
+          for result in "$SMOKE" "$ANDROID" "$FIRMVERSE" "$QUALITY" "$SOFT_BLE" "$GCC" "$KEIL" "$IOS"; do
+            [[ "$result" == success ]] || exit 1
+          done
+          echo 'RC production gate: PASS'
