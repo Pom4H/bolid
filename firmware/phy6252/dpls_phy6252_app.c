@@ -17,6 +17,7 @@
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
+#include "log.h"
 #include "osal_snv.h"
 #include "watchdog.h"
 #include "gapbondmgr.h"
@@ -563,10 +564,15 @@ static void update_power_state(void)
             power_state = DPLS_POWER_RESERVE;
         else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV)
             power_state = DPLS_POWER_LINE;
-        /* A real downstream short is a healthy line collapsing; ignore sags in
-         * the KZ test modes (we cause those ourselves). */
+        /* Line voltage alone cannot distinguish a real downstream short from a
+         * normal transition to reserve. In particular, latching isolation after
+         * power_state changed to RESERVE masks the reserve LED with a permanent
+         * green AUTO_ISOLATION scene. Until hardware provides an independent
+         * isolation/readback signal, never infer it while the line is absent. */
         if (line > DPLS_LINE_PRESENT_MV) line_established = true;
-        if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
+        if (power_state == DPLS_POWER_RESERVE) {
+            auto_isolation_active = false;
+        } else if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
             if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
@@ -1170,6 +1176,12 @@ void dpls_phy6252_tick(void)
         adc_kick();
     }
     update_power_state();
+#if defined(DPLS_HW_DIAGNOSTICS)
+    LOG("[DPLS PWR] line=%u vcap=%u source=%u low=%u autoiso=%u mode=%u\n",
+        cached_line_mv, cached_vcap_mv, (unsigned)power_state,
+        reserve_low_state ? 1u : 0u, auto_isolation_active ? 1u : 0u,
+        (unsigned)hardware_mode);
+#endif
     dpls_server_tick(&server, now_ms());
     /* Recover from a lost ATT confirmation: drop the unacknowledged head so the
      * response pipeline cannot stay wedged behind it (see tx_in_flight_since_ms). */

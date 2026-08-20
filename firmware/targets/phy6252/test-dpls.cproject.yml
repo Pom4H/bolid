@@ -62,6 +62,7 @@ project:
         - MAX_NUM_LL_CONN: "1"
         - GATT_MAX_NUM_CONN: MAX_NUM_LL_CONN+1
         - DPLS_EVENT_CAPACITY: "200"
+        - DPLS_HW_DIAGNOSTICS: "1"
         - __MICROLIB
       define-asm:
         - __MICROLIB
