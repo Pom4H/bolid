@@ -130,6 +130,22 @@ jobs:
         if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         working-directory: mobile
         run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
+      - name: Stage installable APK
+        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/android
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc5-debug.apk
+          sha256sum tmp/android/TestDPLS-1.4.2-rc5-debug.apk > tmp/android/TestDPLS-1.4.2-rc5-debug.apk.sha256
+          printf 'version=1.4.2\nrc=5\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
+      - uses: actions/upload-artifact@v6
+        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+        with:
+          name: test-dpls-android-1.4.2-rc5
+          path: tmp/android
+          if-no-files-found: error
+          retention-days: 7
 
   firmverse:
     name: PHY6252 Firmverse
@@ -209,17 +225,19 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          mkdir -p tmp
-          bash tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex 2>&1 | tee tmp/gcc-build.log
+          mkdir -p tmp/gcc
+          bash tools/build_firmware.sh gcc tmp/gcc/test-dpls-gcc.hex 2>&1 | tee tmp/gcc/gcc-build.log
+          sha256sum tmp/gcc/test-dpls-gcc.hex > tmp/gcc/test-dpls-gcc.hex.sha256
+          printf 'version=1.4.2\nrc=5\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
           name: test-dpls-phy6252-gcc
           path: |
-            tmp/test-dpls-gcc.hex
+            tmp/gcc
             firmware/targets/phy6252/build/test-dpls.elf
             firmware/targets/phy6252/build/test-dpls.map
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
 
   firmware_keil:
     name: PHY6252 Keil MDK / AC6
@@ -246,19 +264,18 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          mkdir -p tmp
-          bash tools/build_firmware.sh keil tmp/test-dpls.hex 2>&1 | tee tmp/keil-build.log
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
+          mkdir -p tmp/keil
+          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc5.hex 2>&1 | tee tmp/keil/keil-build.log
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/keil/test-dpls.axf
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/keil/test-dpls.map
+          sha256sum tmp/keil/TestDPLS-1.4.2-rc5.hex > tmp/keil/TestDPLS-1.4.2-rc5.hex.sha256
+          printf 'version=1.4.2\nrc=5\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-keil
-          path: |
-            tmp/test-dpls.hex
-            tmp/test-dpls.axf
-            tmp/test-dpls.map
+          name: test-dpls-phy6252-keil-1.4.2-rc5
+          path: tmp/keil
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
 
   ios:
     name: iOS adapter + Xcode host
