@@ -710,6 +710,10 @@ class DplsClient(
         val candidateNodeId = current.candidateNodeIdOrNull
         val clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
         setSession(DeviceSession.Linked(endpoint, clientNonce, candidateNodeId))
+        /* GATT discovery/subscription and SMP pairing start at different epochs.
+         * Re-arm here so slow service discovery cannot consume the user's entire
+         * pairing window before the protected HELLO write even starts. */
+        armConnectTimeout()
         scheduleRssiPoll()
         if (identify.afterConnect) {
             val sequence = request(DplsProtocol.Type.IDENTIFY_START) ?: return
