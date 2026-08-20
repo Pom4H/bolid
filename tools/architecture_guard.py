@@ -15,6 +15,7 @@ CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/Dp
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
 ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
+ANDROID_SECURITY = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidGattSecurityPolicy.kt"
 
 violations: list[str] = []
 
@@ -127,7 +128,72 @@ require_text(
     "connectGatt must deliver callbacks on the main Handler",
 )
 
+# RC4+ security contract: subscription is deliberately plaintext and the first
+# protocol RX write is the SMP trigger. Android must therefore distinguish GATT
+# 5/15 from ordinary write failures, preserve that exact frame across bonding,
+# and resume it only after the bond/subscription state is usable again.
+require_text(
+    ANDROID_SECURITY,
+    "GATT_INSUFFICIENT_AUTHENTICATION = 5",
+    "Android security policy must classify GATT 5 as pairing-required",
+)
+require_text(
+    ANDROID_SECURITY,
+    "GATT_INSUFFICIENT_ENCRYPTION = 15",
+    "Android security policy must classify GATT 15 as pairing-required",
+)
+require_text(
+    ANDROID_SECURITY,
+    "requiresPairing(status) -> WriteDisposition.PAIRING_REQUIRED",
+    "security statuses must not fall through to transient write retry",
+)
+require_text(
+    ANDROID_BLE,
+    "private enum class PairingTrigger",
+    "Android BLE pairing must have an explicit trigger state",
+)
+require_text(
+    ANDROID_BLE,
+    "securityPendingWrite = blocked",
+    "encrypted RX failure must preserve the exact blocked protocol frame",
+)
+require_text(
+    ANDROID_BLE,
+    "startPairing(PairingTrigger.RX_WRITE)",
+    "encrypted RX failure must enter the pairing state",
+)
+require_text(
+    ANDROID_BLE,
+    "resetWrites(clearSecurityPending = !preserveSecurityWrite)",
+    "SMP disconnect must not discard the blocked RX frame before BOND_BONDED",
+)
+require_text(
+    ANDROID_BLE,
+    "if (!pairing && securityPendingWrite != null) resumeSecurityWrite()",
+    "re-subscribed pairing reconnect must resume the blocked RX frame",
+)
+forbid_text(
+    ANDROID_BLE,
+    "pairing timeout — continue GATT",
+    "pairing timeout must fail closed, never pretend security succeeded",
+)
+forbid_text(
+    ANDROID_BLE,
+    "POST_BOND_SETTLE_MS",
+    "security correctness must be event-driven, not depend on a post-bond magic delay",
+)
+
 GATT = ROOT / "firmware/phy6252/dpls_gatt_service.c"
+require_text(
+    GATT,
+    "{{ATT_UUID_SIZE, (uint8 *)dpls_rx_uuid}, GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE",
+    "RX must remain the encrypted security boundary",
+)
+require_text(
+    GATT,
+    "{{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE",
+    "CCCD must remain writable before encryption for the proven iOS order",
+)
 require_text(
     GATT,
     "GATT_Notification",
@@ -213,4 +279,5 @@ print("  Online identity: verified NodeId")
 print("  transaction id: Frame.sequence")
 print("  delayed work: link epoch + sequence/generation guarded")
 print("  Android GATT state: main-looper confined")
+print("  Android pairing: encrypted RX event-driven with pending-frame preservation")
 print("  wire/runtime dependency zones: clean")
