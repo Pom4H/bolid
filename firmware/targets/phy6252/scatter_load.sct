@@ -36,17 +36,11 @@ LR_ROM_XIP 0x11020000 0x01C000 {
     sm*.o(+RO)
     gap*.o(+RO)
     peripheral.o(+RO)
-    dplsBLEPeripheral.o(+RO)
     gapbondmgr.o(+RO)
-    dpls_protocol.o(+RO)
-    dpls_server.o(+RO)
-    dpls_safety.o(+RO)
-    dpls_led.o(+RO)
-    dpls_calib.o(+RO)
-    dpls_durable_settings.o(+RO)
-    dpls_gatt_service.o(+RO)
-    dpls_phy6252_app.o(+RO)
-    dpls_ble_identity.o(+RO)
+    ; Keep every project-owned DPLS module in XIP. This mirrors the GNU linker
+    ; script's dpls*.o rule and prevents new modules silently falling into the
+    ; small ER_IROM1 execution region.
+    dpls*.o(+RO)
     hmac.o(+RO)
     sha256.o(+RO)
     utils.o(+RO)
