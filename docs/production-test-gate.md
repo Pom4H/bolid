@@ -14,6 +14,7 @@
 8. **Generic SMP failure не стирает bonds.** Удаление ключей разрешено только явным пользовательским/физическим reset flow.
 9. **Flash и live BLE разделены:** deferred journal не программирует SNV при активном connection handle; advertising не должен открывать новый link во время storage drain.
 10. **Production binaries equivalent by contract:** GNU Arm GCC и Keil/AC6 обязаны собирать один source set и проходить release gate.
+11. **Auth lock is durable or fail-closed:** 300-секундная блокировка после пяти неверных паролей не может существовать только в RAM. Ошибка записи/снятия lock переводит сервер в critical fail-safe, сбрасывает authentication и завершает link.
 
 ## Локальный обязательный gate
 
@@ -33,9 +34,10 @@ bash tools/run_host_invariant_gate.sh
 - deterministic protocol fuzz (300k+ входов);
 - safety state-space tests;
 - deterministic server state/event sequences (96k переходов);
+- auth-lock persistence fail-safe tests;
 - durable-settings power-cut/corruption matrix;
 - ATT simulator tests;
-- differential captured-session replay.
+- обязательный differential wire replay Python reference framing ↔ production C simulator.
 
 Фиксированные seeds являются частью контракта: падение всегда воспроизводимо. Новые найденные crash/event traces должны добавляться отдельными regression cases, а не заменяться новым seed.
 
@@ -45,7 +47,7 @@ bash tools/run_host_invariant_gate.sh
 
 | Gate | Что доказывает |
 | --- | --- |
-| Cheap PR smoke | Host invariants, ASan/UBSan, fuzz, state/fault models |
+| Cheap PR smoke | Host invariants, ASan/UBSan, fuzz, state/fault models, differential wire replay |
 | Android unit tests | common runtime/core и Android transport policy; lint + APK |
 | PHY6252 Firmverse | Реальный production HEX запускается в строгой модели PB-03F |
 | Firmware coverage + cppcheck | host coverage и статический анализ C |
@@ -84,6 +86,14 @@ Durable settings используют две generation-записи с CRC. Hos
 - изменение security link state.
 
 После каждого transition проверяется глобальный safety invariant. Это дополняет exhaustive boolean state-space в `test_safety`: один тест проверяет все снимки входов, второй — историю переходов.
+
+`test_auth_lock_fail_safe` отдельно fault-injects отказ durable auth lock: запись блокировки, снятие истёкшей блокировки и очистку lock перед успешной авторизацией. Во всех трёх случаях ожидается critical fail-safe, а не продолжение с RAM-only security state.
+
+## Differential wire replay
+
+`tools/session_capture/test_differential_replay.py` является обязательной частью host gate. Он гонит каноническую wire-последовательность через production C simulator и декодирует его ответы независимым Python framing implementation. Проверяются type/sequence, стабильные поля challenge и единая реакция на повреждённый CRC. Отсутствие теста является ошибкой gate, а не `skip`.
+
+Реальные телефон ↔ PHY6252 traces из `tmp/sessions` остаются дополнительным аппаратным evidence: подтверждённое расхождение обязательно превращается в committed regression case.
 
 ## Что CI принципиально не доказывает
 
