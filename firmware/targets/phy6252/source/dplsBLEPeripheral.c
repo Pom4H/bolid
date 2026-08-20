@@ -70,6 +70,15 @@ static bool flash_work_pending(void)
     return dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending();
 }
 
+static void disconnect_for_flash_if_ready(void)
+{
+    if (dpls_phy6252_link_active() &&
+        dpls_phy6252_snv_disconnect_requested() &&
+        dpls_phy6252_tx_idle()) {
+        (void)GAPRole_TerminateConnection();
+    }
+}
+
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
@@ -220,6 +229,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
             if (hdr->event == GATT_MSG_EVENT &&
                 ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
                 dpls_phy6252_tx_confirmed();
+                disconnect_for_flash_if_ready();
             }
             osal_msg_deallocate(message);
         }
@@ -232,6 +242,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
+        disconnect_for_flash_if_ready();
         schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
@@ -257,13 +268,8 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
             (void)enable_advertising_if_ready();
         }
         dpls_phy6252_tick();
+        disconnect_for_flash_if_ready();
         schedule_led_if_needed();
-        /* A staged settings/auth write has already returned its protocol result.
-         * Disconnect on the regular 1 s scheduler turn; the WAITING callback
-         * drains SNV before advertising is allowed again. */
-        if (dpls_phy6252_link_active() && dpls_phy6252_snv_disconnect_requested()) {
-            (void)GAPRole_TerminateConnection();
-        }
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
                            dpls_phy6252_link_active() ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
         return events ^ SBP_DPLS_TICK_EVT;
@@ -274,6 +280,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & DPLS_PHY6252_TX_EVT) {
         dpls_phy6252_process_tx();
+        disconnect_for_flash_if_ready();
         return events ^ DPLS_PHY6252_TX_EVT;
     }
     if (events & DPLS_PHY6252_ADC_EVT) {
