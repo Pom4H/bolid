@@ -26,12 +26,8 @@ cmake \
 cmake --build "$BUILD_DIR" --parallel "${DPLS_BUILD_JOBS:-2}"
 ctest --test-dir "$BUILD_DIR" --output-on-failure --timeout 45
 
-echo '== differential captured-session replay =='
-if [[ -f tools/session_capture/test_differential_replay.py ]]; then
-  DPLS_SIMULATOR="$BUILD_DIR/dpls_simulator" \
-    python3 tools/session_capture/test_differential_replay.py
-else
-  echo 'differential replay test is not present on this branch'
-fi
+echo '== differential wire replay =='
+DPLS_SIMULATOR="$BUILD_DIR/dpls_simulator" \
+  python3 tools/session_capture/test_differential_replay.py
 
 echo 'Host invariant gate: PASS'
