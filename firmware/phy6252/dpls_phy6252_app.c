@@ -121,6 +121,7 @@ static uint8 task_id;
 static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
 static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
+static bool factory_reset_released;
 static uint32_t factory_reset_started_ms;
 static uint32_t connected_at_ms;
 static bool connection_had_encryption;
@@ -1018,7 +1019,11 @@ void dpls_phy6252_init(uint8 new_task_id)
     hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
     hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     classify_settings();
-    factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
+    /* A held-high or externally driven P34 at boot must not turn into an
+     * endless factory-reset loop. Require one observed release before a
+     * subsequent press can start the deliberate five-second gesture. */
+    factory_reset_armed = false;
+    factory_reset_released = !hal_gpio_read(DPLS_FACTORY_RESET_PIN);
     factory_reset_started_ms = now_ms();
     if (settings_state == DPLS_SETTINGS_EMPTY) {
         GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
@@ -1144,12 +1149,18 @@ void dpls_phy6252_tick(void)
         connected_at_ms = 0;
         erase_bonds_and_drop_link();
     }
-    if (factory_reset_armed) {
-        if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
-        else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
-            factory_reset_armed = false;
-            clear_settings_and_bonds();
+    if (!factory_reset_released) {
+        if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_released = true;
+    } else if (!factory_reset_armed) {
+        if (hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
+            factory_reset_armed = true;
+            factory_reset_started_ms = now_ms();
         }
+    } else if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) {
+        factory_reset_armed = false;
+    } else if ((uint32_t)(now_ms() - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
+        factory_reset_armed = false;
+        clear_settings_and_bonds();
     }
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
