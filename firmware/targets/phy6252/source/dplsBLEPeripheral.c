@@ -126,9 +126,11 @@ static void rssi_changed(int8 rssi) { (void)rssi; }
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
     (void)conn_handle;
-    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS) {
-        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
-    }
+    (void)state;
+    (void)status;
+    /* A failed SMP attempt is not evidence that every stored bond is stale.
+     * The phone owns retry/forget UX; only physical factory reset may erase all
+     * bonds. In particular, user cancellation must not destroy other bonds. */
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -151,7 +153,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 mitm = FALSE;
     uint8 io_capability = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
     uint8 bonding = TRUE;
-    uint8 bond_fail = GAPBOND_FAIL_TERMINATE_ERASE_BONDS;
+    uint8 bond_fail = GAPBOND_FAIL_TERMINATE_LINK;
     uint8 key_distribution = GAPBOND_KEYDIST_SENCKEY |
                              GAPBOND_KEYDIST_SIDKEY |
                              GAPBOND_KEYDIST_MENCKEY |
