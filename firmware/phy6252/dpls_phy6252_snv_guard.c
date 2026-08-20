@@ -9,17 +9,21 @@
 
 #include <string.h>
 
-#define DPLS_SNV_DEFERRED_DEPTH 6u
-#define DPLS_SNV_DEFERRED_MAX_LEN 128u
+/* Active-link persistence in Test-DPLS is deliberately tiny: one durable
+ * settings record (94 bytes) or one auth-lock record (8 bytes). Keep exactly
+ * one staged write so the radio-safety fix does not consume scarce PHY6252
+ * MAIN SRAM. Normal product flow disconnects immediately after the protocol
+ * reply drains; a second different write before that is rejected fail-closed. */
+#define DPLS_SNV_DEFERRED_MAX_LEN 96u
 
 typedef struct {
+    bool pending;
     osalSnvId_t id;
     osalSnvLen_t len;
     uint8 data[DPLS_SNV_DEFERRED_MAX_LEN];
 } dpls_deferred_snv_t;
 
-static dpls_deferred_snv_t deferred[DPLS_SNV_DEFERRED_DEPTH];
-static uint8 deferred_count;
+static dpls_deferred_snv_t deferred;
 static bool disconnect_requested;
 
 static uint8 physical_write(osalSnvId_t id, osalSnvLen_t len, void *data)
@@ -33,18 +37,9 @@ static uint8 physical_write(osalSnvId_t id, osalSnvLen_t len, void *data)
     return rc;
 }
 
-static int pending_index(osalSnvId_t id)
-{
-    int i;
-    for (i = (int)deferred_count - 1; i >= 0; --i) {
-        if (deferred[i].id == id) return i;
-    }
-    return -1;
-}
-
 bool dpls_phy6252_snv_pending(void)
 {
-    return deferred_count != 0u;
+    return deferred.pending;
 }
 
 bool dpls_phy6252_snv_disconnect_requested(void)
@@ -55,36 +50,34 @@ bool dpls_phy6252_snv_disconnect_requested(void)
 bool dpls_phy6252_snv_flush_deferred(void)
 {
     if (dpls_phy6252_link_active()) return false;
-
-    while (deferred_count != 0u) {
-        if (physical_write(deferred[0].id, deferred[0].len, deferred[0].data) != SUCCESS) {
-            LOG("DPLS SNV deferred commit failed id=0x%02x\n", (unsigned)deferred[0].id);
-            return false;
-        }
-        if (deferred_count > 1u) {
-            memmove(&deferred[0], &deferred[1],
-                    (size_t)(deferred_count - 1u) * sizeof(deferred[0]));
-        }
-        --deferred_count;
+    if (!deferred.pending) {
+        disconnect_requested = false;
+        return true;
     }
 
+    if (physical_write(deferred.id, deferred.len, deferred.data) != SUCCESS) {
+        LOG("DPLS SNV deferred commit failed id=0x%02x\n", (unsigned)deferred.id);
+        return false;
+    }
+
+    memset(deferred.data, 0, deferred.len);
+    deferred.pending = false;
+    deferred.len = 0u;
     disconnect_requested = false;
     return true;
 }
 
 uint8 dpls_phy6252_snv_read_guarded(osalSnvId_t id, osalSnvLen_t len, void *data)
 {
-    int index;
     if (!data) return FAILURE;
 
-    index = pending_index(id);
-    if (index >= 0) {
-        if (len > deferred[index].len) return FAILURE;
-        memcpy(data, deferred[index].data, len);
+    if (deferred.pending && deferred.id == id) {
+        if (len > deferred.len) return FAILURE;
+        memcpy(data, deferred.data, len);
         return SUCCESS;
     }
 
-    if (!dpls_phy6252_link_active() && deferred_count != 0u &&
+    if (!dpls_phy6252_link_active() && deferred.pending &&
         !dpls_phy6252_snv_flush_deferred()) {
         return FAILURE;
     }
@@ -93,30 +86,26 @@ uint8 dpls_phy6252_snv_read_guarded(osalSnvId_t id, osalSnvLen_t len, void *data
 
 uint8 dpls_phy6252_snv_write_guarded(osalSnvId_t id, osalSnvLen_t len, void *data)
 {
-    int index;
-    dpls_deferred_snv_t *slot;
-
     if (!data || (uint16)len > DPLS_SNV_DEFERRED_MAX_LEN) return FAILURE;
 
     if (!dpls_phy6252_link_active()) {
-        if (deferred_count != 0u && !dpls_phy6252_snv_flush_deferred()) return FAILURE;
+        if (deferred.pending && !dpls_phy6252_snv_flush_deferred()) return FAILURE;
         return osal_snv_write(id, len, data);
     }
 
-    index = pending_index(id);
-    if (index < 0) {
-        if (deferred_count >= DPLS_SNV_DEFERRED_DEPTH) {
-            disconnect_requested = true;
-            LOG("DPLS SNV deferred queue full\n");
-            return FAILURE;
-        }
-        index = (int)deferred_count++;
+    if (deferred.pending && deferred.id != id) {
+        /* Never allocate a second RAM copy. The first commit already requests
+         * a disconnect; the caller can retry the new operation after reconnect. */
+        disconnect_requested = true;
+        LOG("DPLS SNV second active-link write rejected id=0x%02x pending=0x%02x\n",
+            (unsigned)id, (unsigned)deferred.id);
+        return FAILURE;
     }
 
-    slot = &deferred[index];
-    slot->id = id;
-    slot->len = len;
-    memcpy(slot->data, data, len);
+    deferred.pending = true;
+    deferred.id = id;
+    deferred.len = len;
+    memcpy(deferred.data, data, len);
     disconnect_requested = true;
     LOG("DPLS SNV deferred id=0x%02x len=%u\n", (unsigned)id, (unsigned)len);
     return SUCCESS;
