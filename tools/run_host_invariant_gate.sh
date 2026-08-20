@@ -9,8 +9,9 @@ export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
 
 cd "$ROOT"
 
-echo '== repository / architecture invariants =='
+echo '== repository / CI / architecture invariants =='
 bash tools/check_repo_layout.sh
+python3 tools/test_ci_contract.py
 python3 tools/test_dpls_protocol_crc.py
 python3 tools/session_capture/test_session_capture.py
 python3 tools/architecture_guard.py
