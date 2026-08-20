@@ -320,7 +320,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                             cancelPairingTimeout()
                             scheduleOpenGatt(REOPEN_DELAY_MS)
                         }
-                        else -> Unit
                     }
                     return
                 }
