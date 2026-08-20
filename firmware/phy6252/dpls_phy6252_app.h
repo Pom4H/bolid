@@ -28,6 +28,10 @@ void dpls_phy6252_process_rx(void);
  * window averaging live, off the interrupt path. */
 void dpls_phy6252_process_adc(void);
 void dpls_phy6252_process_tx(void);
+/* True only when no queued frame and no notification/indication is awaiting
+ * completion. Used by the target shell before a flash-mandated disconnect so
+ * a SETTINGS/AUTH response cannot be cut off in flight. */
+bool dpls_phy6252_tx_idle(void);
 /* Flush at most one deferred journal block. Physical SNV writes are additionally
  * guarded by dpls_phy6252_snv_guard and cannot run while a BLE handle is active. */
 void dpls_phy6252_process_storage(void);
