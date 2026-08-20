@@ -17,7 +17,8 @@ host_gate = HOST_GATE.read_text(encoding="utf-8")
 
 required_ci_tokens = [
     "release_pr:",
-    "head_ref",
+    "HEAD_REF: ${{ github.head_ref }}",
+    'if [[ "$HEAD_REF" == release/* ]]',
     "Host invariants + sanitizers",
     "Android unit tests",
     "PHY6252 Firmverse",
@@ -36,22 +37,49 @@ if missing:
 
 # These jobs used to be completely disabled for pull requests. A release PR
 # must never regress to that topology.
-forbidden = [
-    "firmware-quality:\n    name: Firmware coverage + cppcheck\n    if: github.event_name != 'pull_request'",
-    "soft-ble-e2e:\n    name: Soft-BLE DplsClient ↔ simulator\n    if: github.event_name != 'pull_request'",
-    "firmware-gcc:\n    name: PHY6252 GNU Arm GCC\n    if: github.event_name != 'pull_request'",
-    "firmware-keil:\n    name: PHY6252 Keil MDK / AC6\n    if: github.event_name != 'pull_request'",
-    "ios:\n    name: iOS adapter + Xcode host\n    if: github.event_name != 'pull_request'",
-]
-for pattern in forbidden:
-    if pattern in ci:
-        raise SystemExit("CI release contract regressed: heavy job disabled on every PR")
+for job_id, name in (
+    ("firmware_quality", "Firmware coverage + cppcheck"),
+    ("soft_ble_e2e", "Soft-BLE DplsClient ↔ simulator"),
+    ("firmware_gcc", "PHY6252 GNU Arm GCC"),
+    ("firmware_keil", "PHY6252 Keil MDK / AC6"),
+    ("ios", "iOS adapter + Xcode host"),
+):
+    old_shape = f"  {job_id}:\n    name: {name}\n    if: github.event_name != 'pull_request'"
+    if old_shape in ci:
+        raise SystemExit(f"CI release contract regressed: {job_id} disabled on every PR")
 
-for token in ("ENABLE_SANITIZERS", "-fsanitize=address,undefined", "test_protocol_fuzz"):
+# The final RC gate must depend on every independent evidence source. This is
+# intentionally textual: changing the workflow topology requires consciously
+# changing this contract in the same review.
+release_needs = (
+    "      - smoke\n"
+    "      - android\n"
+    "      - firmverse\n"
+    "      - firmware_quality\n"
+    "      - soft_ble_e2e\n"
+    "      - firmware_gcc\n"
+    "      - firmware_keil\n"
+    "      - ios"
+)
+if release_needs not in ci:
+    raise SystemExit("RC production gate no longer depends on the full evidence matrix")
+
+for token in (
+    "ENABLE_SANITIZERS",
+    "-fsanitize=address,undefined",
+    "test_protocol_fuzz",
+    "test_durable_settings_powerloss_matrix",
+):
     if token not in cmake:
-        raise SystemExit(f"host sanitizer/fuzz contract missing from firmware/CMakeLists.txt: {token}")
+        raise SystemExit(f"host sanitizer/fault contract missing from firmware/CMakeLists.txt: {token}")
 
-for token in ("ENABLE_SANITIZERS=ON", "ctest --test-dir", "architecture_guard.py"):
+for token in (
+    "test_ci_contract.py",
+    "ENABLE_SANITIZERS=ON",
+    "ctest --test-dir",
+    "architecture_guard.py",
+    "test_differential_replay.py",
+):
     if token not in host_gate:
         raise SystemExit(f"host invariant gate missing: {token}")
 
