@@ -38,9 +38,9 @@
 #define DPLS_JOURNAL_RECORD_SIZE 12u
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
-/* Events generated during a BLE session stay in RAM. 24 is the bounded SRAM
- * budget already validated in the split-runtime branch and comfortably covers
- * normal connect/auth/mode activity without touching flash under the radio. */
+/* Events generated during a BLE session stay in RAM. Overflow is a storage
+ * failure and the protocol server fails safe rather than silently dropping an
+ * acknowledged audit event. */
 #define DPLS_PENDING_EVENT_CAPACITY 24u
 #define DPLS_NAME_SIZE 32u
 #define DPLS_HW_REVISION 2u
@@ -58,6 +58,7 @@
 #define DPLS_ADC_NEED_VCAP 0x08u
 #define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
                            DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
+#define DPLS_MEASUREMENT_STALE_MS 3000u
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
 #define DPLS_RESERVE_LOW_MV 3700u
@@ -98,9 +99,11 @@ static dpls_server_t server;
 static dpls_settings_t settings;
 static dpls_led_t status_led;
 static bool identify_led_active;
+/* connection_handle is the single authoritative physical-link owner. Target
+ * scheduling queries dpls_phy6252_link_active() instead of maintaining link_up. */
 static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
-static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
+/* server.safety.mode is the single authoritative commanded-mode owner. */
 static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
 static uint32_t factory_reset_started_ms;
@@ -148,6 +151,10 @@ static uint8_t line_window_count, line_window_pos;
 static uint8_t port2_window_count, port2_window_pos;
 static uint8_t port_t_window_count, port_t_window_pos;
 static uint8_t vcap_window_count, vcap_window_pos;
+static uint32_t line_last_sample_ms;
+static uint32_t port2_last_sample_ms;
+static uint32_t port_t_last_sample_ms;
+static uint32_t vcap_last_sample_ms;
 static volatile uint16_t cached_line_mv;
 static volatile uint16_t cached_port2_mv;
 static volatile uint16_t cached_port_t_mv;
@@ -170,7 +177,7 @@ static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 
 /* Keep the SDK's normal 2 s watchdog policy, but a synchronous settings/SNV
  * transaction is a known blocking resource. Widen only around that call. Journal
- * writes use this too, but now only after disconnect. */
+ * writes use this too, but now only after disconnect with advertising disabled. */
 static uint8_t snv_write_bounded(osalSnvId_t id, osalSnvLen_t len, void *data)
 {
     uint8_t rc;
@@ -327,8 +334,9 @@ static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t 
            event->sequence == sequence;
 }
 
-/* Commit exactly one journal block. The caller guarantees there is no active
- * BLE link; processing one block per OSAL turn bounds flash monopolization. */
+/* Commit exactly one journal block. The target keeps advertising disabled while
+ * this event is pending; checking the authoritative link owner here is the last
+ * line of defence against a connected flash write. */
 static bool journal_flush_one_block(void)
 {
     uint8_t block_index, applied = 0u, i;
@@ -361,9 +369,19 @@ static bool journal_flush_one_block(void)
     return true;
 }
 
+bool dpls_phy6252_link_active(void)
+{
+    return connection_handle != INVALID_CONNHANDLE;
+}
+
+bool dpls_phy6252_storage_pending(void)
+{
+    return journal_pending_event_count != 0u;
+}
+
 void dpls_phy6252_process_storage(void)
 {
-    if (connection_handle != INVALID_CONNHANDLE || journal_pending_event_count == 0u) return;
+    if (dpls_phy6252_link_active() || journal_pending_event_count == 0u) return;
     if (!journal_flush_one_block()) {
         osal_start_timerEx(task_id, DPLS_PHY6252_STORAGE_EVT, 1000u);
         return;
@@ -374,7 +392,7 @@ void dpls_phy6252_process_storage(void)
 static bool link_encrypted(void *context)
 {
     (void)context;
-    return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
+    return dpls_phy6252_link_active() && linkDB_Encrypted(connection_handle);
 }
 
 static void mode_outputs_off(void)
@@ -401,7 +419,6 @@ static void safe_normal(void *context)
 {
     (void)context;
     mode_outputs_off();
-    hardware_mode = DPLS_MODE_NORMAL;
     control_sleep_guard(false);
 }
 
@@ -419,7 +436,6 @@ static bool apply_mode(void *context, dpls_mode_t mode)
     case DPLS_MODE_SHORT_T: hal_gpio_write(DPLS_PIN_KZ_T, 1); break;
     default: return false;
     }
-    hardware_mode = mode;
     control_sleep_guard(mode != DPLS_MODE_NORMAL);
     LOG("DPLS MODE %u\n", (unsigned)mode);
     return true;
@@ -472,6 +488,11 @@ static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint
     if (*count < DPLS_ADC_WINDOW) ++*count;
     for (i = 0u; i < *count; ++i) sum += window[i];
     return (uint16_t)(sum / *count);
+}
+
+static bool sample_fresh(uint8_t count, uint32_t last_sample_ms, uint32_t now)
+{
+    return count != 0u && (uint32_t)(now - last_sample_ms) <= DPLS_MEASUREMENT_STALE_MS;
 }
 
 static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
@@ -534,20 +555,29 @@ void dpls_phy6252_process_adc(void)
     if (adc_raw_ready) {
         adc_CH_t ch = adc_raw_channel;
         uint8_t size = adc_raw_size;
+        uint32_t sample_ms = now_ms();
         adc_raw_ready = false;
         switch (ch) {
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib, line_window,
-                                &line_window_count, &line_window_pos, &cached_line_mv); break;
+                                &line_window_count, &line_window_pos, &cached_line_mv);
+            line_last_sample_ms = sample_ms;
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib, port2_window,
-                                &port2_window_count, &port2_window_pos, &cached_port2_mv); break;
+                                &port2_window_count, &port2_window_pos, &cached_port2_mv);
+            port2_last_sample_ms = sample_ms;
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC):
             process_adc_channel(ch, adc_raw, size, &line_calib, port_t_window,
-                                &port_t_window_count, &port_t_window_pos, &cached_port_t_mv); break;
+                                &port_t_window_count, &port_t_window_pos, &cached_port_t_mv);
+            port_t_last_sample_ms = sample_ms;
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC):
             process_adc_channel(ch, adc_raw, size, &vcap_calib, vcap_window,
-                                &vcap_window_count, &vcap_window_pos, &cached_vcap_mv); break;
+                                &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
+            vcap_last_sample_ms = sample_ms;
+            break;
         default: break;
         }
     }
@@ -556,19 +586,20 @@ void dpls_phy6252_process_adc(void)
 
 static void update_power_state(void)
 {
-    if (line_window_count != 0u) {
+    uint32_t now = now_ms();
+    if (sample_fresh(line_window_count, line_last_sample_ms, now)) {
         uint16_t line = cached_line_mv;
         if (power_state == DPLS_POWER_LINE && line < DPLS_LINE_ABSENT_MV)
             power_state = DPLS_POWER_RESERVE;
         else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV)
             power_state = DPLS_POWER_LINE;
         if (line > DPLS_LINE_PRESENT_MV) line_established = true;
-        if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
+        if (line_established && server.safety.mode == DPLS_MODE_NORMAL) {
             if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
     }
-    if (vcap_window_count != 0u) {
+    if (sample_fresh(vcap_window_count, vcap_last_sample_ms, now)) {
         uint16_t vcap = cached_vcap_mv;
         if (!reserve_low_state && vcap < DPLS_RESERVE_LOW_MV) reserve_low_state = true;
         else if (reserve_low_state && vcap > DPLS_RESERVE_OK_MV) reserve_low_state = false;
@@ -587,12 +618,13 @@ static bool real_short_active(void *context) { (void)context; return auto_isolat
 static uint8_t measurement_validity(void *context)
 {
     uint8_t flags = 0;
+    uint32_t now = now_ms();
     (void)context;
-    if (line_window_count != 0u)
+    if (sample_fresh(line_window_count, line_last_sample_ms, now))
         flags |= DPLS_STATE_PORT_1_VALID | DPLS_STATE_POWER_VALID | DPLS_STATE_AUTOISO_VALID;
-    if (port2_window_count != 0u) flags |= DPLS_STATE_PORT_2_VALID;
-    if (port_t_window_count != 0u) flags |= DPLS_STATE_PORT_T_VALID;
-    if (vcap_window_count != 0u) flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
+    if (sample_fresh(port2_window_count, port2_last_sample_ms, now)) flags |= DPLS_STATE_PORT_2_VALID;
+    if (sample_fresh(port_t_window_count, port_t_last_sample_ms, now)) flags |= DPLS_STATE_PORT_T_VALID;
+    if (sample_fresh(vcap_window_count, vcap_last_sample_ms, now)) flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
     if (line_calib_from_nv) flags |= DPLS_STATE_ADC_CALIBRATED;
     return flags;
 }
@@ -769,7 +801,7 @@ static void tx_complete_head(void)
 static void tx_pump(void)
 {
     bStatus_t rc;
-    if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+    if (tx.in_flight || tx.count == 0u || !dpls_phy6252_link_active()) return;
     rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
                                    tx.slots[tx.head].length, task_id);
     if (rc == SUCCESS) {
@@ -891,7 +923,6 @@ static void initialize_retained_outputs(void)
     (void)hal_gpioretention_register(DPLS_PIN_LED_RED);
     (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
     (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
-    hardware_mode = DPLS_MODE_NORMAL;
 }
 
 static void reset_measurements(void)
@@ -900,6 +931,7 @@ static void reset_measurements(void)
     port2_window_count = port2_window_pos = 0;
     port_t_window_count = port_t_window_pos = 0;
     vcap_window_count = vcap_window_pos = adc_decimate = 0;
+    line_last_sample_ms = port2_last_sample_ms = port_t_last_sample_ms = vcap_last_sample_ms = 0u;
     cached_line_mv = cached_port2_mv = cached_port_t_mv = cached_vcap_mv = 0;
     adc_pending = 0u;
     adc_raw_ready = false;
@@ -1011,7 +1043,7 @@ void dpls_phy6252_process_rx(void)
 
 static void tick_link_security(uint32_t now)
 {
-    if (connection_handle == INVALID_CONNHANDLE) return;
+    if (!dpls_phy6252_link_active()) return;
     if (link_encrypted(NULL)) connection_had_encryption = true;
     if (!link_encrypted(NULL) && !connection_had_encryption && connected_at_ms != 0u &&
         (uint32_t)(now - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
@@ -1038,7 +1070,7 @@ static void tick_measurements(void)
 {
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
-        adc_pending = connection_handle != INVALID_CONNHANDLE
+        adc_pending = dpls_phy6252_link_active()
             ? (uint8_t)DPLS_ADC_NEED_ALL
             : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
         adc_kick();
@@ -1077,7 +1109,7 @@ uint32 dpls_phy6252_led_tick(void)
     bool reserve = power_source(NULL) == DPLS_POWER_RESERVE;
     if (identify_led_active) scene = DPLS_LED_SCENE_IDENTIFY;
     else if (auto_isolation_active) scene = DPLS_LED_SCENE_AUTO_ISOLATION;
-    else scene = led_scene_for_mode(hardware_mode);
+    else scene = led_scene_for_mode(server.safety.mode);
     dpls_led_set(&status_led, scene, reserve, now);
     delay = dpls_led_tick(&status_led, now);
     if (delay == 0u) return 0u;
