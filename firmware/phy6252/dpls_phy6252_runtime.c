@@ -7,6 +7,7 @@
 #include "dpls_phy6252_measurements.h"
 #include "dpls_phy6252_outputs.h"
 #include "dpls_phy6252_storage.h"
+#include "dpls_phy6252_supervisor.h"
 #include "dpls_phy6252_transport.h"
 #include "dpls_server.h"
 #include "OSAL.h"
@@ -129,6 +130,7 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
     hal = server_hal();
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(dpls_phy6252_transport_receive_frame);
+    dpls_phy6252_supervisor_checkpoint();
     LOG("DPLS boot settings=%u\n",
         (unsigned)dpls_phy6252_storage_settings_state(NULL));
     schedule_storage_if_needed();
@@ -136,6 +138,7 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
 
 void dpls_phy6252_runtime_connected(uint16 conn_handle)
 {
+    dpls_phy6252_supervisor_checkpoint();
     dpls_phy6252_storage_set_link_active(true);
     dpls_phy6252_transport_connected(conn_handle);
     dpls_server_connected(&server, now_ms());
@@ -191,9 +194,19 @@ void dpls_phy6252_runtime_tx_confirmed(void)
 
 void dpls_phy6252_runtime_tick(void)
 {
-    uint32 now = now_ms();
-    bool connected = dpls_phy6252_transport_connected_now();
+    uint32 now;
+    bool connected;
 
+    /* The SDK enables WDG_2S in main(), but its intended OSAL idle-task feed is
+     * commented out in PHY62XX SDK 3.1.2. During an active BLE session or while
+     * outputs keep sleep locked, relying on wakeup-time watchdog reinit is not a
+     * valid liveness policy. The 1 Hz connected runtime tick is our explicit
+     * heartbeat; if this task stops making progress, the watchdog is still free
+     * to reset the MCU. */
+    dpls_phy6252_supervisor_checkpoint();
+
+    now = now_ms();
+    connected = dpls_phy6252_transport_connected_now();
     dpls_phy6252_transport_tick_security(dpls_server_authenticated(&server), now);
     tick_factory_reset(now);
     dpls_phy6252_measurements_tick(connected, dpls_phy6252_outputs_mode());
