@@ -11,6 +11,7 @@
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
+#include "dpls_phy6252_snv_guard.h"
 #include "dpls_server.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
@@ -21,6 +22,7 @@
 #define DEFAULT_CONN_TIMEOUT 3000
 #define DPLS_TICK_MS 1000u
 #define DPLS_TICK_IDLE_MS 5000u
+#define DPLS_STORAGE_RETRY_MS 1000u
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
@@ -63,18 +65,28 @@ static void apply_identity_to_adv(void)
     device_name[14] = '\0';
 }
 
+static bool flash_work_pending(void)
+{
+    return dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending();
+}
+
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
     /* Flash safety is stronger than "no active handle": while deferred SNV is
      * draining, advertising must remain off so the controller cannot accept a
      * new central in the middle of a blocking erase/write. */
-    if (!dpls_ble_identity_is_ready() || dpls_phy6252_storage_pending()) return false;
+    if (!dpls_ble_identity_is_ready() || flash_work_pending()) return false;
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     set_advertising_enabled(enabled);
     return true;
+}
+
+static void schedule_storage_if_needed(void)
+{
+    if (flash_work_pending()) osal_set_event(app_task_id, DPLS_PHY6252_STORAGE_EVT);
 }
 
 static void schedule_led_if_needed(void)
@@ -88,8 +100,12 @@ static void state_changed(gaprole_States_t state)
     switch (state) {
     case GAPROLE_STARTED:
         dpls_ble_identity_on_stack_started();
-        if (dpls_phy6252_storage_pending()) set_advertising_enabled(FALSE);
-        else (void)enable_advertising_if_ready();
+        if (flash_work_pending()) {
+            set_advertising_enabled(FALSE);
+            schedule_storage_if_needed();
+        } else {
+            (void)enable_advertising_if_ready();
+        }
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
@@ -104,8 +120,12 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         dpls_phy6252_disconnected();
         schedule_led_if_needed();
-        if (dpls_phy6252_storage_pending()) set_advertising_enabled(FALSE);
-        else (void)enable_advertising_if_ready();
+        if (flash_work_pending()) {
+            set_advertising_enabled(FALSE);
+            schedule_storage_if_needed();
+        } else {
+            (void)enable_advertising_if_ready();
+        }
         break;
     default:
         break;
@@ -162,7 +182,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
     GAPRole_SetParameter(GAPROLE_ADV_CHANNEL_MAP, sizeof(channels), &channels);
     GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(advertising_enabled), &advertising_enabled);
-    GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
+    GAPRole_SetParameter(GAPROLE_ADV_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertising_data), advertising_data);
     GAPRole_SetParameter(GAPROLE_PARAM_UPDATE_ENABLE, sizeof(update_enabled), &update_enabled);
@@ -216,9 +236,19 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & DPLS_PHY6252_STORAGE_EVT) {
+        if (dpls_phy6252_link_active()) return events ^ DPLS_PHY6252_STORAGE_EVT;
+        if (dpls_phy6252_snv_pending() && !dpls_phy6252_snv_flush_deferred()) {
+            set_advertising_enabled(FALSE);
+            osal_start_timerEx(app_task_id, DPLS_PHY6252_STORAGE_EVT, DPLS_STORAGE_RETRY_MS);
+            return events ^ DPLS_PHY6252_STORAGE_EVT;
+        }
         dpls_phy6252_process_storage();
-        if (!dpls_phy6252_link_active() && !dpls_phy6252_storage_pending())
+        if (flash_work_pending()) {
+            set_advertising_enabled(FALSE);
+            osal_set_event(app_task_id, DPLS_PHY6252_STORAGE_EVT);
+        } else {
             (void)enable_advertising_if_ready();
+        }
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
@@ -228,6 +258,12 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         }
         dpls_phy6252_tick();
         schedule_led_if_needed();
+        /* A staged settings/auth write has already returned its protocol result.
+         * Disconnect on the regular 1 s scheduler turn; the WAITING callback
+         * drains SNV before advertising is allowed again. */
+        if (dpls_phy6252_link_active() && dpls_phy6252_snv_disconnect_requested()) {
+            (void)GAPRole_TerminateConnection();
+        }
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
                            dpls_phy6252_link_active() ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
         return events ^ SBP_DPLS_TICK_EVT;
