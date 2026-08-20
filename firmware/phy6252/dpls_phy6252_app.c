@@ -839,6 +839,11 @@ void dpls_phy6252_process_tx(void)
         osal_start_timerEx(task_id, DPLS_PHY6252_TX_EVT, DPLS_TX_NOTIFY_PACE_MS);
 }
 
+bool dpls_phy6252_tx_idle(void)
+{
+    return tx.count == 0u && !tx.in_flight;
+}
+
 void dpls_phy6252_tx_confirmed(void)
 {
     if (!tx.in_flight || !dpls_gatt_needs_confirmation(connection_handle)) return;
@@ -991,7 +996,11 @@ static void tick_measurements(void)
 static void tick_tx(uint32_t now)
 {
     if (tx.in_flight && dpls_gatt_needs_confirmation(connection_handle) &&
-        (uint32_t)(now - tx.in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) tx_complete_head();
+        (uint32_t)(now - tx.in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
+        LOG("DPLS TX indication confirmation timeout\n");
+        (void)GAPRole_TerminateConnection();
+        return;
+    }
     dpls_phy6252_process_tx();
 }
 
