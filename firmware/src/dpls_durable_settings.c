@@ -44,6 +44,15 @@ static bool generation_newer(uint32_t left, uint32_t right)
     return (int32_t)(left - right) > 0;
 }
 
+static bool has_name_terminator(const char *name)
+{
+    size_t i;
+    for (i = 0u; i < DPLS_DURABLE_SETTINGS_NAME_SIZE; ++i) {
+        if (name[i] == '\0') return true;
+    }
+    return false;
+}
+
 uint32_t dpls_durable_settings_next_generation(uint32_t current)
 {
     uint32_t next = current + 1u;
@@ -92,10 +101,8 @@ bool dpls_durable_settings_decode(
     memcpy(out->verifier, raw + OFF_VERIFIER, DPLS_DURABLE_SETTINGS_VERIFIER_SIZE);
 
     if (out->state == DPLS_DURABLE_SETTINGS_VALID) {
-        /* Every writer zero-pads the fixed name field. A missing terminator is a
-         * torn/foreign record even if a coincidental CRC happened to match. */
-        if (out->name[0] == '\0' || memchr(out->name, '\0', sizeof(out->name)) == NULL)
-            return false;
+        /* Avoid libc helpers here: production PHY6252 links -nostdlib. */
+        if (out->name[0] == '\0' || !has_name_terminator(out->name)) return false;
     }
     return true;
 }
