@@ -195,6 +195,7 @@ project:
         - file: ../../src/dpls_safety.c
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
+        - file: ../../src/dpls_durable_settings.c
         - file: ../../phy6252/dpls_gatt_service.c
         - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_ble_identity.c
