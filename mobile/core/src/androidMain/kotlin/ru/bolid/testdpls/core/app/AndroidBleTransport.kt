@@ -293,8 +293,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
 
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 val bonded = current.device.bondState == BluetoothDevice.BOND_BONDED
-                val wasSecurityHandshake = securityState is SecurityState.Pairing ||
-                    securityState is SecurityState.Resuming
+                val securityAtDisconnect = securityState
+                val wasSecurityHandshake = securityAtDisconnect is SecurityState.Pairing ||
+                    securityAtDisconnect is SecurityState.Resuming
                 current.close()
                 if (gatt === current) gatt = null
                 rx = null
@@ -308,12 +309,19 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     return
                 }
 
-                /* Android stacks are allowed to tear the ACL down during SMP and
-                 * report BOND_BONDED afterwards. The disconnect status is not the
-                 * security outcome; BOND_BONDED/BOND_NONE/timeout is. */
+                /* ACL loss is not a security outcome. Pairing waits for the bond
+                 * event; Resuming already owns a bonded blocked frame and must
+                 * explicitly reopen GATT so that frame cannot be stranded. */
                 if (wasSecurityHandshake) {
-                    Log.i(TAG, "security disconnect status=$status bonded=$bonded state=$securityState")
-                    if (bonded) handleBonded()
+                    Log.i(TAG, "security disconnect status=$status bonded=$bonded state=$securityAtDisconnect")
+                    when (securityAtDisconnect) {
+                        is SecurityState.Pairing -> if (bonded) handleBonded()
+                        is SecurityState.Resuming -> {
+                            cancelPairingTimeout()
+                            scheduleOpenGatt(REOPEN_DELAY_MS)
+                        }
+                        else -> Unit
+                    }
                     return
                 }
 
