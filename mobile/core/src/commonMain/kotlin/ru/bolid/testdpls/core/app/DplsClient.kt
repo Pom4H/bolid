@@ -1824,7 +1824,7 @@ class DplsClient(
 
     companion object {
         private const val SCAN_DURATION_MS = 20_000L
-        private const val CONNECT_TIMEOUT_MS = 45_000L
+        private const val CONNECT_TIMEOUT_MS = 55_000L
         private const val COMMAND_TIMEOUT_MS = 3_000L
         private const val STATE_REFRESH_MS = 1_000L
         private const val TELEMETRY_STALE_MS = 3_000L
