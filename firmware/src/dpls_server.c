@@ -509,9 +509,15 @@ static void send_log_from(dpls_server_t *s, uint16_t sequence, uint16_t first) {
 static bool auth_block_active(dpls_server_t *s, uint32_t now) {
     if (!s->session.blocked_until_ms) return false;
     if (!elapsed(now, s->session.blocked_until_ms)) return true;
+    if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, false)) {
+        /* Never reopen authentication on a RAM-only decision. If the durable
+         * lock cannot be cleared after its deadline, the security store is no
+         * longer trustworthy and the device must stay fail-closed. */
+        enter_critical_fail_safe(s);
+        return true;
+    }
     s->session.blocked_until_ms = 0;
     s->session.failed_auth_attempts = 0;
-    if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
     return false;
 }
 
@@ -567,9 +573,13 @@ static void handle_setup(dpls_server_t *s, const dpls_frame_t *f) {
 
 static void block_authentication(dpls_server_t *s, const dpls_frame_t *f) {
     s->session.blocked_until_ms = s->now_ms + DPLS_AUTH_BLOCK_MS;
-    if (s->hal.auth.lock_write && !s->hal.auth.lock_write(s->hal.context, true) &&
-        s->hal.diagnostic_error) {
-        s->hal.diagnostic_error(s->hal.context, false);
+    if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, true)) {
+        /* A lockout that exists only in RAM is bypassable by a power cycle.
+         * Treat durable-lock failure as a security-store failure, not as a
+         * recoverable diagnostic. */
+        send_auth_result(s, f->sequence, DPLS_AUTH_INTERNAL_ERROR, 0u);
+        enter_critical_fail_safe(s);
+        return;
     }
     send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED,
                      (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
@@ -583,9 +593,11 @@ static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
         return;
     }
     if (auth_block_active(s, s->now_ms)) {
-        uint16_t retry_seconds =
-            (uint16_t)((s->session.blocked_until_ms - s->now_ms + 999u) / 1000u);
-        send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED, retry_seconds);
+        if (!s->critical_fault) {
+            uint16_t retry_seconds =
+                (uint16_t)((s->session.blocked_until_ms - s->now_ms + 999u) / 1000u);
+            send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED, retry_seconds);
+        }
         return;
     }
     if (s->session.last_auth_proof_ms &&
@@ -599,11 +611,15 @@ static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
                                  s->session.client_nonce, s->session.session_id,
                                  f->payload + DPLS_AUTH_NONCE_SIZE)) {
         bool first_success = !s->session.authenticated;
+        if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, false)) {
+            send_auth_result(s, f->sequence, DPLS_AUTH_INTERNAL_ERROR, 0u);
+            enter_critical_fail_safe(s);
+            return;
+        }
         s->session.authenticated = true;
         s->session.failed_auth_attempts = 0;
         s->session.last_authenticated_activity_ms = s->now_ms;
         send_auth_result(s, f->sequence, DPLS_AUTH_OK, 0);
-        if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
         if (first_success) (void)dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
         return;
     }
