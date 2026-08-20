@@ -22,7 +22,8 @@ typedef enum {
     DPLS_SAFETY_RETURN_SESSION_TIMEOUT,
     DPLS_SAFETY_RETURN_LOW_RESERVE,
     DPLS_SAFETY_RETURN_DISCONNECT,
-    DPLS_SAFETY_RETURN_REAL_SHORT
+    DPLS_SAFETY_RETURN_REAL_SHORT,
+    DPLS_SAFETY_RETURN_MEASUREMENT_LOST
 } dpls_safety_return_t;
 
 typedef struct {
@@ -36,6 +37,7 @@ typedef struct {
     bool authenticated;
     bool reserve_low;
     bool real_short;
+    bool measurements_ready;
     uint32_t last_authenticated_activity_ms;
 } dpls_safety_inputs_t;
 
