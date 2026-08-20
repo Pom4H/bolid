@@ -148,7 +148,11 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
     (void)hal_pwrmgr_LowCurrentLdo_enable();
+    /* MOD_USR1 protects energized power outputs. MOD_USR2 is intentionally
+     * separate: measurements hold it only while an ADC conversion series is
+     * active, so ADC sleep protection cannot release an output safety lock. */
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
+    (void)hal_pwrmgr_register(MOD_USR2, NULL, NULL);
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
 
