@@ -14,6 +14,7 @@ bash tools/check_repo_layout.sh
 python3 tools/test_ci_contract.py
 python3 tools/test_phy6252_linker_parity.py
 python3 tools/test_phy6252_snv_guard_contract.py
+python3 tools/test_ble_timeout_contract.py
 python3 tools/test_dpls_protocol_crc.py
 python3 tools/session_capture/test_session_capture.py
 python3 tools/architecture_guard.py
