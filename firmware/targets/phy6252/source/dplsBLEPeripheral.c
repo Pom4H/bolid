@@ -93,6 +93,12 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
+        /* Proven PHY6252 hardware invariant: while a BLE link is up, do not let
+         * the core enter the SDK sleep/wake path. Historical PB-03F testing
+         * showed ADC/radio clock transitions can otherwise freeze OSAL or warm
+         * reset the SoC. MOD_USR0 is dedicated to the link so ADC/output locks
+         * cannot release it. */
+        (void)hal_pwrmgr_lock(MOD_USR0);
         link_up = TRUE;
         dpls_phy6252_runtime_connected(handle);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
@@ -102,6 +108,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         link_up = FALSE;
         dpls_phy6252_runtime_disconnected();
+        (void)hal_pwrmgr_unlock(MOD_USR0);
         schedule_led_if_needed();
         (void)enable_advertising_if_identity_ready();
         break;
@@ -148,9 +155,11 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
     (void)hal_pwrmgr_LowCurrentLdo_enable();
-    /* MOD_USR1 protects energized power outputs. MOD_USR2 is intentionally
-     * separate: measurements hold it only while an ADC conversion series is
-     * active, so ADC sleep protection cannot release an output safety lock. */
+    /* Independent power-lock ownership:
+     *   USR0 = active BLE link
+     *   USR1 = energized power outputs
+     *   USR2 = active ADC conversion series */
+    (void)hal_pwrmgr_register(MOD_USR0, NULL, NULL);
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
     (void)hal_pwrmgr_register(MOD_USR2, NULL, NULL);
     if (!hal_fs_initialized())
