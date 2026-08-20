@@ -143,15 +143,18 @@ require_text(PHY_APP, "watchdog_config(WDG_8S)", "blocking SNV scope must widen 
 require_text(PHY_APP, "watchdog_config(WDG_2S)", "normal watchdog must be restored")
 
 # TX semantics. Notification pacing is timer-driven. Indications are completed
-# only by ATT CFM; a missing CFM is released by an independent deadline check
-# in tick_tx(). The timeout path must never call the confirmation handler.
+# only by ATT CFM. A missing CFM must fail the physical link, never masquerade
+# as successful delivery by releasing the queue head locally.
 require_text(PHY_APP, "#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u", "indication needs a bounded confirmation timeout")
 require_text(PHY_TARGET, "#define DPLS_TICK_MS 1000u", "connected scheduler must check deadlines at <=1 s cadence")
-require_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*tx\.in_flight[^}]*dpls_gatt_needs_confirmation\s*\([^)]*\)[^}]*now\s*-\s*tx\.in_flight_since_ms[^}]*DPLS_TX_CONFIRM_TIMEOUT_MS[^}]*tx_complete_head\s*\(\s*\)", "indication timeout must directly release/drop its queue head")
+require_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*tx\.in_flight[^}]*dpls_gatt_needs_confirmation\s*\([^)]*\)[^}]*now\s*-\s*tx\.in_flight_since_ms[^}]*DPLS_TX_CONFIRM_TIMEOUT_MS[^}]*GAPRole_TerminateConnection\s*\(\s*\)", "indication timeout must terminate the unconfirmed link")
+forbid_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*DPLS_TX_CONFIRM_TIMEOUT_MS[^}]*tx_complete_head\s*\(\s*\)", "indication timeout must not mark an unconfirmed frame delivered")
 forbid_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*dpls_phy6252_tx_confirmed\s*\(", "TX timeout must never fabricate TX_CONFIRMED")
 require_regex(PHY_APP, r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX_EVT\s*,\s*DPLS_TX_NOTIFY_PACE_MS", "notification pacing must have its own OSAL timer")
 require_regex(PHY_APP, r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;", "one ATT PDU must be marked in-flight with a timestamp")
 require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must stay off 1 KiB OSAL stack")
+require_regex(PHY_APP_H, r"bool\s+dpls_phy6252_tx_idle\s*\(\s*void\s*\)\s*;", "target needs an explicit TX-drained predicate before flash disconnect")
+require_regex(PHY_TARGET, r"dpls_phy6252_snv_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "deferred flash disconnect must wait for TX drain")
 
 # Simulator/target ordering that previously caught real regressions.
 require_text(ROOT / "firmware/sim/dpls_sim_transport.c", "pace_ms = dpls_sim_transport_cccd_notify(transport)", "simulator must preserve ATT pacing")
@@ -160,9 +163,13 @@ if (ROOT / "firmware/phy6252_emu").exists():
     fail(ROOT / "firmware/phy6252_emu", "standalone PHY6252 emulator is forbidden; production HEX belongs to Firmverse")
 
 # AUTH denial must be queued before audit append, so an audit failure cannot
-# hide the protocol result that triggered fail-safe.
+# hide the protocol result that triggered fail-safe. RX may only ask the target
+# shell whether a flash-mandated disconnect is now safe; it must never pump,
+# confirm, drop, or otherwise mutate the TX queue from the RX turn itself.
 require_regex(SERVER, r"send_auth_result\s*\(\s*s\s*,\s*f->sequence\s*,\s*DPLS_AUTH_DENIED\s*,\s*0\s*\)\s*;\s*\(void\)\s*dpls_server_log\s*\(\s*s\s*,\s*EVT_AUTH_FAILURE", "AUTH_RESULT must be queued before AUTH_FAILURE journal append")
-require_regex(PHY_TARGET, r"dpls_phy6252_process_rx\s*\(\s*\)\s*;\s*schedule_led_if_needed\s*\(\s*\)\s*;\s*return\s+events\s*\^\s*DPLS_PHY6252_RX_EVT", "RX turn must not pump/clear TX")
+require_regex(PHY_TARGET, r"dpls_phy6252_process_rx\s*\(\s*\)\s*;\s*disconnect_for_flash_if_ready\s*\(\s*\)\s*;\s*schedule_led_if_needed\s*\(\s*\)\s*;\s*return\s+events\s*\^\s*DPLS_PHY6252_RX_EVT", "RX turn may only check connection quiescence after domain RX")
+forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]*dpls_phy6252_process_tx\s*\(", "RX turn must not pump TX")
+forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]*dpls_phy6252_tx_confirmed\s*\(", "RX turn must not fabricate/consume ATT confirmation")
 forbid_text(PHY_TARGET, "~DPLS_PHY6252_TX_EVT", "RX handler may not clear TX event")
 require_regex(PHY_TARGET, r"uint8\s+update_enabled\s*=\s*FALSE", "slave conn-param update must stay disabled")
 
