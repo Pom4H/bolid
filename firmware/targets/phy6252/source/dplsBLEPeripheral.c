@@ -19,20 +19,13 @@
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
 #define DEFAULT_CONN_TIMEOUT 3000
-/* Housekeeping and ADC sampling share this tick. Connected sessions stay at
- * 1 Hz so STATE_REPORT and mode deadlines are live; idle advertising is 5 s. */
 #define DPLS_TICK_MS 1000u
 #define DPLS_TICK_IDLE_MS 5000u
-/* 0.625 ms units — 500 ms, slow enough to be cheap, fast enough to find. */
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
 static uint8 link_up;
 
-/* The air contract intentionally uses only the project 128-bit service UUID
- * plus the human-readable Test-DPLS-XXXX name. Do not put an unassigned or a
- * third-party Bluetooth SIG Company Identifier into Manufacturer Specific Data.
- * Full serial/status/firmware are read through the authenticated GATT protocol. */
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
     'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
@@ -55,7 +48,6 @@ static void apply_identity_to_adv(void)
     uint16 tag = (uint16)(id & 0xffffu);
     char suffix[4];
     uint8 i;
-
     suffix[0] = HEX[(tag >> 12) & 0xfu];
     suffix[1] = HEX[(tag >> 8) & 0xfu];
     suffix[2] = HEX[(tag >> 4) & 0xfu];
@@ -67,9 +59,6 @@ static void apply_identity_to_adv(void)
     device_name[14] = '\0';
 }
 
-/* Refresh every identity-bearing GAP value immediately before advertising.
- * A failed early PHY6252 HCI address update must never leak a controller
- * default address or Test-DPLS-0000 into the air. */
 static bool enable_advertising_if_identity_ready(void)
 {
     uint8 enabled = TRUE;
@@ -81,21 +70,16 @@ static bool enable_advertising_if_identity_ready(void)
     return true;
 }
 
-/* Steps the LED and re-arms the timer only while there is something to show, so
- * Norma costs no wake-ups. Call from anywhere the scene can change. */
 static void schedule_led_if_needed(void)
 {
     uint32 next_ms = dpls_phy6252_led_tick();
-    if (next_ms != 0u)
-        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+    if (next_ms != 0u) osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
 }
 
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED:
-        /* HCI_EXT_SetBDADDRCmd may reject a pre-start request. Identity is
-         * applied after GAP is live and advertising stays disabled until ready. */
         dpls_ble_identity_on_stack_started();
         (void)enable_advertising_if_identity_ready();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
@@ -113,7 +97,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         link_up = FALSE;
         dpls_phy6252_disconnected();
-        schedule_led_if_needed(); /* turn an interrupted identify off immediately */
+        schedule_led_if_needed();
         (void)enable_advertising_if_identity_ready();
         break;
     default:
@@ -128,9 +112,8 @@ static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
     (void)conn_handle;
     (void)state;
     (void)status;
-    /* A failed SMP attempt is not evidence that every stored bond is stale.
-     * The phone owns retry/forget UX; only physical factory reset may erase all
-     * bonds. In particular, user cancellation must not destroy other bonds. */
+    /* Pairing failure may be user cancellation or timing; it never proves that
+     * every bond is stale. Only the physical factory-reset path erases all. */
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -160,20 +143,11 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-    /* The scatter puts the ER_IROM1 tail in SRAM1 and ER_IROM2 in SRAM2, so all
-     * three banks must survive sleep or a wakeup lands on dead code. */
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
-    /* Cheaper retention regulator. Costs nothing in timing and is the only
-     * saving that does not depend on how often we wake. */
     (void)hal_pwrmgr_LowCurrentLdo_enable();
-    /* hal_pwrmgr_lock() is a no-op for an unregistered module, so reserve the
-     * slot the sleep guard in dpls_phy6252_app.c takes while a mode is live. */
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
-    /* osal_snv is fs-backed and the SDK's main.c does not mount the region, so
-     * without this every SNV read and write fails. */
-    if (!hal_fs_initialized())
-        (void)hal_fs_init(0x1103C000u, 3);
+    if (!hal_fs_initialized()) (void)hal_fs_init(0x1103C000u, 3);
     dpls_ble_identity_prepare();
     apply_identity_to_adv();
     (void)LL_EXT_SetSCA(500);
@@ -229,13 +203,14 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         GAPBondMgr_Register(&bond_callbacks);
         return events ^ SBP_START_DEVICE_EVT;
     }
-    /* RX before TICK: AUTH_PROOF must be processed before the encrypt-timeout
-     * tick. Do not pump TX here and do not clear TX_EVT — rc1 sent from the
-     * dedicated TX turn so GATT_Notification is not nested under the write. */
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
         schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
+    }
+    if (events & DPLS_PHY6252_STORAGE_EVT) {
+        dpls_phy6252_process_storage();
+        return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
         if (!link_up && !dpls_ble_identity_is_ready()) {
