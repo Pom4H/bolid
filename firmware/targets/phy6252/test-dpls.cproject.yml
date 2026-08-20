@@ -187,6 +187,7 @@ project:
       warnings: all
       misc:
         - C-CPP:
+            - -Oz
             - -Werror
       files:
         - file: source/dplsBLEPeripheral.c
