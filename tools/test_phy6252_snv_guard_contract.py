@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_H = ROOT / "firmware/phy6252/dpls_phy6252_app.h"
 APP = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 GUARD = ROOT / "firmware/phy6252/dpls_phy6252_snv_guard.c"
+IDENTITY = ROOT / "firmware/phy6252/dpls_ble_identity.c"
 TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 MAKEFILE = ROOT / "firmware/targets/phy6252/Makefile"
 CPROJECT = ROOT / "firmware/targets/phy6252/test-dpls.cproject.yml"
@@ -40,10 +41,17 @@ app = text(APP)
 if app.index('#include "dpls_phy6252_app.h"') > app.index('#include "osal_snv.h"'):
     raise SystemExit("dpls_phy6252_app.c: SNV guard header must precede osal_snv.h")
 
-# No second project-owned PHY6252 TU may call raw osal_snv_write. The guard is
-# the sole physical writer; the app spelling is macro-routed by app.h.
+# The identity module owns exactly two vendor-key erases (IRK/CSRK). On normal
+# commissioning boot they execute before GAPRole_StartDevice; keep this narrow
+# exception explicit so no unrelated raw SNV writer can appear unnoticed.
+identity = text(IDENTITY)
+if identity.count("osal_snv_write(") != 2:
+    raise SystemExit("dpls_ble_identity.c: expected exactly two raw IRK/CSRK writes")
+require(IDENTITY, "osal_snv_write(BLE_NVID_IRK")
+require(IDENTITY, "osal_snv_write(BLE_NVID_CSRK")
+
 for path in (ROOT / "firmware/phy6252").glob("*.c"):
-    if path in {APP, GUARD}:
+    if path in {APP, GUARD, IDENTITY}:
         continue
     if "osal_snv_write(" in text(path):
         raise SystemExit(f"{path.relative_to(ROOT)}: raw osal_snv_write bypasses guard")
