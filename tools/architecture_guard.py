@@ -54,9 +54,7 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
         fail(path, message)
 
 
-# ---------------------------------------------------------------------------
-# Product lifecycle / transaction ownership
-# ---------------------------------------------------------------------------
+# Product lifecycle / transaction ownership.
 require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must own lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
@@ -72,7 +70,6 @@ for ui_truth in ("state.phase", "state.authenticated", "state.credentialsReady")
     forbid_text(CLIENT, ui_truth, f"controller must not branch on UI projection {ui_truth}")
 for field in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt", "authenticated"):
     forbid_regex(CLIENT, rf"^\s*private\s+(?:var|val)\s+{field}\b", f"independent lifecycle field forbidden: {field}")
-
 require_text(SEQUENCER, "class FrameSequencer", "wire helper must be sequence-only")
 for secret in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt"):
     forbid_text(SEQUENCER, secret, f"FrameSequencer must not own {secret}")
@@ -80,12 +77,7 @@ legacy_command_id_paths = {"DplsControlMessages.kt", "DplsControlMessagesTest.kt
 for path in (ROOT / "mobile").rglob("*.kt"):
     if path.name not in legacy_command_id_paths:
         forbid_regex(path, r"\bcommandId\b", "second transaction id commandId is forbidden")
-
-require_regex(
-    CLIENT,
-    r"generation\s*==\s*linkGeneration\s*&&\s*operation\?\.sequence\s*==\s*sequence",
-    "operation timeout must check link epoch and request sequence",
-)
+require_regex(CLIENT, r"generation\s*==\s*linkGeneration\s*&&\s*operation\?\.sequence\s*==\s*sequence", "operation timeout must check link epoch and request sequence")
 for generation in ("linkGeneration", "scanGeneration", "logTimeoutGeneration"):
     require_text(CLIENT, generation, f"missing stale-work generation: {generation}")
 
@@ -99,27 +91,13 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
         if forbidden in source(path):
             fail(path, f"wire dependency leak: {forbidden}")
 
-# ---------------------------------------------------------------------------
-# Cross-platform BLE security contract
-# ---------------------------------------------------------------------------
-require_regex(
-    GATT,
-    r"dpls_rx_uuid\s*\}\s*,\s*GATT_PERMIT_WRITE\s*\|\s*GATT_PERMIT_ENCRYPT_WRITE",
-    "RX must remain the encrypted security boundary",
-)
-require_regex(
-    GATT,
-    r"clientCharCfgUUID\s*\}\s*,\s*GATT_PERMIT_READ\s*\|\s*GATT_PERMIT_WRITE",
-    "CCCD must remain writable before encryption",
-)
+# Cross-platform BLE security contract.
+require_regex(GATT, r"dpls_rx_uuid\s*\}\s*,\s*GATT_PERMIT_WRITE\s*\|\s*GATT_PERMIT_ENCRYPT_WRITE", "RX must remain the encrypted security boundary")
+require_regex(GATT, r"clientCharCfgUUID\s*\}\s*,\s*GATT_PERMIT_READ\s*\|\s*GATT_PERMIT_WRITE", "CCCD must remain writable before encryption")
 require_text(GATT, "GATT_Notification", "Samsung notify path must remain available")
-require_text(
-    ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt",
-    "byteArrayOf(0x03, 0x00)",
-    "Android CCCD must remain 0x03 for Samsung",
-)
+require_text(ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt", "byteArrayOf(0x03, 0x00)", "Android CCCD must remain 0x03 for Samsung")
 
-# Android SMP has one explicit owner; 5/15 is a transition, not backpressure.
+# Android SMP has one explicit owner; GATT 5/15 is a security transition.
 require_text(ANDROID_BLE, "private sealed interface SecurityState", "Android SMP needs one state owner")
 require_text(ANDROID_BLE, "data class Pairing(", "Android SMP must represent Pairing explicitly")
 require_text(ANDROID_BLE, "data class Resuming(", "blocked RX frame needs explicit resume state")
@@ -151,60 +129,28 @@ forbid_text(PHY_APP, "DPLS_BOND_DESYNC", "application auth may not own BLE bond 
 forbid_text(PHY_APP, "note_pre_auth_disconnect", "DPLS auth disconnects may not erase BLE bonds")
 forbid_text(PHY_APP, "erase_bonds_and_drop_link", "plaintext timeout may not erase bonds")
 
-# ---------------------------------------------------------------------------
-# PHY6252 storage / TX / runtime contracts
-# ---------------------------------------------------------------------------
+# PHY6252 storage contracts.
 require_text(PHY_APP_H, "#define DPLS_PHY6252_STORAGE_EVT 0x1000", "storage needs a separate OSAL event")
 require_text(PHY_APP, "static dpls_event_t journal_pending_events", "journal needs RAM write-behind")
-require_regex(
-    PHY_APP,
-    r"void\s+dpls_phy6252_process_storage\s*\([^)]*\)\s*\{[^}]*if\s*\(\s*dpls_phy6252_link_active\(\)\s*\|\|\s*journal_pending_event_count\s*==\s*0u\s*\)\s*return\s*;",
-    "storage service must refuse an active BLE link",
-)
-require_regex(
-    PHY_APP,
-    r"static\s+bool\s+journal_flush_one_block\s*\([^)]*\)\s*\{[^}]*connection_handle\s*!=\s*INVALID_CONNHANDLE[^}]*return\s+false\s*;",
-    "physical journal commit needs a second active-link guard",
-)
+require_regex(PHY_APP, r"void\s+dpls_phy6252_process_storage\s*\([^)]*\)\s*\{[^}]*if\s*\(\s*dpls_phy6252_link_active\(\)\s*\|\|\s*journal_pending_event_count\s*==\s*0u\s*\)\s*return\s*;", "storage service must refuse an active BLE link")
+require_regex(PHY_APP, r"static\s+bool\s+journal_flush_one_block\s*\([^)]*\)\s*\{[^}]*connection_handle\s*!=\s*INVALID_CONNHANDLE[^}]*return\s+false\s*;", "physical journal commit needs a second active-link guard")
 require_text(PHY_TARGET, "if (events & DPLS_PHY6252_STORAGE_EVT)", "target must service deferred storage event")
 forbid_text(PHY_APP, "journal_flush_snv", "tick-time journal flash path must not return")
 forbid_text(PHY_APP, "journal_snv_dirty", "old dirty-page ownership is forbidden")
 forbid_text(PHY_APP, "journal_pending_block", "old single pending-page buffer is forbidden")
-
 require_text(PHY_APP, "static uint8_t snv_write_bounded", "SNV writes need bounded watchdog scope")
 require_text(PHY_APP, "watchdog_config(WDG_8S)", "blocking SNV scope must widen watchdog")
 require_text(PHY_APP, "watchdog_config(WDG_2S)", "normal watchdog must be restored")
 
-# ATT confirmation and timeout are semantically different. Notification pacing
-# may complete by elapsed time; an indication must either receive a real CFM or
-# hit a separate timeout recovery path. Never fabricate CFM on timeout.
+# TX semantics. Notification pacing is timer-driven. Indications are completed
+# only by ATT CFM; a missing CFM is released by an independent deadline check
+# in tick_tx(). The timeout path must never call the confirmation handler.
 require_text(PHY_APP, "#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u", "indication needs a bounded confirmation timeout")
-require_text(PHY_APP, "DPLS TX timeout", "indication timeout needs explicit failure semantics")
-require_regex(
-    PHY_APP,
-    r"DPLS_TX_CONFIRM_TIMEOUT_MS[^}]+DPLS\s+TX\s+timeout[^}]+tx_complete_head\s*\(\s*\)",
-    "indication timeout must recover/drop the queue head explicitly",
-)
-forbid_regex(
-    PHY_APP,
-    r"DPLS_TX_CONFIRM_TIMEOUT_MS[^}]+dpls_phy6252_tx_confirmed\s*\(",
-    "TX timeout must never call TX_CONFIRMED",
-)
-require_regex(
-    PHY_APP,
-    r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX_EVT\s*,\s*DPLS_TX_NOTIFY_PACE_MS",
-    "notification pacing must have its own OSAL timer",
-)
-require_regex(
-    PHY_APP,
-    r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX_EVT\s*,[^;]*DPLS_TX_CONFIRM_TIMEOUT_MS",
-    "indication confirmation timeout must be scheduled explicitly",
-)
-require_regex(
-    PHY_APP,
-    r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;",
-    "one ATT PDU must be marked in-flight with a timestamp",
-)
+require_text(PHY_TARGET, "#define DPLS_TICK_MS 1000u", "connected scheduler must check deadlines at <=1 s cadence")
+require_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*tx\.in_flight[^}]*dpls_gatt_needs_confirmation\s*\([^)]*\)[^}]*now\s*-\s*tx\.in_flight_since_ms[^}]*DPLS_TX_CONFIRM_TIMEOUT_MS[^}]*tx_complete_head\s*\(\s*\)", "indication timeout must directly release/drop its queue head")
+forbid_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*dpls_phy6252_tx_confirmed\s*\(", "TX timeout must never fabricate TX_CONFIRMED")
+require_regex(PHY_APP, r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX_EVT\s*,\s*DPLS_TX_NOTIFY_PACE_MS", "notification pacing must have its own OSAL timer")
+require_regex(PHY_APP, r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;", "one ATT PDU must be marked in-flight with a timestamp")
 require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must stay off 1 KiB OSAL stack")
 
 # Simulator/target ordering that previously caught real regressions.
@@ -213,13 +159,9 @@ require_regex(ROOT / "firmware/sim/dpls_sim_board.c", r"phy6252_emu_tick\s*\([^;
 if (ROOT / "firmware/phy6252_emu").exists():
     fail(ROOT / "firmware/phy6252_emu", "standalone PHY6252 emulator is forbidden; production HEX belongs to Firmverse")
 
-# AUTH failure response must be enqueued before the audit append, otherwise an
-# audit-store failure can prevent the client from receiving the denial.
-require_regex(
-    SERVER,
-    r"send_auth_result\s*\(\s*s\s*,\s*f->sequence\s*,\s*DPLS_AUTH_DENIED\s*,\s*0\s*\)\s*;\s*\(void\)\s*dpls_server_log\s*\(\s*s\s*,\s*EVT_AUTH_FAILURE",
-    "AUTH_RESULT must be queued before AUTH_FAILURE journal append",
-)
+# AUTH denial must be queued before audit append, so an audit failure cannot
+# hide the protocol result that triggered fail-safe.
+require_regex(SERVER, r"send_auth_result\s*\(\s*s\s*,\s*f->sequence\s*,\s*DPLS_AUTH_DENIED\s*,\s*0\s*\)\s*;\s*\(void\)\s*dpls_server_log\s*\(\s*s\s*,\s*EVT_AUTH_FAILURE", "AUTH_RESULT must be queued before AUTH_FAILURE journal append")
 require_regex(PHY_TARGET, r"dpls_phy6252_process_rx\s*\(\s*\)\s*;\s*schedule_led_if_needed\s*\(\s*\)\s*;\s*return\s+events\s*\^\s*DPLS_PHY6252_RX_EVT", "RX turn must not pump/clear TX")
 forbid_text(PHY_TARGET, "~DPLS_PHY6252_TX_EVT", "RX handler may not clear TX event")
 require_regex(PHY_TARGET, r"uint8\s+update_enabled\s*=\s*FALSE", "slave conn-param update must stay disabled")
@@ -246,4 +188,4 @@ print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
 print("  PHY6252 bond failures: terminate link, never erase all bonds")
 print("  journal: RAM write-behind, SNV only outside active link")
-print("  TX indication timeout != TX confirmation")
+print("  TX indication deadline != TX confirmation")
