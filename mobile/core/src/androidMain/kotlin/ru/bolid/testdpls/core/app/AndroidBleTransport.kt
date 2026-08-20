@@ -334,10 +334,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     scheduleOpenGatt(REOPEN_DELAY_MS)
                     return
                 }
-                if (status == GATT_ERROR && bonded) {
-                    emit { onStaleBond() }
-                    return
-                }
+                /* Android GATT 133 is a generic controller/stack failure and is
+                 * not evidence that persisted SMP keys are stale. Stale-bond is
+                 * reported only when a bonded peer still gets 5/15 on protected
+                 * RX in startPairing(). */
                 emit {
                     onDisconnected(
                         if (status == BluetoothGatt.GATT_SUCCESS) null
