@@ -68,6 +68,7 @@ for token in (
     "ENABLE_SANITIZERS",
     "-fsanitize=address,undefined",
     "test_protocol_fuzz",
+    "test_server_state_sequences",
     "test_durable_settings_powerloss_matrix",
 ):
     if token not in cmake:
