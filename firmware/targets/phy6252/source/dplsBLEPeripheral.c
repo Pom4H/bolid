@@ -14,6 +14,7 @@
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
+#include "uart.h"
 
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
@@ -24,6 +25,18 @@
 #define DPLS_TICK_IDLE_MS 5000u
 /* 0.625 ms units — 500 ms, slow enough to be cheap, fast enough to find. */
 #define DPLS_ADV_INTERVAL 800u
+#define DPLS_UART_BOOT_EVT 0x1000u
+#define DPLS_UART_WAKE_EVT 0x2000u
+#define DPLS_UART_SLEEP_EVT 0x4000u
+#define DPLS_UART_AWAKE_MS 750u
+
+/* This binary token is deliberately long and contains non-printable bytes so
+ * normal logs, a terminal session, or line noise cannot request a reset. */
+static const uint8 uart_boot_token[] = {
+    0x00u, 0xd5u, 'D', 'P', 'L', 'S', '-', 'R', 'O', 'M',
+    0xa5u, 0x5au, 0xc3u, 0x3cu, 0x7eu, 0x81u
+};
+static uint8 uart_boot_match;
 
 static uint8 app_task_id;
 static uint8 link_up;
@@ -45,6 +58,58 @@ static uint8 advertising_data[] = {
 };
 
 static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
+
+static void uart_rx(uart_Evt_t *event)
+{
+    uint8 i;
+
+    if (event == NULL || event->data == NULL) return;
+    for (i = 0u; i < event->len; ++i) {
+        uint8 byte = event->data[i];
+        if (byte == uart_boot_token[uart_boot_match]) {
+            ++uart_boot_match;
+            if (uart_boot_match == sizeof(uart_boot_token)) {
+                uart_boot_match = 0u;
+                osal_set_event(app_task_id, DPLS_UART_BOOT_EVT);
+            }
+        } else {
+            uart_boot_match = (byte == uart_boot_token[0]) ? 1u : 0u;
+        }
+    }
+}
+
+/* UART0 is clock-gated in sleep. P10 remains an AON GPIO wake source; the
+ * host sends a break before the token, then this event keeps the restored UART
+ * awake long enough to receive the complete request. */
+static void uart_rx_wake(gpio_pin_e pin, gpio_polarity_e polarity)
+{
+    (void)pin;
+    (void)polarity;
+    osal_set_event(app_task_id, DPLS_UART_WAKE_EVT);
+}
+
+static void uart_boot_init(void)
+{
+    uart_Cfg_t config = {
+        .tx_pin = P9,
+        .rx_pin = P10,
+        .rts_pin = GPIO_DUMMY,
+        .cts_pin = GPIO_DUMMY,
+        .baudrate = 115200u,
+        .use_fifo = TRUE,
+        .hw_fwctrl = FALSE,
+        .use_tx_buf = FALSE,
+        .parity = FALSE,
+        .evt_handler = uart_rx,
+    };
+
+    uart_boot_match = 0u;
+    /* Keep P10 known to the GPIO power manager so it is armed as a wake input
+     * before every sleep. uart init below restores the UART pin mux. */
+    (void)hal_gpioin_register(P10, NULL, uart_rx_wake);
+    (void)hal_uart_deinit(UART0);
+    (void)hal_uart_init(config, UART0);
+}
 
 static void apply_identity_to_adv(void)
 {
@@ -158,6 +223,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     /* hal_pwrmgr_lock() is a no-op for an unregistered module, so reserve the
      * slot the sleep guard in dpls_phy6252_app.c takes while a mode is live. */
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
+    (void)hal_pwrmgr_register(MOD_USR2, NULL, NULL);
     /* osal_snv is fs-backed and the SDK's main.c does not mount the region, so
      * without this every SNV read and write fails. */
     if (!hal_fs_initialized())
@@ -192,6 +258,7 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GGS_AddService(GATT_ALL_SERVICES);
     GATTServApp_AddService(GATT_ALL_SERVICES);
     dpls_phy6252_init(app_task_id);
+    uart_boot_init();
     ATT_SetMTUSizeMax(247);
     llInitFeatureSetDLE(TRUE);
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
@@ -216,6 +283,26 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         GAPRole_StartDevice(&role_callbacks);
         GAPBondMgr_Register(&bond_callbacks);
         return events ^ SBP_START_DEVICE_EVT;
+    }
+    if (events & DPLS_UART_BOOT_EVT) {
+        static uint8 ack[] = "\r\n[DPLS ROM READY]\r\n";
+        static uint8 error[] = "\r\n[DPLS ROM ERROR]\r\n";
+        if (!dpls_phy6252_prepare_rom_boot()) {
+            (void)hal_uart_send_buff(UART0, error, (uint16)(sizeof(error) - 1u));
+            return events ^ DPLS_UART_BOOT_EVT;
+        }
+        (void)hal_uart_send_buff(UART0, ack, (uint16)(sizeof(ack) - 1u));
+        NVIC_SystemReset();
+        return events ^ DPLS_UART_BOOT_EVT;
+    }
+    if (events & DPLS_UART_WAKE_EVT) {
+        (void)hal_pwrmgr_lock(MOD_USR2);
+        osal_start_timerEx(app_task_id, DPLS_UART_SLEEP_EVT, DPLS_UART_AWAKE_MS);
+        return events ^ DPLS_UART_WAKE_EVT;
+    }
+    if (events & DPLS_UART_SLEEP_EVT) {
+        (void)hal_pwrmgr_unlock(MOD_USR2);
+        return events ^ DPLS_UART_SLEEP_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
         dpls_phy6252_tick();

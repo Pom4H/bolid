@@ -26,6 +26,27 @@ reject_warnings() {
     fi
 }
 
+activate_local_keil() {
+    local user_home artifacts compiler toolbox cmake ninja path_add
+    if command -v cbuild >/dev/null 2>&1 && command -v fromelf >/dev/null 2>&1 &&
+       [ -n "${AC6_TOOLCHAIN_6_24_0:-}" ]; then
+        return
+    fi
+    user_home="$(cd ~ && pwd -P)"
+    artifacts="${VCPKG_ARTIFACTS_ROOT:-$user_home/.vcpkg/artifacts}"
+    [ -d "$artifacts" ] || return
+    compiler="$(find "$artifacts" -type f -path '*/compilers.arm.armclang/6.24.0/bin/armclang' -print -quit 2>/dev/null)"
+    toolbox="$(find "$artifacts" -type f -path '*/tools.open.cmsis.pack.cmsis.toolbox/*/bin/cbuild' -print -quit 2>/dev/null)"
+    cmake="$(find "$artifacts" -type f -path '*/tools.kitware.cmake/*/bin/cmake' -print -quit 2>/dev/null)"
+    ninja="$(find "$artifacts" -type f -path '*/tools.ninja.build.ninja/*/ninja' -print -quit 2>/dev/null)"
+    [ -n "$compiler" ] && [ -n "$toolbox" ] || return
+    path_add="$(dirname "$compiler"):$(dirname "$toolbox")"
+    [ -n "$cmake" ] && path_add="$path_add:$(dirname "$cmake")"
+    [ -n "$ninja" ] && path_add="$path_add:$(dirname "$ninja")"
+    export PATH="$path_add:$PATH"
+    export AC6_TOOLCHAIN_6_24_0="$(dirname "$compiler")"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage ;;
@@ -44,6 +65,7 @@ bash "$ROOT/tools/fetch_phy6252_sdk.sh"
 mkdir -p "$(dirname "$OUT")"
 
 build_keil() {
+    activate_local_keil
     for tool in cbuild fromelf; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "$tool not found. Activate Keil MDK / Arm Compiler 6 from:" >&2

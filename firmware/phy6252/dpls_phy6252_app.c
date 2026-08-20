@@ -14,6 +14,7 @@
 #endif
 #include "adc.h"
 #include "error.h"
+#include "flash.h"
 #include "gpio.h"
 #include "linkdb.h"
 #include "ll_enc.h"
@@ -355,6 +356,27 @@ static void safe_normal(void *context)
     mode_outputs_off();
     hardware_mode = DPLS_MODE_NORMAL;
     control_sleep_guard(false);
+}
+
+#define DPLS_ROM_BOOTINFO_PART_COUNT_ADDR 0x11002000u
+
+bool dpls_phy6252_prepare_rom_boot(void)
+{
+    uint32 invalid_part_count = 0u;
+    uint32 verify = 0xffffffffu;
+
+    safe_normal(NULL);
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
+    if (hal_flash_write(DPLS_ROM_BOOTINFO_PART_COUNT_ADDR,
+                        (uint8 *)&invalid_part_count,
+                        sizeof(invalid_part_count)) != PPlus_SUCCESS)
+        return false;
+    if (hal_flash_read(DPLS_ROM_BOOTINFO_PART_COUNT_ADDR,
+                       (uint8 *)&verify, sizeof(verify)) != PPlus_SUCCESS)
+        return false;
+    return verify == 0u;
 }
 
 /* True means "output driven", not "electrically confirmed": the board has no

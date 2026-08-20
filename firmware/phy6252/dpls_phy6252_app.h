@@ -21,6 +21,10 @@ void dpls_phy6252_process_tx(void);
  * slot and send the next queued indication. */
 void dpls_phy6252_tx_confirmed(void);
 void dpls_phy6252_tick(void);
+/* Put the power stage in fail-safe Norma and invalidate only the application
+ * segment-count word. On reset the ROM programmer stays reachable; a
+ * successful flash restores the sector. */
+bool dpls_phy6252_prepare_rom_boot(void);
 /* Render one LED step and return the milliseconds until the next call. */
 uint32 dpls_phy6252_led_tick(void);
 

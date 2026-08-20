@@ -6,10 +6,8 @@
 # --erase стирает весь чип, ВКЛЮЧАЯ SNV (журнал, настройки, бонды).
 # Без него обновляются только секторы приложения, данные сохраняются.
 #
-# RTS/DTR у адаптера кита не разведены, автосброс невозможен:
-#   1) зажмите KEY1 (на шелке RST/PROG — кнопка рубит питание чипа);
-#   2) запустите скрипт;
-#   3) отпустите кнопку, когда появится строка «Turn on the power».
+# Новая прошивка сама передаёт управление ROM-загрузчику по UART. Для старой
+# версии остаётся резервный ручной способ: нажать RST во время синхронизации.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,8 +15,19 @@ HEX="${1:?usage: flash_firmware.sh <file.hex> [--erase]}"
 PORT="${PORT:-$(ls /dev/cu.wchusbserial* 2>/dev/null | head -1)}"
 [ -n "$PORT" ] || { echo "USB-UART адаптер (CH340) не найден" >&2; exit 1; }
 
-ARGS=(-p "$PORT" -r wh "$HEX")
-[ "${2:-}" = "--erase" ] && ARGS=(-p "$PORT" -a -r wh "$HEX")
+if PYTHONPATH="$ROOT/.python-deps" python3 "$ROOT/tools/enter_phy6252_bootloader.py" --port "$PORT"; then
+    echo "Порт: $PORT — ROM-загрузчик запрошен программно"
+    ENTERED_ROM=1
+else
+    echo "Порт: $PORT — старая прошивка не подтвердила автопереход; при необходимости нажмите RST" >&2
+    ENTERED_ROM=0
+fi
 
-echo "Порт: $PORT — зажмите KEY1 и отпустите на строке «Turn on the power»"
+if [ "$ENTERED_ROM" = 1 ]; then
+    ARGS=(-p "$PORT" -n -r wh "$HEX")
+    [ "${2:-}" = "--erase" ] && ARGS=(-p "$PORT" -n -a -r wh "$HEX")
+else
+    ARGS=(-p "$PORT" -r wh "$HEX")
+    [ "${2:-}" = "--erase" ] && ARGS=(-p "$PORT" -a -r wh "$HEX")
+fi
 PYTHONPATH="$ROOT/.python-deps" exec python3 "$ROOT/third_party/phy62x2/Utils/rdwr_phy62x2.py" "${ARGS[@]}"
