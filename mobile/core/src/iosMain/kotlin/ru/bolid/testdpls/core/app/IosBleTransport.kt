@@ -397,8 +397,6 @@ internal class IosBleTransport : DplsTransport {
             securityState = SecurityState.Resuming(currentState.blockedWrite)
             resumeSecurityWrite()
         }
-        /* Keep the compiler aware that the exact frame captured above is the
-         * state we intend to resume; no independent retry counter owns it. */
         check(state.blockedWrite.isNotEmpty())
     }
 
@@ -460,15 +458,16 @@ internal class IosBleTransport : DplsTransport {
             error.code == CBATT_INSUFFICIENT_ENCRYPTION
     }
 
+    /* encryptionTimedOut is not proof of stale keys: it can happen during a
+     * perfectly fresh pairing on a slow/noisy link. Only the explicit
+     * peerRemovedPairing signal is deterministic stale-bond evidence here. */
     private fun isStaleBondError(error: NSError): Boolean =
-        error.domain == "CBErrorDomain" &&
-            (error.code == CBERROR_PEER_REMOVED_PAIRING || error.code == CBERROR_ENCRYPTION_TIMED_OUT)
+        error.domain == "CBErrorDomain" && error.code == CBERROR_PEER_REMOVED_PAIRING
 
     companion object {
         private const val CBATT_INSUFFICIENT_AUTHENTICATION = 5L
         private const val CBATT_INSUFFICIENT_ENCRYPTION = 15L
         private const val CBERROR_PEER_REMOVED_PAIRING = 14L
-        private const val CBERROR_ENCRYPTION_TIMED_OUT = 15L
         private const val SECURITY_RETRY_NS = 500_000_000L
         private const val SECURITY_RECONNECT_NS = 500_000_000L
     }
