@@ -127,6 +127,8 @@ for path in PHY.glob("*.c"):
         forbid_text(path, "watchdog_config", "watchdog timing belongs only to supervisor")
 require_text(SUPERVISOR, "watchdog_config(WDG_8S)", "blocking flash IO needs bounded watchdog window")
 require_text(SUPERVISOR, "watchdog_config(WDG_2S)", "normal SDK watchdog period must be restored")
+require_text(RUNTIME, "dpls_phy6252_supervisor_checkpoint();",
+             "1 Hz connected runtime must explicitly feed the SDK WDG_2S heartbeat")
 
 # ADC IRQ and calibration work has one adapter.
 for path in PHY.glob("*.c"):
