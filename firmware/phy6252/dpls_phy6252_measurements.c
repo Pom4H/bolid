@@ -10,6 +10,7 @@
 #endif
 #include "adc.h"
 #include "error.h"
+#include "pwrmgr.h"
 #include <string.h>
 
 #define DPLS_ADC_DECIMATE 1u
@@ -45,8 +46,9 @@ static volatile uint16_t cached_port2_mv;
 static volatile uint16_t cached_port_t_mv;
 static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
-static uint8_t adc_pending;
+static volatile uint8_t adc_pending;
 static uint8_t adc_decimate;
+static bool adc_sleep_locked;
 static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
 static bool auto_isolation_active;
@@ -56,6 +58,17 @@ static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
 static volatile uint8_t adc_raw_size;
 static volatile adc_CH_t adc_raw_channel;
 static volatile bool adc_raw_ready;
+
+static bool adc_sleep_guard(bool lock)
+{
+    int rc;
+    if (lock == adc_sleep_locked) return true;
+
+    rc = lock ? hal_pwrmgr_lock(MOD_USR2) : hal_pwrmgr_unlock(MOD_USR2);
+    if (rc != PPlus_SUCCESS) return false;
+    adc_sleep_locked = lock;
+    return true;
+}
 
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
@@ -72,7 +85,11 @@ static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i, n;
     if (event->type != HAL_ADC_EVT_DATA) {
+        /* Wake the OSAL task so it can release the ADC sleep guard outside IRQ
+         * context. Never call pwrmgr lock/unlock from the ADC callback. */
         adc_busy = false;
+        adc_pending = 0u;
+        osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
         return;
     }
     n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
@@ -98,9 +115,23 @@ static void adc_kick(void)
     adc_Cfg_t cfg;
     uint8_t channel;
     uint8_t claim;
-    if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
-    memset(&cfg, 0, sizeof(cfg));
 
+    if (adc_busy || adc_raw_ready) return;
+    if (adc_pending == 0u) {
+        (void)adc_sleep_guard(false);
+        return;
+    }
+
+    /* PHY6252 has a documented hardware history of ADC/radio/sleep races. Keep
+     * the core awake only for the short conversion series instead of for the
+     * whole BLE session. MOD_USR2 is dedicated to measurements so this cannot
+     * accidentally release the independent MOD_USR1 power-output guard. */
+    if (!adc_sleep_guard(true)) {
+        adc_pending = 0u;
+        return;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
     if (adc_pending & DPLS_ADC_NEED_PORT1) {
         channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC));
         claim = DPLS_ADC_NEED_PORT1;
@@ -122,11 +153,15 @@ static void adc_kick(void)
     adc_busy = true;
     if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
         adc_busy = false;
+        adc_pending = 0u;
+        (void)adc_sleep_guard(false);
         return;
     }
     if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
         (void)hal_adc_stop();
         adc_busy = false;
+        adc_pending = 0u;
+        (void)adc_sleep_guard(false);
         return;
     }
     adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
@@ -167,6 +202,7 @@ void dpls_phy6252_measurements_init(uint8 new_task_id)
     adc_pending = 0u;
     adc_raw_ready = false;
     adc_busy = false;
+    adc_sleep_locked = false;
     power_state = DPLS_POWER_LINE;
     reserve_low_state = false;
     auto_isolation_active = false;
@@ -179,9 +215,13 @@ void dpls_phy6252_measurements_tick(bool connected, dpls_mode_t mode)
 {
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0u;
-        adc_pending = connected ? (uint8_t)DPLS_ADC_NEED_ALL
-                                : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
-        adc_kick();
+        /* Do not overwrite an unfinished conversion series. A late ADC IRQ must
+         * finish or fail explicitly before a fresh 1 Hz cycle can begin. */
+        if (!adc_busy && !adc_raw_ready && adc_pending == 0u) {
+            adc_pending = connected ? (uint8_t)DPLS_ADC_NEED_ALL
+                                    : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
+            adc_kick();
+        }
     }
     update_power_state(mode);
 }
