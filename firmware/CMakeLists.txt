@@ -67,6 +67,7 @@ dpls_add_test(test_protocol_fuzz tests/test_protocol_fuzz.c)
 dpls_add_test(test_safety tests/test_safety.c)
 dpls_add_test(test_hmac tests/test_hmac.c)
 dpls_add_test(test_durable_settings tests/test_durable_settings.c)
+dpls_add_test(test_durable_settings_powerloss_matrix tests/test_durable_settings_powerloss_matrix.c)
 
 add_executable(test_sim_att
     tests/test_sim_att.c
