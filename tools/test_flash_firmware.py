@@ -26,14 +26,15 @@ def main() -> int:
     assert "0x3F000" not in flash
     assert "pyserial==3.5" in flash
 
-    # Один wrapper управляет только ROM entry, vendor flash protocol не копируется.
+    # Один wrapper меняет только ROM entry; vendor utility остаётся flash backend.
     assert "def enter_rom(self):" in flash
     assert "module.phyflasher.Connect = controlled_connect" in flash
     assert "original_connect(self, module.START_BAUD)" in flash
+    assert 'ARGS+=(wh "$HEX")' in flash
 
-    # Manual mode не трогает control lines и не ждёт Enter.
+    # Manual mode не ждёт Enter и не требует отдельного скрипта.
     assert "ROM entry: MANUAL" in flash
-    assert "operator" not in flash.lower()  # сообщения пользователю остаются простыми
+    assert "hold KEY1 and reset/power-cycle" in flash
 
     # Auto mode: штатная последовательность PHY62x2 + UXTDWU@9600.
     assert "self._port.setRTS(True)" in flash
@@ -48,7 +49,8 @@ def main() -> int:
     assert "START_BAUD = 9600" in programmer
     assert "DEF_RUN_BAUD = 115200" in programmer
     assert "def FlashUnlock" in programmer
-    assert "def WriteHexFile" in programmer or "WriteHexFile" in programmer
+    assert "'wh'" in programmer
+    assert "ParseHexFile" in programmer
 
     print("PHY6252 flasher: PASS")
     return 0
