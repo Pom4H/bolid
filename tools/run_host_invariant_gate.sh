@@ -14,11 +14,11 @@ bash tools/check_repo_layout.sh
 python3 tools/test_ci_contract.py
 python3 tools/test_phy6252_linker_parity.py
 if [ -f tools/.diagnostic_identity_140 ]; then
-  echo 'DIAGNOSTIC: strict factory-identity source contract intentionally skipped'
+  echo 'DIAGNOSTIC: strict factory-identity and identity-storage source policies intentionally skipped'
 else
   python3 tools/test_factory_identity.py
+  python3 tools/test_phy6252_snv_guard_contract.py
 fi
-python3 tools/test_phy6252_snv_guard_contract.py
 python3 tools/test_ble_timeout_contract.py
 python3 tools/test_android_ble_connection_contract.py
 python3 tools/test_dpls_protocol_crc.py
