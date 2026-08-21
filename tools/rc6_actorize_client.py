@@ -109,17 +109,14 @@ guard = replace_once_or_done(
     'forbid_regex(CLIENT, r"private\\s+var\\s+session\\s*:\\s*DeviceSession", "mutable DeviceSession copy is forbidden")\n'
     'require_text(CLIENT, "connection.transitionTo(next)", "lifecycle transition bridge must pass through reducer")\n'
     'require_text(CONNECTION_ACTOR, "ConnectionMachine.reduce(state, event)", "actor must delegate every transition to pure reducer")\n'
-    'require_regex(CONNECTION_MACHINE, r"fun\\s+reduce\\s*\\(state:\\s*DeviceSession,\\s*event:\\s*ConnectionEvent\\)", "connection reducer must remain pure and explicit")\n'
+    'require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must remain pure and explicit")\n'
     'require_text(WIRE_ACTOR, "private var pending: Pending? = null", "wire actor must own one outstanding transaction")\n'
-    'require_regex(WIRE_ACTOR, r"if\\s*\\(pending\\s*!=\\s*null\\)\\s*\\{[^}]*if\\s*\\(!priority\\s*&&\\s*!flush\\)\\s*return\\s+null", "ordinary product requests must be stop-and-wait")\n',
+    'require_text(WIRE_ACTOR, "if (!priority && !flush) return null", "ordinary product requests must be stop-and-wait")\n',
     "lifecycle ownership guard",
 )
-guard = replace_once_or_done(
-    guard,
-    r'require_regex(PHY_TARGET, r"dpls_phy6252_snv_disconnect_requested\\s*\\(\\s*\\)\\s*&&\\s*dpls_phy6252_tx_idle\\s*\\(\\s*\\)", "deferred flash disconnect must wait for TX drain")\n',
-    r'require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\\s*\\(\\s*\\)\\s*&&\\s*dpls_phy6252_tx_idle\\s*\\(\\s*\\)", "storage actor disconnect must wait for TX drain")\n',
-    "storage target guard",
-)
+old_storage_guard = 'require_regex(PHY_TARGET, r"dpls_phy6252_snv_disconnect_requested\\s*\\(\\s*\\)\\s*&&\\s*dpls_phy6252_tx_idle\\s*\\(\\s*\\)", "deferred flash disconnect must wait for TX drain")\n'
+new_storage_guard = 'require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\\s*\\(\\s*\\)\\s*&&\\s*dpls_phy6252_tx_idle\\s*\\(\\s*\\)", "storage actor disconnect must wait for TX drain")\n'
+guard = replace_once_or_done(guard, old_storage_guard, new_storage_guard, "storage target guard")
 marker = 'forbid_text(ANDROID_BLE, "securityPendingWrite", "blocked frame must live inside SecurityState")\n'
 addition = marker + 'forbid_text(ANDROID_BLE, "PAIRING_TIMEOUT_MS", "Android adapter may not own a second pairing deadline")\nrequire_text(ANDROID_BLE, "schedulePairingPoll()", "Android may poll bond state without owning product timeout")\n'
 if addition not in guard:
