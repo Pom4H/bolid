@@ -1,11 +1,11 @@
 #!/bin/bash
-# Первичное provisioning Test-DPLS: application HEX + factory identity → один HEX.
+# Первичное provisioning Test-DPLS: application + отдельная factory identity.
 #
 #   tools/provision_test_dpls.sh <application.hex> <serial>
 #
-# Runtime-прошивка не содержит legacy/migration logic. Этот скрипт создаёт или
-# переиспользует factory identity и прошивает application + factory sector одним
-# заходом в ROM bootloader.
+# Runtime не содержит migration/legacy logic. Application пишется `wh`, factory
+# identity — отдельной raw-операцией `we 0x3F000`; flash_firmware.sh выполняет
+# обе операции и не смешивает два формата данных.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,17 +28,12 @@ export PORT
 APP_DIR="$(cd "$(dirname "$APP_HEX")" && pwd)"
 APP_NAME="$(basename "$APP_HEX")"
 STEM="${APP_NAME%.hex}"
-FACTORY_BIN="${DPLS_FACTORY_BIN:-$APP_DIR/$STEM.serial-$SERIAL.factory.bin}"
-FACTORY_META="$APP_DIR/$STEM.serial-$SERIAL.identity.json"
-FLASH_READY="$APP_DIR/$STEM.serial-$SERIAL.flash-ready.hex"
+DEFAULT_FACTORY_BIN="$APP_DIR/$STEM.factory.bin"
+FACTORY_BIN="${DPLS_FACTORY_BIN:-$DEFAULT_FACTORY_BIN}"
+FACTORY_META="$APP_DIR/$STEM.identity.json"
 
 umask 077
-ARGS=(
-  --binary-output "$FACTORY_BIN"
-  --merge-app-hex "$APP_HEX"
-  --flash-ready-output "$FLASH_READY"
-  --metadata "$FACTORY_META"
-)
+ARGS=(--binary-output "$FACTORY_BIN" --metadata "$FACTORY_META")
 
 if [ -f "$FACTORY_BIN" ]; then
   EXISTING_SERIAL=$(python3 - "$FACTORY_BIN" <<'PY'
@@ -71,22 +66,21 @@ Provisioning Test-DPLS
   serial:      $SERIAL
   BLE name:    Test-DPLS-$SUFFIX
   identity:    $IDENTITY_ACTION
-  flash-ready: $FLASH_READY
   factory BIN: $FACTORY_BIN
 
-Factory BIN содержит постоянные IRK/CSRK. Сохраните его: при повторной сборке
-используйте тот же BIN, иначе Bluetooth identity изменится и старые bond'ы сломаются.
-
-Будет ОДИН вход в ROM bootloader.
-Зажмите KEY1 и отпустите, когда programmer напишет «Turn on the power».
+Application и factory sector НЕ объединяются.
+Прошивка состоит из двух programmer operations:
+  1) application: wh
+  2) factory:     we 0x3F000
+Для каждой операции нужен вход в ROM bootloader через KEY1.
 EOF
 
-"$ROOT/tools/flash_firmware.sh" "$FLASH_READY"
+DPLS_FACTORY_BIN="$FACTORY_BIN" "$ROOT/tools/flash_firmware.sh" "$APP_HEX"
 
 cat <<EOF
 
 Provisioning завершён.
-1. Перезапустите плату обычным питанием, KEY1 не удерживайте.
+1. Полностью перезапустите питание платы, KEY1 не удерживайте.
 2. В приложении ищите: Test-DPLS-$SUFFIX
-3. Не удаляйте: $FACTORY_BIN
+3. Сохраните $FACTORY_BIN — там постоянные IRK/CSRK этой платы.
 EOF
