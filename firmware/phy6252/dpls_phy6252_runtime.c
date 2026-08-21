@@ -49,8 +49,7 @@ static dpls_hal_t server_hal(void)
 
     hal.link.encrypted = dpls_phy6252_transport_encrypted;
     hal.link.indicate = dpls_phy6252_transport_indicate;
-    /* Domain не владеет физическим disconnect. Durable state stage-ится в RAM,
-     * а runtime разрывает link только после подтверждённого TX drain. */
+    /* Domain never owns physical disconnect. */
     hal.link.disconnect = NULL;
 
     hal.hardware.apply_mode = dpls_phy6252_outputs_apply_mode;
@@ -85,6 +84,11 @@ static dpls_hal_t server_hal(void)
     return hal;
 }
 
+bool dpls_phy6252_runtime_link_active(void)
+{
+    return dpls_phy6252_transport_connected_now();
+}
+
 bool dpls_phy6252_runtime_flash_pending(void)
 {
     return dpls_phy6252_storage_work_pending();
@@ -98,7 +102,8 @@ static void schedule_storage_if_needed(void)
 
 static void disconnect_for_critical_flash_if_ready(void)
 {
-    if (dpls_phy6252_storage_disconnect_requested() &&
+    if (dpls_phy6252_transport_connected_now() &&
+        dpls_phy6252_storage_critical_pending() &&
         dpls_phy6252_transport_tx_idle())
         dpls_phy6252_transport_disconnect(NULL);
 }
@@ -109,8 +114,6 @@ static void finish_factory_reset_if_ready(void)
         dpls_phy6252_storage_work_pending())
         return;
 
-    /* Bond erase существует только здесь: физическая кнопка уже удерживалась 5 с,
-     * link закрыт, settings committed. Никакая radio-эвристика сюда не ведёт. */
     if (!dpls_phy6252_transport_factory_forget_bonds()) return;
 
     factory_reset_commit_wait = false;
@@ -134,6 +137,7 @@ static void tick_factory_reset(uint32 now)
 
     factory_reset_armed = false;
     dpls_phy6252_outputs_safe_normal(NULL);
+    dpls_safety_force_normal(&server.safety);
     if (!dpls_phy6252_storage_clear_settings()) {
         LOG("DPLS RESET stage-failed\n");
         return;
@@ -170,7 +174,6 @@ void dpls_phy6252_runtime_connected(uint16 conn_handle)
 {
     dpls_phy6252_supervisor_checkpoint();
     dpls_phy6252_transport_connected(conn_handle);
-    dpls_phy6252_storage_set_link_active(true);
     dpls_server_connected(&server, now_ms());
     LOG("DPLS CONN %u\n", conn_handle);
 }
@@ -178,7 +181,6 @@ void dpls_phy6252_runtime_connected(uint16 conn_handle)
 void dpls_phy6252_runtime_disconnected(void)
 {
     dpls_phy6252_transport_disconnected();
-    dpls_phy6252_storage_set_link_active(false);
     dpls_server_disconnected(&server, now_ms());
     LOG("DPLS DISC\n");
     schedule_storage_if_needed();
@@ -212,7 +214,7 @@ void dpls_phy6252_runtime_process_storage(void)
     bool progressed;
     if (dpls_phy6252_transport_connected_now()) return;
 
-    progressed = dpls_phy6252_storage_process_one();
+    progressed = dpls_phy6252_storage_process_one(true);
     finish_factory_reset_if_ready();
 
     if (progressed && dpls_phy6252_storage_work_pending())
@@ -236,7 +238,7 @@ void dpls_phy6252_runtime_tick(void)
 
     dpls_phy6252_transport_tick_security(now);
     tick_factory_reset(now);
-    dpls_phy6252_measurements_tick(connected, dpls_phy6252_outputs_mode());
+    dpls_phy6252_measurements_tick(connected, server.safety.mode);
     dpls_server_tick(&server, now);
     dpls_phy6252_transport_tick_tx(now);
     disconnect_for_critical_flash_if_ready();
@@ -248,5 +250,6 @@ uint32 dpls_phy6252_runtime_led_tick(void)
 {
     bool reserve = dpls_phy6252_measurements_power_source(NULL) == DPLS_POWER_RESERVE;
     bool auto_isolation = dpls_phy6252_measurements_real_short(NULL);
-    return dpls_phy6252_outputs_led_tick(now_ms(), reserve, auto_isolation);
+    return dpls_phy6252_outputs_led_tick(now_ms(), server.safety.mode,
+                                         reserve, auto_isolation);
 }

@@ -42,11 +42,9 @@ static uint8_t selected_settings_slot;
 static bool settings_dirty;
 static bool auth_locked;
 static bool auth_lock_dirty;
-static bool link_active;
 
-/* Flash record содержит sequence и CRC, но в RAM они избыточны: sequence
- * однозначно выводится из ring slot + max/count, CRC нужен только на границе
- * persistence. Поэтому journal facts занимают 200 × 6 = 1200 bytes, а не 2400. */
+/* RAM хранит только факты журнала. Sequence выводится из ring position + max/count,
+ * CRC существует только в flash representation. */
 static uint32_t journal_timestamp[DPLS_EVENT_CAPACITY];
 static uint8_t journal_type[DPLS_EVENT_CAPACITY];
 static uint8_t journal_parameter[DPLS_EVENT_CAPACITY];
@@ -66,7 +64,6 @@ static uint8_t journal_block_buffer[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t snv_write_offline(osalSnvId_t id, osalSnvLen_t len, void *data)
 {
     uint8_t rc;
-    if (link_active) return 0xffu;
     dpls_phy6252_supervisor_blocking_io_begin();
     rc = osal_snv_write(id, len, data);
     dpls_phy6252_supervisor_blocking_io_end();
@@ -191,7 +188,6 @@ static void load_journal(void)
     journal_count = 0u;
 
     max_sequence = journal_scan_latest();
-    /* Sequence 0 зарезервирован. После полного uint32 wrap начинаем новый журнал. */
     if (max_sequence == 0u || max_sequence == UINT32_MAX) return;
 
     journal_count = journal_load_contiguous(max_sequence);
@@ -330,15 +326,9 @@ static bool commit_one_journal_block(void)
 
 void dpls_phy6252_storage_init(void)
 {
-    link_active = false;
     load_settings();
     load_auth_lock();
     load_journal();
-}
-
-void dpls_phy6252_storage_set_link_active(bool active)
-{
-    link_active = active;
 }
 
 bool dpls_phy6252_storage_work_pending(void)
@@ -346,16 +336,16 @@ bool dpls_phy6252_storage_work_pending(void)
     return settings_dirty || auth_lock_dirty || journal_dirty_mask != 0u;
 }
 
-bool dpls_phy6252_storage_disconnect_requested(void)
+bool dpls_phy6252_storage_critical_pending(void)
 {
-    /* Journal ждёт естественного disconnect. Только durable control state
-     * закрывает link, и runtime делает это исключительно после TX drain. */
-    return link_active && (settings_dirty || auth_lock_dirty);
+    /* Journal never closes a live link. Only durable control state does. */
+    return settings_dirty || auth_lock_dirty;
 }
 
-bool dpls_phy6252_storage_process_one(void)
+bool dpls_phy6252_storage_process_one(bool radio_offline)
 {
-    if (link_active) return false;
+    /* Radio ownership is a current fact supplied by runtime, never shadow state. */
+    if (!radio_offline) return false;
     if (settings_dirty) return commit_settings();
     if (auth_lock_dirty) return commit_auth_lock();
     return commit_one_journal_block();
@@ -494,8 +484,7 @@ bool dpls_phy6252_storage_event_read(void *context, uint32_t sequence, dpls_even
     uint32_t age;
     uint16_t slot;
     (void)context;
-    if (!event || sequence == 0u || journal_count == 0u ||
-        sequence > journal_max_sequence)
+    if (!event || sequence == 0u || journal_count == 0u || sequence > journal_max_sequence)
         return false;
 
     age = journal_max_sequence - sequence;

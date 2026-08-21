@@ -11,7 +11,6 @@
 #define DPLS_LED_TICK_MAX_MS 250u
 
 static dpls_led_t status_led;
-static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
 static bool identify_led_active;
 static bool control_sleep_locked;
 
@@ -39,7 +38,6 @@ void dpls_phy6252_outputs_safe_normal(void *context)
 {
     (void)context;
     mode_outputs_off();
-    hardware_mode = DPLS_MODE_NORMAL;
     control_sleep_guard(false);
 }
 
@@ -48,8 +46,8 @@ bool dpls_phy6252_outputs_apply_mode(void *context, dpls_mode_t mode)
     (void)context;
     if (mode > DPLS_MODE_SHORT_T) return false;
 
-    /* Break-before-make is owned here so no protocol path can energize two
-     * mutually exclusive stages. */
+    /* Break-before-make lives at the GPIO boundary. Logical mode is NOT copied
+     * here: dpls_safety_t is the only owner of that fact. */
     mode_outputs_off();
     switch (mode) {
     case DPLS_MODE_NORMAL:
@@ -72,7 +70,6 @@ bool dpls_phy6252_outputs_apply_mode(void *context, dpls_mode_t mode)
     default:
         return false;
     }
-    hardware_mode = mode;
     control_sleep_guard(mode != DPLS_MODE_NORMAL);
     LOG("DPLS MODE %u\n", (unsigned)mode);
     return true;
@@ -119,15 +116,9 @@ void dpls_phy6252_outputs_init(void)
     hal_gpio_pin_init(DPLS_PIN_FACTORY_RESET, IE);
     hal_gpio_pull_set(DPLS_PIN_FACTORY_RESET, GPIO_PULL_DOWN);
 
-    hardware_mode = DPLS_MODE_NORMAL;
     identify_led_active = false;
     control_sleep_locked = false;
     dpls_led_init(&status_led, status_led_output, NULL, 0u);
-}
-
-dpls_mode_t dpls_phy6252_outputs_mode(void)
-{
-    return hardware_mode;
 }
 
 void dpls_phy6252_outputs_identify(void *context, bool enabled)
@@ -136,13 +127,14 @@ void dpls_phy6252_outputs_identify(void *context, bool enabled)
     identify_led_active = enabled;
 }
 
-uint32 dpls_phy6252_outputs_led_tick(uint32 now_ms, bool reserve, bool auto_isolation)
+uint32 dpls_phy6252_outputs_led_tick(uint32 now_ms, dpls_mode_t mode,
+                                     bool reserve, bool auto_isolation)
 {
     dpls_led_scene_t scene;
     uint32 delay;
     if (identify_led_active) scene = DPLS_LED_SCENE_IDENTIFY;
     else if (auto_isolation) scene = DPLS_LED_SCENE_AUTO_ISOLATION;
-    else scene = scene_for_mode(hardware_mode);
+    else scene = scene_for_mode(mode);
 
     dpls_led_set(&status_led, scene, reserve, now_ms);
     delay = dpls_led_tick(&status_led, now_ms);

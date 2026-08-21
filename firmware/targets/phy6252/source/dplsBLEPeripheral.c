@@ -24,7 +24,6 @@
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
-static uint8 link_up;
 
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
@@ -90,7 +89,6 @@ static void state_changed(gaprole_States_t state)
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
         (void)hal_pwrmgr_lock(MOD_USR0);
-        link_up = TRUE;
         dpls_phy6252_runtime_connected(handle);
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
         break;
@@ -98,11 +96,9 @@ static void state_changed(gaprole_States_t state)
 
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT:
-        link_up = FALSE;
         dpls_phy6252_runtime_disconnected();
         (void)hal_pwrmgr_unlock(MOD_USR0);
         schedule_led_if_needed();
-        /* Persistence получает exclusive radio boundary: сначала flush, потом adv. */
         if (!dpls_phy6252_runtime_flash_pending()) enable_advertising();
         break;
 
@@ -118,8 +114,8 @@ static void rssi_changed(int8 rssi)
 
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
-    /* Callback оставлен только потому, что vendor GAPBondMgr ожидает регистрацию.
-     * Pairing outcome не меняет application state и никогда не стирает bonds. */
+    /* Vendor GAPBondMgr требует callback registration; application state от
+     * pairing callback не зависит и ключи отсюда никогда не стираются. */
     (void)conn_handle;
     (void)state;
     (void)status;
@@ -152,7 +148,6 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-    link_up = FALSE;
 
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
@@ -219,7 +214,6 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
 
     if (events & SBP_START_DEVICE_EVT) {
-        /* Boot event занимается только стартом vendor BLE lifecycle. */
         GAPRole_StartDevice(&role_callbacks);
         GAPBondMgr_Register(&bond_callbacks);
         return events ^ SBP_START_DEVICE_EVT;
@@ -235,7 +229,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         dpls_phy6252_runtime_tick();
         schedule_led_if_needed();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
-                           link_up ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
+                           dpls_phy6252_runtime_link_active() ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
         return events ^ SBP_DPLS_TICK_EVT;
     }
 
@@ -256,7 +250,8 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 
     if (events & DPLS_PHY6252_STORAGE_EVT) {
         dpls_phy6252_runtime_process_storage();
-        if (!link_up && !dpls_phy6252_runtime_flash_pending()) enable_advertising();
+        if (!dpls_phy6252_runtime_link_active() && !dpls_phy6252_runtime_flash_pending())
+            enable_advertising();
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
 

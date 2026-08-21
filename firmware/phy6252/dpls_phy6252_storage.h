@@ -6,15 +6,15 @@
 #include "types.h"
 
 void dpls_phy6252_storage_init(void);
-void dpls_phy6252_storage_set_link_active(bool active);
 bool dpls_phy6252_storage_work_pending(void);
 
 /* Только settings/auth требуют controlled disconnect. Journal ждёт естественный
  * disconnect и всё время активной BLE-сессии живёт в RAM. */
-bool dpls_phy6252_storage_disconnect_requested(void);
+bool dpls_phy6252_storage_critical_pending(void);
 
-/* Не более одной физической SNV-записи за OSAL turn. При active link всегда false. */
-bool dpls_phy6252_storage_process_one(void);
+/* Не более одной физической SNV-записи за OSAL turn. Radio state не хранится
+ * здесь второй раз: runtime передаёт актуальный offline-факт явно. */
+bool dpls_phy6252_storage_process_one(bool radio_offline);
 
 dpls_settings_state_t dpls_phy6252_storage_settings_state(void *context);
 void dpls_phy6252_storage_settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE]);
@@ -36,7 +36,6 @@ bool dpls_phy6252_storage_event_read(void *context, uint32_t sequence, dpls_even
 void dpls_phy6252_storage_load_calibration(dpls_calib_t *line, dpls_calib_t *vcap,
                                            bool *line_from_nv);
 
-/* Physical factory reset: только RAM-stage. Commit выполняет process_one(). */
 bool dpls_phy6252_storage_clear_settings(void);
 
 #endif

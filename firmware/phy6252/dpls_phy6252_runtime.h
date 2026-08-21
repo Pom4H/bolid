@@ -15,7 +15,10 @@ void dpls_phy6252_runtime_tx_confirmed(void);
 void dpls_phy6252_runtime_tick(void);
 uint32 dpls_phy6252_runtime_led_tick(void);
 
-/* Единственный внешний факт persistence: пока true, advertising не включаем. */
+/* Target shell никогда не хранит shadow link state: спрашивает runtime/transport. */
+bool dpls_phy6252_runtime_link_active(void);
+
+/* Пока true, advertising не включаем: persistence ещё не закончена. */
 bool dpls_phy6252_runtime_flash_pending(void);
 
 #endif
