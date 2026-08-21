@@ -1,8 +1,9 @@
 #include "dpls_ble_identity.h"
 
 #include "OSAL.h"
+#include "flash.h"
+#include "gap.h"
 #include "hci.h"
-#include "ll_enc.h"
 #include "osal_snv.h"
 #include "peripheral.h"
 #include <string.h>
@@ -14,6 +15,9 @@ typedef struct {
     uint32_t magic;
     uint8_t addr[B_ADDR_LEN];
 } dpls_ble_mac_record_t;
+
+/* SDK 3.1.2 определяет объект в flash.c, но не объявляет его в flash.h. */
+extern chipMAddr_t g_chipMAddr;
 
 static uint8_t s_identity_mac[B_ADDR_LEN];
 static bool s_identity_mac_valid;
@@ -30,6 +34,19 @@ static bool mac_is_invalid(const uint8_t *mac)
     return zero || ff;
 }
 
+static bool read_factory_mac(uint8_t out[B_ADDR_LEN])
+{
+    uint8_t i;
+
+    check_chip_mAddr();
+    if (g_chipMAddr.chipMAddrStatus != CHIP_ID_VALID) return false;
+
+    for (i = 0; i < B_ADDR_LEN; ++i) {
+        out[i] = g_chipMAddr.mAddr[B_ADDR_LEN - 1u - i];
+    }
+    return !mac_is_invalid(out);
+}
+
 static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
 {
     dpls_ble_mac_record_t record;
@@ -39,47 +56,36 @@ static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
     return true;
 }
 
-static bool write_mac_snv(const uint8_t mac[B_ADDR_LEN])
+static bool select_mac(uint8_t mac[B_ADDR_LEN])
 {
-    dpls_ble_mac_record_t record;
-    record.magic = DPLS_BLE_MAC_MAGIC;
-    memcpy(record.addr, mac, B_ADDR_LEN);
-    return osal_snv_write(DPLS_BLE_MAC_SNV_ID, sizeof(record), &record) == SUCCESS;
+    /* У PHY6252 уже есть заводской публичный адрес. Он является основным
+     * источником истины и не требует генерации или записи flash при boot. */
+    if (read_factory_mac(mac)) return true;
+
+    /* Старый сохранённый адрес оставляем только как fallback для плат без
+     * корректного factory word. Чтение безопасно до запуска BLE stack. */
+    return read_mac_snv(mac);
 }
 
-static bool generate_mac(uint8_t out[B_ADDR_LEN])
+static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
 {
-    if (LL_ENC_GenerateTrueRandNum(out, B_ADDR_LEN) != SUCCESS) return false;
-    out[0] &= 0x3Fu;
-    return !mac_is_invalid(out);
-}
-
-static bool set_controller_addr(const uint8_t mac[B_ADDR_LEN])
-{
-    uint8_t addr[B_ADDR_LEN];
+    uint8_t controller_addr[B_ADDR_LEN];
     uint8_t i;
 
     for (i = 0; i < B_ADDR_LEN; ++i) {
-        addr[i] = mac[B_ADDR_LEN - 1u - i];
+        controller_addr[i] = mac[B_ADDR_LEN - 1u - i];
     }
-
-    return HCI_EXT_SetBDADDRCmd(addr) == HCI_SUCCESS;
-}
-
-static bool select_mac(uint8_t mac[B_ADDR_LEN])
-{
-    if (read_mac_snv(mac)) return true;
-    return generate_mac(mac);
+    return HCI_EXT_SetBDADDRCmd(controller_addr) == HCI_SUCCESS;
 }
 
 void dpls_ble_identity_prepare(void)
 {
     uint8_t mac[B_ADDR_LEN];
 
-    /* В раннем boot только RAM и controller setup.
-     * Никаких записей flash и обязательных ключей. */
+    /* До GAPRole_StartDevice только чтение. Никаких TRNG/HCI/flash-write:
+     * этот участок выполняется на самом чувствительном раннем boot path. */
+    s_identity_mac_valid = false;
     if (!select_mac(mac)) return;
-    if (!set_controller_addr(mac)) return;
 
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_mac_valid = true;
@@ -87,10 +93,21 @@ void dpls_ble_identity_prepare(void)
 
 void dpls_ble_identity_on_stack_started(void)
 {
-    if (!s_identity_mac_valid) return;
+    uint8_t mac[B_ADDR_LEN];
 
-    /* Persistence выполняется после запуска BLE stack. */
-    (void)write_mac_snv(s_identity_mac);
+    /* Контроллер настраиваем только после GAPROLE_STARTED — это порядок,
+     * который уже был проверен на реальной PB-03F в рабочем RC3. */
+    if (!s_identity_mac_valid) {
+        if (!select_mac(mac)) return;
+        memcpy(s_identity_mac, mac, B_ADDR_LEN);
+        s_identity_mac_valid = true;
+    }
+
+    if (!set_controller_public_addr(s_identity_mac)) return;
+    (void)GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL);
+
+    /* Здесь намеренно нет osal_snv_write(). Первый advertising должен
+     * произойти раньше любой необязательной записи flash. */
 }
 
 void dpls_ble_identity_reset_bonding_keys(void)
