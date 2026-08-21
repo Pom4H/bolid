@@ -24,7 +24,7 @@ SERIAL="${DPLS_SERIAL:-}"
 HW_REVISION="${DPLS_HW_REVISION:-2}"
 FACTORY_BIN_INPUT="${DPLS_FACTORY_BIN:-}"
 STATIC_ADDRESS="${DPLS_STATIC_ADDRESS:-}"
-GENERATE_STATIC_ADDRESS=0
+USE_CHIP_PUBLIC=0
 OUT_SET=0
 
 usage() {
@@ -36,7 +36,13 @@ identity options (optional, mutually exclusive source):
   --factory-bin FILE            reuse an existing 64-byte factory identity
   --hw-revision N               factory hardware revision (default: 2)
   --static-address XX:..:XX     use a specified BLE static random address
-  --generate-static-address     generate a BLE static random address
+  --generate-static-address     explicitly request the default generated static address
+  --use-chip-public             explicitly rely on a programmed PHY6252 public MAC
+
+New --serial identities use a generated BLE static random address by default.
+This keeps provisioning independent of whether a particular PHY6252/PB-03F has
+factory public-MAC words programmed. Use --use-chip-public only for a verified
+production lot where that address is guaranteed.
 
 With identity options the build emits:
   output.hex                    application image; flash with `wh`
@@ -44,7 +50,8 @@ With identity options the build emits:
   output.identity.json          non-secret metadata
 
 If output.factory.bin already exists, --serial reuses it after checking the
-serial number. It never rotates IRK/CSRK silently.
+serial number. It never rotates IRK/CSRK silently. A legacy chip-public sidecar
+is rejected unless --use-chip-public is explicitly supplied.
 
 `tools/flash_firmware.sh output.hex` automatically detects the sidecar and uses
 both programmer operations in the correct order.
@@ -69,6 +76,17 @@ print(struct.unpack_from('<I', raw, 8)[0])
 PY
 }
 
+factory_address_source() {
+    python3 - "$1" <<'PY'
+import struct, sys
+raw = open(sys.argv[1], 'rb').read()
+if len(raw) != 64:
+    raise SystemExit("factory BIN must be exactly 64 bytes")
+flags = struct.unpack_from('<H', raw, 14)[0]
+print('static_random' if flags & 0x0001 else 'chip_public')
+PY
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage ;;
@@ -86,7 +104,9 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || usage
             STATIC_ADDRESS="$2"; shift 2 ;;
         --generate-static-address)
-            GENERATE_STATIC_ADDRESS=1; shift ;;
+            USE_CHIP_PUBLIC=0; shift ;;
+        --use-chip-public)
+            USE_CHIP_PUBLIC=1; shift ;;
         --*) usage ;;
         *)
             if [ "$OUT_SET" -ne 0 ]; then usage; fi
@@ -99,12 +119,12 @@ if [ -n "$SERIAL" ] && [ -n "$FACTORY_BIN_INPUT" ]; then
     echo "error: use either --serial or --factory-bin, not both" >&2
     exit 2
 fi
-if [ -n "$FACTORY_BIN_INPUT" ] && { [ -n "$STATIC_ADDRESS" ] || [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; }; then
+if [ -n "$FACTORY_BIN_INPUT" ] && { [ -n "$STATIC_ADDRESS" ] || [ "$USE_CHIP_PUBLIC" -ne 0 ]; }; then
     echo "error: BLE address options cannot modify an existing --factory-bin" >&2
     exit 2
 fi
-if [ -n "$STATIC_ADDRESS" ] && [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; then
-    echo "error: choose --static-address or --generate-static-address" >&2
+if [ -n "$STATIC_ADDRESS" ] && [ "$USE_CHIP_PUBLIC" -ne 0 ]; then
+    echo "error: choose --static-address or --use-chip-public" >&2
     exit 2
 fi
 case "$SERIAL" in
@@ -246,16 +266,29 @@ if [ -n "$SERIAL" ] || [ -n "$FACTORY_BIN_INPUT" ]; then
             echo "error: $FACTORY_OUT belongs to serial=$EXISTING_SERIAL, requested serial=$SERIAL" >&2
             exit 2
         fi
+        EXISTING_SOURCE="$(factory_address_source "$FACTORY_OUT")"
+        if [ "$EXISTING_SOURCE" = "chip_public" ] && [ "$USE_CHIP_PUBLIC" -eq 0 ]; then
+            echo "error: $FACTORY_OUT relies on a PHY6252 factory public MAC" >&2
+            echo "remove/rename the old sidecar to generate a static identity, or pass --use-chip-public only for verified hardware" >&2
+            exit 2
+        fi
+        if [ "$EXISTING_SOURCE" = "static_random" ] && [ "$USE_CHIP_PUBLIC" -ne 0 ]; then
+            echo "error: $FACTORY_OUT already owns a static BLE address; do not switch address source silently" >&2
+            exit 2
+        fi
         FACTORY_ARGS+=(--record-input "$FACTORY_OUT")
         IDENTITY_ACTION="reused existing sidecar"
     else
         FACTORY_ARGS+=(--serial "$SERIAL" --hw-revision "$HW_REVISION")
         if [ -n "$STATIC_ADDRESS" ]; then
             FACTORY_ARGS+=(--static-address "$STATIC_ADDRESS")
-        elif [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; then
+            IDENTITY_ACTION="created new identity with explicit static BLE address"
+        elif [ "$USE_CHIP_PUBLIC" -ne 0 ]; then
+            IDENTITY_ACTION="created new identity using verified chip public MAC"
+        else
             FACTORY_ARGS+=(--generate-static-address)
+            IDENTITY_ACTION="created new identity with generated static BLE address"
         fi
-        IDENTITY_ACTION="created new identity"
     fi
 
     python3 "$ROOT/tools/make_factory_identity.py" "${FACTORY_ARGS[@]}"
