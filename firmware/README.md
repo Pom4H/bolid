@@ -140,3 +140,5 @@ Floating-point ADC calibration stays in XIP so the constrained `ER_IROM1` region
 PB-03F-Kit bring-up covers boot, BLE, commissioning, authentication, test modes, journal and four ADC channels. Final power-stage acceptance additionally requires calibration, current behavior, automatic short isolation and the P34 factory-reset path.
 
 Use [the bring-up checklist](../docs/bring-up-checklist.md) for acceptance. PHY6252-specific findings are collected in [the programmer reference](../docs/phy6252-programmer-reference.md).
+
+<!-- hardware-bisect control build: source-identical 1.4.0 -->
