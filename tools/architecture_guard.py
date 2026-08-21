@@ -69,9 +69,25 @@ forbid_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\?
 require_text(CLIENT, "private val connection = ConnectionActor()", "ConnectionActor must own product lifecycle")
 require_text(CLIENT, "get() = connection.state", "DplsClient may only read lifecycle through ConnectionActor")
 forbid_regex(CLIENT, r"private\s+var\s+session\s*:\s*DeviceSession", "second mutable DeviceSession owner is forbidden")
-require_text(CLIENT, "connection.transitionTo(next)", "all compatibility lifecycle transitions must pass through reducer")
+require_text(CLIENT, "connection.dispatch(event)", "DplsClient lifecycle mutations must dispatch semantic events")
 require_text(CONNECTION_ACTOR, "ConnectionMachine.reduce(state, event)", "ConnectionActor must delegate transitions to reducer")
 require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must stay explicit and pure")
+for path in (CLIENT, CONNECTION_ACTOR):
+    forbid_text(path, "transitionTo(", "direct desired-state compatibility bridge is forbidden")
+for event_name in (
+    "ConnectRequested",
+    "LinkConnected",
+    "Subscribed",
+    "ChallengeReceived",
+    "Authenticated",
+    "IdentityVerified",
+    "LinkLost",
+    "BluetoothUnavailable",
+    "BluetoothAvailable",
+    "Failed",
+    "Reset",
+):
+    require_text(CLIENT, f"ConnectionEvent.{event_name}", f"missing semantic connection event: {event_name}")
 require_text(CLIENT, "private fun projectSession", "UI lifecycle must be projected")
 require_text(CLIENT, "phase = connectionPhase(ui)", "UI phase must derive from DeviceSession")
 for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "selectedAddress"):
@@ -212,6 +228,7 @@ if violations:
 
 print("Architecture guard: OK")
 print("  mobile lifecycle: BLE driver -> ConnectionActor -> ConnectionMachine -> DeviceSession")
+print("  lifecycle mutations: semantic ConnectionEvent only")
 print("  transaction identity: Frame.sequence + generation")
 print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
