@@ -219,6 +219,24 @@ require_text(PHY_APP, "static uint8_t snv_write_bounded", "SNV writes need bound
 require_text(PHY_APP, "watchdog_config(WDG_8S)", "blocking SNV scope must widen watchdog")
 require_text(PHY_APP, "watchdog_config(WDG_2S)", "normal watchdog must be restored")
 
+# Boot: GAP/advertising поднимаются раньше boot journal persistence.
+forbid_regex(
+    PHY_APP,
+    r"void\s+dpls_phy6252_init\s*\([^)]*\).*?(?=void\s+dpls_phy6252_connected).*?DPLS_PHY6252_STORAGE_EVT",
+    "dpls_phy6252_init must not schedule flash/storage work",
+)
+require_regex(
+    PHY_TARGET,
+    r"case\s+GAPROLE_STARTED\s*:\s*dpls_ble_identity_on_stack_started\s*\(\s*\)\s*;\s*enable_advertising\s*\(\s*\)\s*;",
+    "advertising must be enabled immediately after GAPROLE_STARTED",
+)
+require_regex(
+    PHY_TARGET,
+    r"if\s*\(events\s*&\s*SBP_START_DEVICE_EVT\s*\)\s*\{\s*GAPRole_StartDevice\s*\(&role_callbacks\)\s*;\s*GAPBondMgr_Register\s*\(&bond_callbacks\)\s*;\s*return\s+events\s*\^\s*SBP_START_DEVICE_EVT\s*;\s*\}",
+    "GAP start handler must not know about storage",
+)
+forbid_text(PHY_TARGET, "~DPLS_PHY6252_STORAGE_EVT", "GAP start may not mask a storage event")
+
 # TX: notify ограничен таймером, indication завершается только реальным ATT CFM.
 require_text(PHY_APP, "#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u", "indication needs a bounded confirmation timeout")
 require_text(PHY_TARGET, "#define DPLS_TICK_MS 1000u", "connected scheduler must check deadlines at <=1 s cadence")
@@ -268,5 +286,6 @@ print("  Android/iOS SMP: explicit state + event/epoch transitions")
 print("  PHY app: one OSAL event dispatcher")
 print("  safety: dpls_safety owns dangerous mode")
 print("  settings: durable slots only, no migration path")
+print("  boot: advertising before deferred persistence")
 print("  storage: real queues -> one flash facade, no actor state")
 print("  TX indication deadline != TX confirmation")
