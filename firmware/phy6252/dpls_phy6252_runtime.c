@@ -49,7 +49,9 @@ static dpls_hal_t server_hal(void)
 
     hal.link.encrypted = dpls_phy6252_transport_encrypted;
     hal.link.indicate = dpls_phy6252_transport_indicate;
-    hal.link.disconnect = dpls_phy6252_transport_disconnect;
+    /* Domain не владеет физическим disconnect. Durable state stage-ится в RAM,
+     * а runtime разрывает link только после подтверждённого TX drain. */
+    hal.link.disconnect = NULL;
 
     hal.hardware.apply_mode = dpls_phy6252_outputs_apply_mode;
     hal.hardware.safe_normal = dpls_phy6252_outputs_safe_normal;
