@@ -24,9 +24,10 @@ def require(path: Path, needle: str) -> None:
 require(APP_H, "#define osal_snv_read dpls_phy6252_snv_read_guarded")
 require(APP_H, "#define osal_snv_write dpls_phy6252_snv_write_guarded")
 require(GUARD, "if (!dpls_phy6252_link_active())")
-require(GUARD, "disconnect_requested = true;")
+require(GUARD, "return deferred.pending && dpls_phy6252_link_active();")
 require(GUARD, "bool dpls_phy6252_snv_flush_deferred(void)")
 require(GUARD, "if (dpls_phy6252_link_active()) return false;")
+require(GUARD, "return physical_write(id, len, data);")
 require(MAKEFILE, "$(FW)/phy6252/dpls_phy6252_snv_guard.c")
 require(CPROJECT, "../../phy6252/dpls_phy6252_snv_guard.c")
 require(TARGET, '#include "dpls_phy6252_snv_guard.h"')
@@ -35,15 +36,10 @@ require(TARGET, "dpls_phy6252_snv_pending() && !dpls_phy6252_snv_flush_deferred(
 require(TARGET, "dpls_phy6252_snv_disconnect_requested()")
 require(TARGET, "if (!dpls_ble_identity_is_ready() || flash_work_pending()) return false;")
 
-# The macro guard must be visible before the vendor SNV header in the only
-# application TU that owns settings/auth/journal SNV calls.
 app = text(APP)
 if app.index('#include "dpls_phy6252_app.h"') > app.index('#include "osal_snv.h"'):
     raise SystemExit("dpls_phy6252_app.c: SNV guard header must precede osal_snv.h")
 
-# The identity module owns exactly two vendor-key erases (IRK/CSRK). On normal
-# commissioning boot they execute before GAPRole_StartDevice; keep this narrow
-# exception explicit so no unrelated raw SNV writer can appear unnoticed.
 identity = text(IDENTITY)
 if identity.count("osal_snv_write(") != 2:
     raise SystemExit("dpls_ble_identity.c: expected exactly two raw IRK/CSRK writes")
