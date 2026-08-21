@@ -3,8 +3,8 @@
 #
 #   tools/flash_firmware.sh [application.hex] [--auto-rst] [--erase] [--port /dev/...]
 #
-# Без --auto-rst скрипт не трогает RTS/DTR: KEY1/reset остаются ручными.
-# С --auto-rst programmer сам делает RTS->RST_N, DTR->TM и входит в ROM.
+# Без --auto-rst скрипт не дёргает RTS/DTR: KEY1/reset остаются ручными.
+# С --auto-rst используется штатная RTS->RST_N, DTR->TM последовательность programmer.
 # Enter нигде не требуется.
 set -euo pipefail
 
@@ -105,10 +105,6 @@ fi
 
 PROGRAMMER="$ROOT/third_party/phy62x2/Utils/rdwr_phy62x2.py"
 ARGS=(-p "$PORT" -r)
-
-if [ "$AUTO_RST" -eq 0 ]; then
-    ARGS+=(--manual-entry)
-fi
 if [ "$ERASE" -eq 1 ]; then
     echo "WARNING: --erase erases the chip including SNV/bonds." >&2
     ARGS+=(-a)
@@ -117,10 +113,43 @@ ARGS+=(wh "$HEX")
 
 echo "port: $PORT"
 echo "hex:  $HEX"
+
 if [ "$AUTO_RST" -eq 1 ]; then
     echo "ROM entry: automatic RTS->RST_N, DTR->TM, UXTDWU@9600"
-else
-    echo "ROM entry: hold KEY1 and reset/power-cycle; UXTDWU@9600 is sent automatically"
+    PYTHONPATH="$ROOT/.python-deps" exec python3 "$PROGRAMMER" "${ARGS[@]}"
 fi
 
-PYTHONPATH="$ROOT/.python-deps" exec python3 "$PROGRAMMER" "${ARGS[@]}"
+echo "ROM entry: hold KEY1 and reset/power-cycle; UXTDWU@9600 is sent automatically"
+
+# Vendor programmer правильно реализует ROM handshake и flash protocol, но по
+# умолчанию ещё дёргает RTS/DTR. В ручном режиме временно глушим только эти две
+# операции и запускаем тот же код programmer без его копирования.
+PYTHONPATH="$ROOT/.python-deps" exec python3 - "$PROGRAMMER" "${ARGS[@]}" <<'PY'
+import importlib.util
+import sys
+
+programmer = sys.argv[1]
+programmer_args = sys.argv[2:]
+spec = importlib.util.spec_from_file_location("phy62x2_programmer", programmer)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"cannot load programmer: {programmer}")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+original_connect = module.phyflasher.Connect
+
+def connect_without_control_lines(self, baud=module.DEF_RUN_BAUD):
+    original_rts = self._port.setRTS
+    original_dtr = self._port.setDTR
+    self._port.setRTS = lambda _value: None
+    self._port.setDTR = lambda _value: None
+    try:
+        return original_connect(self, baud)
+    finally:
+        self._port.setRTS = original_rts
+        self._port.setDTR = original_dtr
+
+module.phyflasher.Connect = connect_without_control_lines
+sys.argv = [programmer, *programmer_args]
+module.main()
+PY
