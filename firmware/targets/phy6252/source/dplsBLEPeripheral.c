@@ -2,6 +2,7 @@
 #include "OSAL.h"
 #include "gap.h"
 #include "gapgattserver.h"
+#include "gatt.h"
 #include "gattservapp.h"
 #include "peripheral.h"
 #include "ll.h"
