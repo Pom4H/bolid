@@ -894,7 +894,7 @@ void dpls_phy6252_init(uint8 new_task_id)
     }
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
-    if (journal_pending_event_count != 0u) osal_set_event(task_id, DPLS_PHY6252_STORAGE_EVT);
+    /* Boot event остаётся в RAM. Target разрешит storage только после GAPROLE_STARTED. */
     LOG("DPLS boot settings=%u gen=%lu slot=%u\n", (unsigned)settings_state,
         (unsigned long)settings_generation, (unsigned)settings_active_slot);
 }
@@ -967,7 +967,7 @@ void dpls_phy6252_tick(void)
 {
     uint32_t now = now_ms();
     tick_link_security(now); tick_factory_reset(now); tick_measurements(); dpls_server_tick(&server, now); tick_tx(now);
-    /* Journal flash не обслуживается из connected tick. */
+    /* Flash scheduling принадлежит target idle/connection lifecycle, не domain tick. */
 }
 
 uint32 dpls_phy6252_led_tick(void)
