@@ -138,7 +138,7 @@ ensure_macos_rosetta() {
     [ "$(uname -m)" = "arm64" ] || return 0
 
     # AC6 6.24 для macOS поставляется Arm как Intel/x86_64 binary.
-    # oahd — системный Rosetta translation service.
+    # Установка Rosetta идемпотентна; на уже настроенном Mac быстро завершается.
     if /usr/bin/pgrep oahd >/dev/null 2>&1; then
         return 0
     fi
@@ -212,7 +212,6 @@ activate_arm_license() {
     current="$(armlm inspect 2>/dev/null || true)"
     product="$(printf '%s\n' "$current" | sed -n 's/^[[:space:]]*Product code: \(KEMDK-[A-Z0-9]*\).*/\1/p' | head -n 1)"
 
-    # Уже известную MDK-лицензию используем; истёкший локальный cache обновляем.
     if [ -n "$product" ]; then
         if printf '%s\n' "$current" | grep -qi 'expired'; then
             echo "==> Refreshing Arm license cache for $product"
@@ -243,15 +242,38 @@ activate_arm_license() {
     armlm activate --product KEMDK-COM0 --server https://mdk-preview.keil.arm.com
 }
 
+verify_armclang() {
+    local compiler
+    local version
+    compiler="$(command -v armclang || true)"
+    [ -n "$compiler" ] || {
+        echo "error: armclang not found after AC6 bootstrap" >&2
+        exit 1
+    }
+
+    if version="$(armclang --version 2>&1)" && printf '%s\n' "$version" | grep -q '6\.24'; then
+        return 0
+    fi
+
+    echo "error: Arm Compiler 6.24.0 required but armclang could not be verified" >&2
+    echo "compiler: $compiler" >&2
+    if command -v file >/dev/null 2>&1; then file "$compiler" >&2 || true; fi
+    echo "direct armclang output:" >&2
+    armclang --version >&2 || true
+    if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+        echo "x86_64 armclang output:" >&2
+        /usr/bin/arch -x86_64 "$compiler" --version >&2 || true
+    fi
+    exit 1
+}
+
 ensure_keil_environment() {
-    # Уже активированное окружение используем без повторной загрузки.
     if ! keil_tools_ready; then
         activate_vcpkg_keil
     fi
 
     ensure_macos_rosetta
 
-    # CMSIS-Toolbox выбирает AC6 по versioned environment variable.
     if [ -z "${AC6_TOOLCHAIN_6_24_0:-}" ]; then
         export AC6_TOOLCHAIN_6_24_0="$(dirname "$(command -v armclang)")"
     fi
@@ -262,10 +284,7 @@ ensure_keil_environment() {
             exit 1
         }
     done
-    armclang --version 2>/dev/null | grep -q '6\.24' || {
-        echo "error: Arm Compiler 6.24.0 required" >&2
-        exit 1
-    }
+    verify_armclang
 
     activate_arm_license
     echo "compiler: $(command -v armclang)"
@@ -299,7 +318,6 @@ build_keil() {
         fi
     done
 
-    # Application HEX содержит XIP image и две SRAM load regions.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
