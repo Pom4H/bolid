@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Сборка одного application HEX для PHY6252.
 #
-#   tools/build_firmware.sh [keil|ac6|gcc] [output.hex]
+#   tools/build_firmware.sh [keil|gcc] [output.hex]
+#
+# Для Keil/AC6 скрипт сам поднимает pinned vcpkg, CMSIS-Toolbox,
+# Arm Compiler 6 и локальную лицензию. Ручные export PATH не нужны.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,10 +14,29 @@ OUT="$ROOT/tmp/test-dpls.hex"
 REGION_ROOT=""
 BUILD_LOG=""
 OUT_SET=0
+VCPKG_VERSION="2026.04.27"
+VCPKG_ENV_JSON=""
 
 usage() {
-    echo "usage: tools/build_firmware.sh [keil|ac6|gcc] [output.hex]" >&2
+    cat >&2 <<'EOF'
+usage: tools/build_firmware.sh [keil|gcc] [output.hex]
+
+Defaults:
+  toolchain: keil (Arm Compiler 6.24.0)
+  output:    tmp/test-dpls.hex
+
+Environment for an existing Arm license:
+  ARM_LICENSE_CODE=<activation-code>
+  or ARM_LICENSE_PRODUCT=<product> ARM_LICENSE_SERVER=<url>
+EOF
     exit 2
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "error: required host command not found: $1" >&2
+        exit 1
+    }
 }
 
 reject_warnings() {
@@ -93,20 +115,134 @@ esac
 
 cleanup() {
     if [ -n "$REGION_ROOT" ]; then rm -rf "$REGION_ROOT"; fi
+    if [ -n "$VCPKG_ENV_JSON" ]; then rm -f "$VCPKG_ENV_JSON"; fi
 }
 trap cleanup EXIT
 
+need git
+need python3
 bash "$ROOT/tools/fetch_phy6252_sdk.sh"
-mkdir -p "$(dirname "$OUT")"
+mkdir -p "$(dirname "$OUT")" "$ROOT/tmp" "$ROOT/.toolchains"
 
-build_keil() {
-    for tool in cbuild fromelf; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            echo "$tool not found. Activate Keil MDK / Arm Compiler 6 from:" >&2
-            echo "  $TARGET/vcpkg-configuration.json" >&2
+keil_tools_ready() {
+    command -v cbuild >/dev/null 2>&1 &&
+        command -v fromelf >/dev/null 2>&1 &&
+        command -v armclang >/dev/null 2>&1 &&
+        command -v armlm >/dev/null 2>&1
+}
+
+bootstrap_vcpkg() {
+    local dir="$ROOT/.toolchains/vcpkg-$VCPKG_VERSION"
+    if [ ! -x "$dir/vcpkg" ]; then
+        echo "==> Installing pinned vcpkg $VCPKG_VERSION"
+        rm -rf "$dir"
+        git clone --quiet --depth 1 --branch "$VCPKG_VERSION" \
+            https://github.com/microsoft/vcpkg.git "$dir"
+        "$dir/bootstrap-vcpkg.sh" -disableMetrics
+    fi
+    printf '%s\n' "$dir/vcpkg"
+}
+
+activate_vcpkg_keil() {
+    local vcpkg
+    local downloads="$ROOT/.toolchains/vcpkg-downloads"
+    local path_additions
+
+    vcpkg="$(bootstrap_vcpkg)"
+    mkdir -p "$downloads"
+    VCPKG_ENV_JSON="$(mktemp "$ROOT/tmp/vcpkg-env.XXXXXX.json")"
+
+    echo "==> Activating CMSIS-Toolbox 2.14.1 + Arm Compiler 6.24.0"
+    if ! (
+        cd "$TARGET"
+        "$vcpkg" activate --downloads-root="$downloads" --json="$VCPKG_ENV_JSON"
+    ); then
+        echo "==> Refreshing Arm vcpkg registry"
+        (
+            cd "$TARGET"
+            "$vcpkg" x-update-registry --all
+            "$vcpkg" activate --downloads-root="$downloads" --json="$VCPKG_ENV_JSON"
+        )
+    fi
+
+    path_additions="$(python3 - "$VCPKG_ENV_JSON" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    env = json.load(f)
+print(":".join(env.get("paths", {}).get("PATH", [])))
+PY
+)"
+    if [ -n "$path_additions" ]; then
+        export PATH="$path_additions:$PATH"
+    fi
+
+    eval "$(python3 - "$VCPKG_ENV_JSON" <<'PY'
+import json, re, shlex, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    env = json.load(f)
+for key, value in env.get("tools", {}).items():
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        print(f"export {key}={shlex.quote(str(value))}")
+PY
+)"
+}
+
+activate_arm_license() {
+    local current=""
+    current="$(armlm inspect 2>/dev/null || true)"
+
+    # Любая уже активная MDK-лицензия подходит лучше, чем повторная активация.
+    if printf '%s\n' "$current" | grep -Eq 'Product code: KEMDK-(COM|ESS|PRO)[0-9]'; then
+        echo "==> Arm license already active"
+        return 0
+    fi
+
+    if [ -n "${ARM_LICENSE_CODE:-}" ]; then
+        echo "==> Activating Arm license from ARM_LICENSE_CODE"
+        armlm activate --code "$ARM_LICENSE_CODE"
+        return 0
+    fi
+
+    if [ -n "${ARM_LICENSE_PRODUCT:-}" ] || [ -n "${ARM_LICENSE_SERVER:-}" ]; then
+        if [ -z "${ARM_LICENSE_PRODUCT:-}" ] || [ -z "${ARM_LICENSE_SERVER:-}" ]; then
+            echo "error: set both ARM_LICENSE_PRODUCT and ARM_LICENSE_SERVER" >&2
             exit 1
         fi
+        echo "==> Activating Arm license product $ARM_LICENSE_PRODUCT"
+        armlm activate --product "$ARM_LICENSE_PRODUCT" --server "$ARM_LICENSE_SERVER"
+        return 0
+    fi
+
+    echo "==> Activating free Keil MDK Community license (KEMDK-COM0)"
+    armlm activate --product KEMDK-COM0 --server https://mdk-preview.keil.arm.com
+}
+
+ensure_keil_environment() {
+    # Если пользователь уже активировал vcpkg в shell, используем его окружение.
+    if ! keil_tools_ready; then
+        activate_vcpkg_keil
+    fi
+
+    # CMSIS-Toolbox ищет AC6 именно через versioned env variable.
+    if [ -z "${AC6_TOOLCHAIN_6_24_0:-}" ]; then
+        export AC6_TOOLCHAIN_6_24_0="$(dirname "$(command -v armclang)")"
+    fi
+
+    for tool in cbuild fromelf armclang armlm; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "error: $tool not found after AC6 bootstrap" >&2
+            exit 1
+        }
     done
+
+    activate_arm_license
+    echo "compiler: $(command -v armclang)"
+    echo "cmsis:   $(command -v cbuild)"
+    echo "AC6_TOOLCHAIN_6_24_0=$AC6_TOOLCHAIN_6_24_0"
+}
+
+build_keil() {
+    ensure_keil_environment
 
     rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
     mkdir -p "$TARGET/out" "$(dirname "$OUT")" "$ROOT/tmp"
@@ -131,7 +267,7 @@ build_keil() {
         fi
     done
 
-    # Application HEX contains the XIP image plus the two SRAM load regions.
+    # Application HEX содержит XIP image и две SRAM load regions.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
@@ -190,3 +326,4 @@ check_hex_layout "$OUT"
 
 echo "hex: $OUT"
 echo "flash: tools/flash_firmware.sh $OUT"
+echo "auto reset: tools/flash_firmware.sh $OUT --auto-rst"
