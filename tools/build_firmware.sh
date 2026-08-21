@@ -32,7 +32,7 @@ usage() {
 usage: tools/build_firmware.sh [keil|ac6|gcc] [output.hex] [identity options]
 
 identity options (optional, mutually exclusive source):
-  --serial N                    create a new factory identity sidecar
+  --serial N                    create/reuse output.factory.bin for this serial
   --factory-bin FILE            reuse an existing 64-byte factory identity
   --hw-revision N               factory hardware revision (default: 2)
   --static-address XX:..:XX     use a specified BLE static random address
@@ -42,6 +42,9 @@ With identity options the build emits:
   output.hex                    application image; flash with `wh`
   output.factory.bin            factory identity; flash with `we 0x3F000`
   output.identity.json          non-secret metadata
+
+If output.factory.bin already exists, --serial reuses it after checking the
+serial number. It never rotates IRK/CSRK silently.
 
 `tools/flash_firmware.sh output.hex` automatically detects the sidecar and uses
 both programmer operations in the correct order.
@@ -54,6 +57,16 @@ reject_warnings() {
         echo "error: firmware build produced warnings" >&2
         exit 1
     fi
+}
+
+factory_serial() {
+    python3 - "$1" <<'PY'
+import struct, sys
+raw = open(sys.argv[1], 'rb').read()
+if len(raw) != 64:
+    raise SystemExit("factory BIN must be exactly 64 bytes")
+print(struct.unpack_from('<I', raw, 8)[0])
+PY
 }
 
 while [ "$#" -gt 0 ]; do
@@ -92,6 +105,13 @@ if [ -n "$FACTORY_BIN_INPUT" ] && { [ -n "$STATIC_ADDRESS" ] || [ "$GENERATE_STA
 fi
 if [ -n "$STATIC_ADDRESS" ] && [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; then
     echo "error: choose --static-address or --generate-static-address" >&2
+    exit 2
+fi
+case "$SERIAL" in
+    ''|*[!0-9]*) [ -z "$SERIAL" ] || { echo "error: serial must be an integer" >&2; exit 2; } ;;
+esac
+if [ -n "$SERIAL" ] && { [ "$SERIAL" -lt 1 ] || [ "$SERIAL" -gt 4294967294 ]; }; then
+    echo "error: serial must be in 1..4294967294" >&2
     exit 2
 fi
 
@@ -147,8 +167,8 @@ build_keil() {
         fi
     done
 
-    # This is intentionally the same application-image composition used by the
-    # hardware-proven 1.4.0 build. Factory data is never appended here.
+    # Exact application-image composition used by hardware-proven 1.4.0.
+    # Factory data is never appended here.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
@@ -216,8 +236,18 @@ if [ -n "$SERIAL" ] || [ -n "$FACTORY_BIN_INPUT" ]; then
     FACTORY_OUT="$STEM.factory.bin"
     META_OUT="$STEM.identity.json"
     FACTORY_ARGS=(--binary-output "$FACTORY_OUT" --metadata "$META_OUT")
+
     if [ -n "$FACTORY_BIN_INPUT" ]; then
         FACTORY_ARGS+=(--record-input "$FACTORY_BIN_INPUT")
+        IDENTITY_ACTION="reused explicit factory BIN"
+    elif [ -f "$FACTORY_OUT" ]; then
+        EXISTING_SERIAL="$(factory_serial "$FACTORY_OUT")"
+        if [ "$EXISTING_SERIAL" != "$SERIAL" ]; then
+            echo "error: $FACTORY_OUT belongs to serial=$EXISTING_SERIAL, requested serial=$SERIAL" >&2
+            exit 2
+        fi
+        FACTORY_ARGS+=(--record-input "$FACTORY_OUT")
+        IDENTITY_ACTION="reused existing sidecar"
     else
         FACTORY_ARGS+=(--serial "$SERIAL" --hw-revision "$HW_REVISION")
         if [ -n "$STATIC_ADDRESS" ]; then
@@ -225,10 +255,12 @@ if [ -n "$SERIAL" ] || [ -n "$FACTORY_BIN_INPUT" ]; then
         elif [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; then
             FACTORY_ARGS+=(--generate-static-address)
         fi
+        IDENTITY_ACTION="created new identity"
     fi
+
     python3 "$ROOT/tools/make_factory_identity.py" "${FACTORY_ARGS[@]}"
     [ -s "$FACTORY_OUT" ] || { echo "error: factory identity sidecar was not produced" >&2; exit 1; }
-    echo "factory-bin: $FACTORY_OUT"
+    echo "factory-bin: $FACTORY_OUT ($IDENTITY_ACTION)"
     echo "identity-meta: $META_OUT"
     echo "flash: tools/flash_firmware.sh $OUT"
 else
