@@ -29,23 +29,62 @@ internal fun buildJournalTimeline(
     val order = records.indices.sortedBy { records[it].sequence }
     val gaps = journalSessionGaps(sessions)
     var bootOffset = 0L
-    var prevUptime = records[order.first()].timestampSeconds
-    var prevSessionFirst = journalSessionFor(records[order.first()].sequence, sessions)?.firstSequence
+    var previousWithinBoot = 0L
+    var previousRecord: EventRecord? = null
+    var previousSessionFirst: Long? = null
+    var inferredUtcEpoch: Long? = null
+
     for (index in order) {
         val record = records[index]
-        val uptime = record.timestampSeconds
         val session = journalSessionFor(record.sequence, sessions)
         val sessionFirst = session?.firstSequence
-        if (sessions.isNotEmpty() && sessionFirst != null && prevSessionFirst != null && sessionFirst != prevSessionFirst) {
-            val olderIndex = sessions.indexOfFirst { it.firstSequence == prevSessionFirst }
-            val gap = gaps.getOrNull(olderIndex) ?: 1L
-            bootOffset += prevUptime + gap
-            prevSessionFirst = sessionFirst
-        } else if (sessions.isEmpty() && uptime + 1L < prevUptime) {
-            bootOffset += prevUptime + 1L
+        val previous = previousRecord
+
+        val crossedBoot = when {
+            sessions.isNotEmpty() && sessionFirst != null && previousSessionFirst != null ->
+                sessionFirst != previousSessionFirst
+            sessions.isEmpty() && previous != null -> {
+                val prevUtc = eventTimestampBasis(previous.timestampSeconds) == "utc"
+                val nowUtc = eventTimestampBasis(record.timestampSeconds) == "utc"
+                (prevUtc && !nowUtc) ||
+                    (!prevUtc && !nowUtc && record.timestampSeconds + 1L < previous.timestampSeconds) ||
+                    record.type == 1
+            }
+            else -> false
         }
-        timeline[index] = bootOffset + uptime
-        prevUptime = uptime
+
+        if (crossedBoot) {
+            val gap = if (sessions.isNotEmpty() && previousSessionFirst != null) {
+                val olderIndex = sessions.indexOfFirst { it.firstSequence == previousSessionFirst }
+                gaps.getOrNull(olderIndex) ?: 1L
+            } else {
+                1L
+            }
+            bootOffset += previousWithinBoot + gap
+            previousWithinBoot = 0L
+            inferredUtcEpoch = null
+        }
+
+        if (previousSessionFirst == null || crossedBoot) previousSessionFirst = sessionFirst
+
+        val withinBoot = journalRecordUptimeSeconds(record, session?.epochSeconds) ?: run {
+            if (eventTimestampBasis(record.timestampSeconds) == "utc") {
+                /* Для старого журнала без сохранённого anchor выравниваем первый
+                 * UTC timestamp по уже известной части uptime этой boot-сессии.
+                 * Дальше разности Unix timestamps дают корректную длительность,
+                 * не растягивая график на десятилетия. */
+                val epoch = inferredUtcEpoch ?: (record.timestampSeconds - previousWithinBoot).also {
+                    inferredUtcEpoch = it
+                }
+                (record.timestampSeconds - epoch).coerceAtLeast(previousWithinBoot)
+            } else {
+                record.timestampSeconds.coerceAtLeast(0L)
+            }
+        }
+
+        timeline[index] = bootOffset + withinBoot
+        previousWithinBoot = maxOf(previousWithinBoot, withinBoot)
+        previousRecord = record
     }
     return JournalTimeline(timeline.toList())
 }
