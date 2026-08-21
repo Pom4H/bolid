@@ -15,27 +15,43 @@ on:
 
 jobs:
   fresh-clone:
-    name: Fresh clone → GCC build + flasher contract
+    name: Fresh clone → AC6 6.24 build + flasher contract
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
-      - name: Build from a clean clone with pinned GNU Arm
+
+      # Держим этот bootstrap идентичным production AC6 job в ci.yml.
+      # Не изобретаем второй способ установки/лицензирования toolchain.
+      - name: Install AC6 runtime dependencies
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y libpython3.9 libtinfo5
+
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+
+      - name: Activate CMSIS Toolbox and Arm Compiler 6
+        uses: ARM-software/cmsis-actions/vcpkg@v1
+        with:
+          config: firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+
+      - name: Activate Arm Community license
+        uses: ARM-software/cmsis-actions/armlm@v1
+
+      - name: Build from a clean clone with Arm Compiler 6.24
         shell: bash
         run: |
           set -euo pipefail
-          ! command -v arm-none-eabi-gcc >/dev/null 2>&1 || true
-          tools/build_firmware.sh gcc tmp/fresh-clone.hex
+          tools/build_firmware.sh keil tmp/fresh-clone.hex
           test -s tmp/fresh-clone.hex
           grep -q '^:' tmp/fresh-clone.hex
+
       - name: Verify flasher CLI and post-flash contract
         shell: bash
         run: |
           set -euo pipefail
           tools/flash_firmware.sh --help
           python3 tools/test_flash_firmware.py
-
-  # Production/release CI separately builds the same target with AC6 6.24
-  # using ARM-software/cmsis-actions and its explicit license action. This DX
-  # workflow intentionally stays license-independent so a flasher/tooling edit
-  # cannot be blocked by Arm license provisioning.
