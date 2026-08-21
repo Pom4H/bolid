@@ -85,11 +85,20 @@ def assert_source_contract() -> None:
     assert "hal_pwrmgr_register(MOD_USR1, NULL, NULL)" in peripheral
     assert "hal_fs_init(0x1103C000u, 3)" in peripheral
 
-    # Static identity is configured before GAPRole_StartDevice().
     prepare_start = identity.index("void dpls_ble_identity_prepare(void)")
     stack_start = identity.index("void dpls_ble_identity_on_stack_started(void)")
     prepare_body = identity[prepare_start:stack_start]
     stack_body = identity[stack_start:]
+
+    # The user's real 1.4.0 PB-03F proves this public-controller order. Public
+    # BD_ADDR must be applied before GAPRole_StartDevice(), then synchronized via
+    # GAP_ConfigDeviceAddr after GAPROLE_STARTED. Do not defer the first HCI write.
+    assert "set_controller_public_addr(mac)" in prepare_body
+    assert "GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, s_identity_mac)" in stack_body
+    assert "GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL)" not in identity
+
+    # Static identity is also an initialization-time input and must not be moved
+    # to the post-start callback.
     assert "configure_static_identity_addr(mac)" in prepare_body
     assert "GAP_ConfigDeviceAddr(ADDRTYPE_STATIC" not in stack_body
     init_call = peripheral.index("dpls_ble_identity_prepare();")
