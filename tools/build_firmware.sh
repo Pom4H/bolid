@@ -191,11 +191,18 @@ PY
 
 activate_arm_license() {
     local current=""
+    local product=""
     current="$(armlm inspect 2>/dev/null || true)"
+    product="$(printf '%s\n' "$current" | sed -n 's/^[[:space:]]*Product code: \(KEMDK-[A-Z0-9]*\).*/\1/p' | head -n 1)"
 
-    # Любая уже активная MDK-лицензия подходит лучше повторной активации.
-    if printf '%s\n' "$current" | grep -Eq 'Product code: KEMDK-(COM|ESS|PRO)[0-9]'; then
-        echo "==> Arm license already active"
+    # Уже известную MDK-лицензию используем; истёкший локальный cache обновляем.
+    if [ -n "$product" ]; then
+        if printf '%s\n' "$current" | grep -qi 'expired'; then
+            echo "==> Refreshing Arm license cache for $product"
+            armlm reactivate --product "$product"
+        else
+            echo "==> Arm license already active: $product"
+        fi
         return 0
     fi
 
