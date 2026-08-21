@@ -26,17 +26,29 @@ def main() -> int:
     assert "0x3F000" not in flash
     assert "pyserial==3.5" in flash
 
-    # Manual mode запускает тот же vendor programmer, но глушит только RTS/DTR.
-    assert "connect_without_control_lines" in flash
-    assert "self._port.setRTS = lambda _value: None" in flash
-    assert "self._port.setDTR = lambda _value: None" in flash
+    # Один wrapper управляет только ROM entry, vendor flash protocol не копируется.
+    assert "def enter_rom(self):" in flash
+    assert "module.phyflasher.Connect = controlled_connect" in flash
+    assert "original_connect(self, module.START_BAUD)" in flash
 
-    # Auto-RST остаётся штатной последовательностью PHY62x2 programmer.
+    # Manual mode не трогает control lines и не ждёт Enter.
+    assert "ROM entry: MANUAL" in flash
+    assert "operator" not in flash.lower()  # сообщения пользователю остаются простыми
+
+    # Auto mode: штатная последовательность PHY62x2 + UXTDWU@9600.
+    assert "self._port.setRTS(True)" in flash
+    assert "self._port.setDTR(True)" in flash
+    assert "self._port.setDTR(False)" in flash
+    assert "self._port.setRTS(False)" in flash
+    assert 'self._port.write(b"UXTDWU")' in flash
+    assert "range(250)" in flash
+    assert "TX/RX alone cannot reset" in flash
+
+    # Vendor source остаётся источником flash protocol и baud constants.
     assert "START_BAUD = 9600" in programmer
-    assert "self._port.setRTS(True)" in programmer
-    assert "self._port.setDTR(True)" in programmer
-    assert "pkt = 'UXTDWU'" in programmer
-    assert "read == b'cmd>>:'" in programmer
+    assert "DEF_RUN_BAUD = 115200" in programmer
+    assert "def FlashUnlock" in programmer
+    assert "def WriteHexFile" in programmer or "WriteHexFile" in programmer
 
     print("PHY6252 flasher: PASS")
     return 0
