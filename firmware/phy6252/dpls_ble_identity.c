@@ -15,31 +15,19 @@ typedef struct {
     uint8_t addr[B_ADDR_LEN];
 } dpls_ble_mac_record_t;
 
-extern chipMAddr_t g_chipMAddr;
-
 static uint8_t s_identity_mac[B_ADDR_LEN];
 static bool s_identity_mac_valid;
 
-static bool buffer_is_fill(const uint8_t *buf, uint8_t value, uint8_t length)
-{
-    return osal_isbufset((uint8_t *)buf, value, length) == TRUE;
-}
-
 static bool mac_is_invalid(const uint8_t *mac)
 {
-    return buffer_is_fill(mac, 0xFF, B_ADDR_LEN) || buffer_is_fill(mac, 0x00, B_ADDR_LEN);
-}
-
-static bool read_factory_mac(uint8_t out[B_ADDR_LEN])
-{
     uint8_t i;
-    check_chip_mAddr();
-    if (g_chipMAddr.chipMAddrStatus != CHIP_ID_VALID) return false;
-
+    bool zero = true;
+    bool ff = true;
     for (i = 0; i < B_ADDR_LEN; ++i) {
-        out[i] = g_chipMAddr.mAddr[B_ADDR_LEN - 1u - i];
+        zero &= mac[i] == 0;
+        ff &= mac[i] == 0xFF;
     }
-    return !mac_is_invalid(out);
+    return zero || ff;
 }
 
 static bool read_mac_snv(uint8_t out[B_ADDR_LEN])
@@ -66,19 +54,20 @@ static bool generate_mac(uint8_t out[B_ADDR_LEN])
     return !mac_is_invalid(out);
 }
 
-static bool set_controller_public_addr(const uint8_t mac[B_ADDR_LEN])
+static bool set_controller_addr(const uint8_t mac[B_ADDR_LEN])
 {
-    uint8_t controller_addr[B_ADDR_LEN];
+    uint8_t addr[B_ADDR_LEN];
     uint8_t i;
+
     for (i = 0; i < B_ADDR_LEN; ++i) {
-        controller_addr[i] = mac[B_ADDR_LEN - 1u - i];
+        addr[i] = mac[B_ADDR_LEN - 1u - i];
     }
-    return HCI_EXT_SetBDADDRCmd(controller_addr) == HCI_SUCCESS;
+
+    return HCI_EXT_SetBDADDRCmd(addr) == HCI_SUCCESS;
 }
 
 static bool select_mac(uint8_t mac[B_ADDR_LEN])
 {
-    if (read_factory_mac(mac)) return true;
     if (read_mac_snv(mac)) return true;
     return generate_mac(mac);
 }
@@ -87,10 +76,10 @@ void dpls_ble_identity_prepare(void)
 {
     uint8_t mac[B_ADDR_LEN];
 
-    /* Ранний boot должен быть без записи во flash.
-     * Здесь только выбираем адрес в RAM и настраиваем controller. */
+    /* В раннем boot только RAM и controller setup.
+     * Никаких записей flash и обязательных ключей. */
     if (!select_mac(mac)) return;
-    if (!set_controller_public_addr(mac)) return;
+    if (!set_controller_addr(mac)) return;
 
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_mac_valid = true;
@@ -98,31 +87,9 @@ void dpls_ble_identity_prepare(void)
 
 void dpls_ble_identity_on_stack_started(void)
 {
-    uint8_t irk[KEYLEN];
-    uint8_t srk[KEYLEN];
-    uint8_t hci_addr[B_ADDR_LEN];
-    uint8_t zero_irk[KEYLEN];
-
     if (!s_identity_mac_valid) return;
 
-    /* После старта GAP разрешаем долговременные данные. */
-    if (osal_snv_read(BLE_NVID_IRK, KEYLEN, irk) != SUCCESS ||
-        osal_snv_read(BLE_NVID_CSRK, KEYLEN, srk) != SUCCESS) {
-        if (LL_ENC_GenerateTrueRandNum(irk, KEYLEN) == SUCCESS &&
-            LL_ENC_GenerateTrueRandNum(srk, KEYLEN) == SUCCESS) {
-            (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, irk);
-            (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, srk);
-        }
-    }
-
-    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, irk);
-    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, srk);
-
-    GAPRole_GetParameter(GAPROLE_BD_ADDR, hci_addr);
-    memset(zero_irk, 0, sizeof(zero_irk));
-    (void)HCI_LE_AddDevToResolvingListCmd(ADDRTYPE_PUBLIC, hci_addr, zero_irk, irk);
-
-    /* MAC сохраняем только после успешного запуска stack. */
+    /* Persistence выполняется после запуска BLE stack. */
     (void)write_mac_snv(s_identity_mac);
 }
 
