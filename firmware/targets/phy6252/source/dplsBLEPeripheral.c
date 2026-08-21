@@ -77,8 +77,9 @@ static void disconnect_for_flash_if_ready(void)
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
-    /* The storage actor owns the entire radio/flash exclusion window. */
-    if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;
+    /* Flash work may temporarily own the radio, identity may not. A failed
+     * identity preparation must never make a live board permanently invisible. */
+    if (dpls_phy6252_flash_work_pending()) return false;
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
@@ -143,8 +144,6 @@ static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
     (void)conn_handle;
     (void)state;
     (void)status;
-    /* Pairing failure may be user cancellation or timing; it never proves that
-     * every bond is stale. Only the physical factory-reset path erases all. */
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -252,10 +251,6 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
-        if (!dpls_phy6252_link_active() && !dpls_ble_identity_is_ready()) {
-            dpls_ble_identity_on_stack_started();
-            (void)enable_advertising_if_ready();
-        }
         dpls_phy6252_tick();
         disconnect_for_flash_if_ready();
         schedule_led_if_needed();
