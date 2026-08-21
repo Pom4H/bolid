@@ -22,7 +22,8 @@ typedef enum {
     DPLS_SAFETY_RETURN_SESSION_TIMEOUT,
     DPLS_SAFETY_RETURN_LOW_RESERVE,
     DPLS_SAFETY_RETURN_DISCONNECT,
-    DPLS_SAFETY_RETURN_REAL_SHORT
+    DPLS_SAFETY_RETURN_REAL_SHORT,
+    DPLS_SAFETY_RETURN_MEASUREMENT_LOST
 } dpls_safety_return_t;
 
 typedef struct {
@@ -34,13 +35,20 @@ typedef struct {
 typedef struct {
     bool connected;
     bool authenticated;
+    bool measurements_ready;
     bool reserve_low;
     bool real_short;
     uint32_t last_authenticated_activity_ms;
 } dpls_safety_inputs_t;
 
 void dpls_safety_init(dpls_safety_t *s);
-bool dpls_safety_can_enter(dpls_safety_mode_t mode, bool real_short);
+/* Один admission policy для всех опасных режимов. Возвращает причину запрета,
+ * а NORMAL всегда разрешён: safe-state нельзя заблокировать плохим датчиком. */
+dpls_safety_return_t dpls_safety_admission_reason(
+    dpls_safety_mode_t mode,
+    const dpls_safety_inputs_t *in,
+    uint32_t now_ms
+);
 void dpls_safety_commit_mode(dpls_safety_t *s, dpls_safety_mode_t mode, uint32_t now_ms);
 void dpls_safety_force_normal(dpls_safety_t *s);
 dpls_safety_return_t dpls_safety_required_return(

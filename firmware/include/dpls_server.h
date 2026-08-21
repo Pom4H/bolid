@@ -71,7 +71,8 @@ typedef enum {
     DPLS_RETURN_LOW_RESERVE = 4,
     DPLS_RETURN_INTERNAL_ERROR = 5,
     DPLS_RETURN_BOOT = 6,
-    DPLS_RETURN_AUTO_ISOLATION = 7
+    DPLS_RETURN_AUTO_ISOLATION = 7,
+    DPLS_RETURN_MEASUREMENT_LOST = 8
 } dpls_return_reason_t;
 
 typedef struct {
@@ -162,7 +163,6 @@ typedef struct {
     uint32_t last_auth_proof_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
-    uint32_t setup_disconnect_deadline_ms;
     uint8_t device_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t client_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t token[DPLS_SESSION_TOKEN_SIZE];
