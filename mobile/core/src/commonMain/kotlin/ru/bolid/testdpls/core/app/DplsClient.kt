@@ -94,7 +94,9 @@ class DplsClient(
     private val journal = JournalMachine()
     private var pendingVerifier: ByteArray? = null
 
-    private var session: DeviceSession = DeviceSession.Offline
+    private val connection = ConnectionActor()
+    private val session: DeviceSession
+        get() = connection.state
     private var identify = Identify()
     private var operation: Operation? = null
     private var timeSyncAttempted = false
@@ -1747,7 +1749,7 @@ class DplsClient(
     }
 
     private fun setSession(next: DeviceSession) {
-        session = next
+        connection.transitionTo(next)
         mutableState.value = projectSession(mutableState.value)
     }
 

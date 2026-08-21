@@ -33,6 +33,7 @@ add_library(test_dpls_server
     src/dpls_calib.c
     src/dpls_hmac.c
     src/dpls_durable_settings.c
+    src/dpls_storage_actor.c
 )
 target_include_directories(test_dpls_server PUBLIC include)
 target_compile_options(test_dpls_server PRIVATE -Wall -Wextra -Werror)
@@ -76,6 +77,7 @@ dpls_add_test(test_safety tests/test_safety.c)
 dpls_add_test(test_hmac tests/test_hmac.c)
 dpls_add_test(test_durable_settings tests/test_durable_settings.c)
 dpls_add_test(test_durable_settings_powerloss_matrix tests/test_durable_settings_powerloss_matrix.c)
+dpls_add_test(test_storage_actor tests/test_storage_actor.c)
 
 add_executable(test_sim_att
     tests/test_sim_att.c

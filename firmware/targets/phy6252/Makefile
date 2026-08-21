@@ -124,9 +124,11 @@ APP_SOURCES := \
 	$(FW)/src/dpls_led.c \
 	$(FW)/src/dpls_calib.c \
 	$(FW)/src/dpls_durable_settings.c \
+	$(FW)/src/dpls_storage_actor.c \
 	$(FW)/phy6252/dpls_gatt_service.c \
 	$(FW)/phy6252/dpls_phy6252_app.c \
 	$(FW)/phy6252/dpls_phy6252_snv_guard.c \
+	$(FW)/phy6252/dpls_phy6252_storage.c \
 	$(FW)/phy6252/dpls_ble_identity.c \
 	system_gcc.c
 
