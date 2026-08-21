@@ -36,9 +36,6 @@ dpls_safety_return_t dpls_safety_required_return(
 ) {
     if (s->mode == DPLS_SAFE_NORMAL) return DPLS_SAFETY_RETURN_NONE;
     if (!in->connected) return DPLS_SAFETY_RETURN_DISCONNECT;
-    /* Unknown/stale ADC data is not equivalent to a healthy line/reserve. Once
-     * an output is energized, loss of the safety evidence forces Norma. */
-    if (!in->measurements_ready) return DPLS_SAFETY_RETURN_MEASUREMENT_LOST;
     if (in->real_short) return DPLS_SAFETY_RETURN_REAL_SHORT;
     if (in->reserve_low) return DPLS_SAFETY_RETURN_LOW_RESERVE;
     if (s->mode_deadline_ms && elapsed(now_ms, s->mode_deadline_ms)) return DPLS_SAFETY_RETURN_MODE_TIMEOUT;

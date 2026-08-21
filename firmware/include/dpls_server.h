@@ -220,7 +220,7 @@ void dpls_server_connected(dpls_server_t *server, uint32_t now_ms);
 void dpls_server_disconnected(dpls_server_t *server, uint32_t now_ms);
 void dpls_server_tick(dpls_server_t *server, uint32_t now_ms);
 bool dpls_server_receive(dpls_server_t *server, const uint8_t *frame, size_t length, uint32_t now_ms);
-bool dpls_server_log(dpls_server_t *server, uint8_t type, uint8_t parameter);
+void dpls_server_log(dpls_server_t *server, uint8_t type, uint8_t parameter);
 bool dpls_server_authenticated(const dpls_server_t *server);
 
 #endif
