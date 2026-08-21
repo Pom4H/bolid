@@ -18,6 +18,7 @@ VCPKG_VERSION="2026.04.27"
 VCPKG_ENV_JSON=""
 
 usage() {
+    local status="${1:-2}"
     cat >&2 <<'EOF'
 usage: tools/build_firmware.sh [keil|gcc] [output.hex]
 
@@ -25,11 +26,11 @@ Defaults:
   toolchain: keil (Arm Compiler 6.24.0)
   output:    tmp/test-dpls.hex
 
-Environment for an existing Arm license:
+Existing commercial/user Arm license:
   ARM_LICENSE_CODE=<activation-code>
   or ARM_LICENSE_PRODUCT=<product> ARM_LICENSE_SERVER=<url>
 EOF
-    exit 2
+    exit "$status"
 }
 
 need() {
@@ -98,7 +99,7 @@ PY
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -h|--help) usage ;;
+        -h|--help) usage 0 ;;
         keil|ac6|gcc) TOOLCHAIN="$1"; shift ;;
         --*) usage ;;
         *)
@@ -125,20 +126,21 @@ bash "$ROOT/tools/fetch_phy6252_sdk.sh"
 mkdir -p "$(dirname "$OUT")" "$ROOT/tmp" "$ROOT/.toolchains"
 
 keil_tools_ready() {
-    command -v cbuild >/dev/null 2>&1 &&
-        command -v fromelf >/dev/null 2>&1 &&
-        command -v armclang >/dev/null 2>&1 &&
-        command -v armlm >/dev/null 2>&1
+    command -v cbuild >/dev/null 2>&1 || return 1
+    command -v fromelf >/dev/null 2>&1 || return 1
+    command -v armclang >/dev/null 2>&1 || return 1
+    command -v armlm >/dev/null 2>&1 || return 1
+    armclang --version 2>/dev/null | grep -q '6\.24'
 }
 
 bootstrap_vcpkg() {
     local dir="$ROOT/.toolchains/vcpkg-$VCPKG_VERSION"
     if [ ! -x "$dir/vcpkg" ]; then
-        echo "==> Installing pinned vcpkg $VCPKG_VERSION"
+        echo "==> Installing pinned vcpkg $VCPKG_VERSION" >&2
         rm -rf "$dir"
         git clone --quiet --depth 1 --branch "$VCPKG_VERSION" \
             https://github.com/microsoft/vcpkg.git "$dir"
-        "$dir/bootstrap-vcpkg.sh" -disableMetrics
+        "$dir/bootstrap-vcpkg.sh" -disableMetrics >&2
     fi
     printf '%s\n' "$dir/vcpkg"
 }
@@ -150,7 +152,7 @@ activate_vcpkg_keil() {
 
     vcpkg="$(bootstrap_vcpkg)"
     mkdir -p "$downloads"
-    VCPKG_ENV_JSON="$(mktemp "$ROOT/tmp/vcpkg-env.XXXXXX.json")"
+    VCPKG_ENV_JSON="$(mktemp "$ROOT/tmp/vcpkg-env.XXXXXX")"
 
     echo "==> Activating CMSIS-Toolbox 2.14.1 + Arm Compiler 6.24.0"
     if ! (
@@ -191,7 +193,7 @@ activate_arm_license() {
     local current=""
     current="$(armlm inspect 2>/dev/null || true)"
 
-    # Любая уже активная MDK-лицензия подходит лучше, чем повторная активация.
+    # Любая уже активная MDK-лицензия подходит лучше повторной активации.
     if printf '%s\n' "$current" | grep -Eq 'Product code: KEMDK-(COM|ESS|PRO)[0-9]'; then
         echo "==> Arm license already active"
         return 0
@@ -213,17 +215,17 @@ activate_arm_license() {
         return 0
     fi
 
-    echo "==> Activating free Keil MDK Community license (KEMDK-COM0)"
+    echo "==> Activating Keil MDK Community (KEMDK-COM0, non-commercial)"
     armlm activate --product KEMDK-COM0 --server https://mdk-preview.keil.arm.com
 }
 
 ensure_keil_environment() {
-    # Если пользователь уже активировал vcpkg в shell, используем его окружение.
+    # Уже активированное окружение используем без повторной загрузки.
     if ! keil_tools_ready; then
         activate_vcpkg_keil
     fi
 
-    # CMSIS-Toolbox ищет AC6 именно через versioned env variable.
+    # CMSIS-Toolbox выбирает AC6 по versioned environment variable.
     if [ -z "${AC6_TOOLCHAIN_6_24_0:-}" ]; then
         export AC6_TOOLCHAIN_6_24_0="$(dirname "$(command -v armclang)")"
     fi
@@ -234,6 +236,10 @@ ensure_keil_environment() {
             exit 1
         }
     done
+    armclang --version 2>/dev/null | grep -q '6\.24' || {
+        echo "error: Arm Compiler 6.24.0 required" >&2
+        exit 1
+    }
 
     activate_arm_license
     echo "compiler: $(command -v armclang)"
