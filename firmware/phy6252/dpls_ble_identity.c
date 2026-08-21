@@ -5,6 +5,7 @@
 #include "flash.h"
 #include "gap.h"
 #include "hci.h"
+#include "ll_enc.h"
 #include "osal_snv.h"
 #include "peripheral.h"
 #include <string.h>
@@ -30,6 +31,12 @@
 #define DPLS_FACTORY_OFF_CSRK 40u
 #define DPLS_FACTORY_OFF_CRC 62u
 
+/* 1.3.x stored a public-style fallback MAC here when the chip address was not
+ * usable. Keep this read-only migration path so an already deployed board can
+ * boot a new image without first receiving a new factory sector. */
+#define DPLS_LEGACY_BLE_MAC_SNV_ID 0x82u
+#define DPLS_LEGACY_BLE_MAC_MAGIC 0x43414D44u /* "DMAC" */
+
 typedef struct {
     uint32_t serial_number;
     uint16_t hardware_revision;
@@ -39,6 +46,11 @@ typedef struct {
     uint8_t irk[KEYLEN];
     uint8_t csrk[KEYLEN];
 } dpls_factory_identity_t;
+
+typedef struct {
+    uint32_t magic;
+    uint8_t addr[B_ADDR_LEN];
+} dpls_legacy_ble_mac_record_t;
 
 /* PHY62XX SDK 3.1.2 defines this object in flash.c but omits the extern from
  * flash.h. Use the vendor decoder/state instead of depending on its raw format. */
@@ -128,6 +140,70 @@ static bool read_chip_factory_mac(uint8_t out[B_ADDR_LEN])
     return !mac_is_invalid(out);
 }
 
+static bool read_legacy_mac_snv(uint8_t out[B_ADDR_LEN])
+{
+    dpls_legacy_ble_mac_record_t record;
+    if (osal_snv_read(DPLS_LEGACY_BLE_MAC_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
+    if (record.magic != DPLS_LEGACY_BLE_MAC_MAGIC || mac_is_invalid(record.addr)) return false;
+    /* 1.3.x generated a public-style address by clearing the two high bits. */
+    if ((record.addr[0] & 0xC0u) == 0xC0u) return false;
+    memcpy(out, record.addr, B_ADDR_LEN);
+    return true;
+}
+
+static bool random_bytes(uint8_t *out, uint8_t length)
+{
+    return LL_ENC_GenerateTrueRandNum(out, length) == SUCCESS;
+}
+
+static bool read_key_snv(uint16_t snv_id, uint8_t out[KEYLEN])
+{
+    if (osal_snv_read(snv_id, KEYLEN, out) != SUCCESS) return false;
+    return !key_is_invalid(out);
+}
+
+static bool write_key_snv(uint16_t snv_id, const uint8_t key[KEYLEN])
+{
+    return osal_snv_write(snv_id, KEYLEN, (void *)key) == SUCCESS;
+}
+
+static bool ensure_legacy_identity_keys(uint8_t irk[KEYLEN], uint8_t csrk[KEYLEN])
+{
+    if (read_key_snv(BLE_NVID_IRK, irk) && read_key_snv(BLE_NVID_CSRK, csrk)) return true;
+    if (!random_bytes(irk, KEYLEN) || !random_bytes(csrk, KEYLEN)) return false;
+    if (!write_key_snv(BLE_NVID_IRK, irk) || !write_key_snv(BLE_NVID_CSRK, csrk)) return false;
+    return true;
+}
+
+static uint32_t legacy_device_id_from_mac(const uint8_t mac[B_ADDR_LEN])
+{
+    return (uint32_t)mac[0] | ((uint32_t)mac[1] << 8) |
+           ((uint32_t)mac[2] << 16) | ((uint32_t)mac[3] << 24);
+}
+
+static bool legacy_identity_load(dpls_factory_identity_t *out,
+                                 uint8_t mac[B_ADDR_LEN],
+                                 uint8_t *addr_type)
+{
+    uint32_t device_id;
+
+    /* Preserve the 1.3.x identity contract for development/upgrade boards.
+     * Prefer the immutable chip public address; use the old SNV fallback only
+     * when that chip address is unavailable. Never generate a new MAC here. */
+    if (!read_chip_factory_mac(mac) && !read_legacy_mac_snv(mac)) return false;
+    device_id = legacy_device_id_from_mac(mac);
+    if (device_id == 0u || device_id == 0xffffffffu) return false;
+    if (!ensure_legacy_identity_keys(out->irk, out->csrk)) return false;
+
+    out->serial_number = device_id;
+    out->hardware_revision = 0u;
+    out->flags = DPLS_FACTORY_FLAG_IRK | DPLS_FACTORY_FLAG_CSRK;
+    memcpy(out->ble_addr, mac, B_ADDR_LEN);
+    out->ble_addr_type = DPLS_FACTORY_BLE_ADDR_CHIP_PUBLIC;
+    *addr_type = ADDRTYPE_PUBLIC;
+    return true;
+}
+
 static void display_to_controller_addr(const uint8_t display[B_ADDR_LEN],
                                        uint8_t controller[B_ADDR_LEN])
 {
@@ -174,18 +250,23 @@ static bool select_identity_address(const dpls_factory_identity_t *factory,
 
 void dpls_ble_identity_prepare(void)
 {
-    dpls_factory_identity_t factory;
+    dpls_factory_identity_t identity;
     uint8_t mac[B_ADDR_LEN];
     uint8_t addr_type;
+    bool factory_loaded;
 
     s_identity_ready = false;
     s_identity_mac_valid = false;
     s_factory_provisioned = false;
     s_device_id = 0u;
 
-    memset(&factory, 0, sizeof(factory));
-    if (!factory_identity_load(&factory)) return;
-    if (!select_identity_address(&factory, mac, &addr_type)) return;
+    memset(&identity, 0, sizeof(identity));
+    factory_loaded = factory_identity_load(&identity);
+    if (factory_loaded) {
+        if (!select_identity_address(&identity, mac, &addr_type)) return;
+    } else if (!legacy_identity_load(&identity, mac, &addr_type)) {
+        return;
+    }
 
     /* Static-random address selection is a GAP initialization input. The PHY6252
      * role captures its local address during GAP_DeviceInit(), so configure it
@@ -194,11 +275,11 @@ void dpls_ble_identity_prepare(void)
 
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_addr_type = addr_type;
-    s_device_id = factory.serial_number;
-    s_factory_provisioned = true;
+    s_device_id = identity.serial_number;
+    s_factory_provisioned = factory_loaded;
     s_identity_mac_valid = true;
-    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, factory.irk);
-    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, factory.csrk);
+    (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, identity.irk);
+    (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, identity.csrk);
 }
 
 void dpls_ble_identity_on_stack_started(void)
@@ -234,8 +315,8 @@ void dpls_ble_identity_reset_bonding_keys(void)
 {
     uint8_t erased[KEYLEN];
     memset(erased, 0xFF, sizeof(erased));
-    /* Clear stack runtime/SNV copies only. Factory IRK/CSRK are restored from
-     * the mandatory factory record on the next boot. */
+    /* Clear stack runtime/SNV copies. Factory records restore their keys on the
+     * next boot; legacy boards generate replacements if no valid SNV keys remain. */
     (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
     (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
 }
