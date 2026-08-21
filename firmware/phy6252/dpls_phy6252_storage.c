@@ -44,10 +44,16 @@ static bool auth_locked;
 static bool auth_lock_dirty;
 static bool link_active;
 
-/* Весь журнал помещается в RAM: во время BLE нет ни flash read, ни flash write.
- * 200 × 12 = 2400 bytes. Это осознанная плата за детерминированность radio path. */
-static uint8_t journal_records[DPLS_EVENT_CAPACITY][DPLS_JOURNAL_RECORD_SIZE];
+/* Flash record содержит sequence и CRC, но в RAM они избыточны: sequence
+ * однозначно выводится из ring slot + max/count, CRC нужен только на границе
+ * persistence. Поэтому journal facts занимают 200 × 6 = 1200 bytes, а не 2400. */
+static uint32_t journal_timestamp[DPLS_EVENT_CAPACITY];
+static uint8_t journal_type[DPLS_EVENT_CAPACITY];
+static uint8_t journal_parameter[DPLS_EVENT_CAPACITY];
+static uint32_t journal_max_sequence;
+static uint16_t journal_count;
 static uint32_t journal_dirty_mask;
+static uint8_t journal_block_buffer[DPLS_JOURNAL_BLOCK_SIZE];
 
 #if DPLS_EVENT_CAPACITY != 200u
 #error "PHY6252 journal layout is defined for exactly 200 events"
@@ -108,50 +114,101 @@ static void journal_encode_record(uint8_t record[DPLS_JOURNAL_RECORD_SIZE],
     record[11] = (uint8_t)(crc >> 8);
 }
 
-static void load_journal(void)
+static bool journal_read_block(uint8_t block)
 {
-    uint8_t block;
-    memset(journal_records, 0, sizeof(journal_records));
-    journal_dirty_mask = 0u;
-
-    for (block = 0u; block < DPLS_JOURNAL_BLOCK_COUNT; ++block) {
-        uint8_t *dst = &journal_records[(uint16_t)block * DPLS_JOURNAL_EVENTS_PER_BLOCK][0];
-        (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block),
-                            (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, dst);
-        dpls_phy6252_supervisor_checkpoint();
-    }
+    uint8_t rc;
+    memset(journal_block_buffer, 0, sizeof(journal_block_buffer));
+    rc = osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block),
+                       (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE,
+                       journal_block_buffer);
+    dpls_phy6252_supervisor_checkpoint();
+    return rc == SUCCESS;
 }
 
-static uint32_t journal_latest_sequence(void)
+static uint32_t journal_scan_latest(void)
 {
     dpls_event_t event;
     uint32_t max_sequence = 0u;
-    uint16_t slot;
+    uint8_t block;
+    uint8_t record;
 
-    for (slot = 0u; slot < DPLS_EVENT_CAPACITY; ++slot) {
-        if (journal_decode_record(journal_records[slot], &event) &&
-            event.sequence > max_sequence)
-            max_sequence = event.sequence;
+    for (block = 0u; block < DPLS_JOURNAL_BLOCK_COUNT; ++block) {
+        if (!journal_read_block(block)) continue;
+        for (record = 0u; record < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record) {
+            if (journal_decode_record(journal_block_buffer +
+                                      (uint16_t)record * DPLS_JOURNAL_RECORD_SIZE,
+                                      &event) &&
+                event.sequence > max_sequence)
+                max_sequence = event.sequence;
+        }
     }
     return max_sequence;
 }
 
-static uint16_t journal_contiguous_count(uint32_t max_sequence)
+static uint16_t journal_load_contiguous(uint32_t max_sequence)
 {
     dpls_event_t event;
     uint16_t count = 0u;
+    uint8_t loaded_block = 0xffu;
 
     while (count < DPLS_EVENT_CAPACITY) {
         uint32_t expected = max_sequence - count;
         uint16_t slot;
+        uint8_t block;
+        uint8_t record;
+
         if (expected == 0u) break;
         slot = (uint16_t)((expected - 1u) % DPLS_EVENT_CAPACITY);
-        if (!journal_decode_record(journal_records[slot], &event) ||
+        block = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
+        record = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
+
+        if (block != loaded_block) {
+            if (!journal_read_block(block)) break;
+            loaded_block = block;
+        }
+        if (!journal_decode_record(journal_block_buffer +
+                                   (uint16_t)record * DPLS_JOURNAL_RECORD_SIZE,
+                                   &event) ||
             event.sequence != expected)
             break;
+
+        journal_timestamp[slot] = event.timestamp_seconds;
+        journal_type[slot] = event.event_type;
+        journal_parameter[slot] = event.parameter;
         ++count;
     }
     return count;
+}
+
+static void load_journal(void)
+{
+    uint32_t max_sequence;
+    memset(journal_timestamp, 0, sizeof(journal_timestamp));
+    memset(journal_type, 0, sizeof(journal_type));
+    memset(journal_parameter, 0, sizeof(journal_parameter));
+    journal_dirty_mask = 0u;
+    journal_max_sequence = 0u;
+    journal_count = 0u;
+
+    max_sequence = journal_scan_latest();
+    /* Sequence 0 зарезервирован. После полного uint32 wrap начинаем новый журнал. */
+    if (max_sequence == 0u || max_sequence == UINT32_MAX) return;
+
+    journal_count = journal_load_contiguous(max_sequence);
+    journal_max_sequence = max_sequence;
+}
+
+static bool journal_sequence_for_slot(uint16_t slot, uint32_t *sequence)
+{
+    uint16_t max_slot;
+    uint16_t age;
+    if (!sequence || journal_count == 0u || journal_max_sequence == 0u) return false;
+
+    max_slot = (uint16_t)((journal_max_sequence - 1u) % DPLS_EVENT_CAPACITY);
+    age = (uint16_t)((max_slot + DPLS_EVENT_CAPACITY - slot) % DPLS_EVENT_CAPACITY);
+    if (age >= journal_count || journal_max_sequence <= age) return false;
+    *sequence = journal_max_sequence - age;
+    return true;
 }
 
 static void load_settings(void)
@@ -241,12 +298,30 @@ static bool commit_one_journal_block(void)
     uint8_t block;
     for (block = 0u; block < DPLS_JOURNAL_BLOCK_COUNT; ++block) {
         uint32_t bit = (uint32_t)1u << block;
-        uint8_t *src;
+        uint8_t record;
         if ((journal_dirty_mask & bit) == 0u) continue;
-        src = &journal_records[(uint16_t)block * DPLS_JOURNAL_EVENTS_PER_BLOCK][0];
+
+        memset(journal_block_buffer, 0, sizeof(journal_block_buffer));
+        for (record = 0u; record < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record) {
+            uint16_t slot = (uint16_t)block * DPLS_JOURNAL_EVENTS_PER_BLOCK + record;
+            uint32_t sequence;
+            dpls_event_t event;
+            if (!journal_sequence_for_slot(slot, &sequence)) continue;
+
+            event.sequence = sequence;
+            event.timestamp_seconds = journal_timestamp[slot];
+            event.event_type = journal_type[slot];
+            event.parameter = journal_parameter[slot];
+            journal_encode_record(journal_block_buffer +
+                                  (uint16_t)record * DPLS_JOURNAL_RECORD_SIZE,
+                                  &event);
+        }
+
         if (snv_write_offline((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block),
-                              (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, src) != SUCCESS)
+                              (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE,
+                              journal_block_buffer) != SUCCESS)
             return false;
+
         journal_dirty_mask &= ~bit;
         return true;
     }
@@ -273,6 +348,8 @@ bool dpls_phy6252_storage_work_pending(void)
 
 bool dpls_phy6252_storage_disconnect_requested(void)
 {
+    /* Journal ждёт естественного disconnect. Только durable control state
+     * закрывает link, и runtime делает это исключительно после TX drain. */
     return link_active && (settings_dirty || auth_lock_dirty);
 }
 
@@ -382,43 +459,54 @@ bool dpls_phy6252_storage_auth_lock_write(void *context, bool locked)
 bool dpls_phy6252_storage_events_init(void *context, uint16_t *count,
                                       uint32_t *next_sequence)
 {
-    uint32_t max_sequence;
     (void)context;
     if (!count || !next_sequence) return false;
-
-    max_sequence = journal_latest_sequence();
-    if (max_sequence == 0u || max_sequence == UINT32_MAX) {
-        *count = 0u;
-        *next_sequence = 1u;
-        return true;
-    }
-    *count = journal_contiguous_count(max_sequence);
-    *next_sequence = max_sequence + 1u;
-    return true;
+    *count = journal_count;
+    *next_sequence = journal_max_sequence == 0u ? 1u : journal_max_sequence + 1u;
+    return *next_sequence != 0u;
 }
 
 bool dpls_phy6252_storage_event_append(void *context, const dpls_event_t *event)
 {
+    uint32_t expected;
     uint16_t slot;
     uint8_t block;
     (void)context;
-    if (!event || event->sequence == 0u) return false;
+    if (!event || event->sequence == 0u || event->event_type < 1u || event->event_type > 14u)
+        return false;
+
+    expected = journal_max_sequence == 0u ? 1u : journal_max_sequence + 1u;
+    if (expected == 0u || event->sequence != expected) return false;
 
     slot = (uint16_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY);
     block = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
-    journal_encode_record(journal_records[slot], event);
+    journal_timestamp[slot] = event->timestamp_seconds;
+    journal_type[slot] = event->event_type;
+    journal_parameter[slot] = event->parameter;
+    journal_max_sequence = event->sequence;
+    if (journal_count < DPLS_EVENT_CAPACITY) ++journal_count;
     journal_dirty_mask |= (uint32_t)1u << block;
     return true;
 }
 
 bool dpls_phy6252_storage_event_read(void *context, uint32_t sequence, dpls_event_t *event)
 {
+    uint32_t age;
     uint16_t slot;
     (void)context;
-    if (!event || sequence == 0u) return false;
+    if (!event || sequence == 0u || journal_count == 0u ||
+        sequence > journal_max_sequence)
+        return false;
+
+    age = journal_max_sequence - sequence;
+    if (age >= journal_count) return false;
     slot = (uint16_t)((sequence - 1u) % DPLS_EVENT_CAPACITY);
-    return journal_decode_record(journal_records[slot], event) &&
-           event->sequence == sequence;
+
+    event->sequence = sequence;
+    event->timestamp_seconds = journal_timestamp[slot];
+    event->event_type = journal_type[slot];
+    event->parameter = journal_parameter[slot];
+    return event->event_type >= 1u && event->event_type <= 14u;
 }
 
 void dpls_phy6252_storage_load_calibration(dpls_calib_t *line, dpls_calib_t *vcap,
