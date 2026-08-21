@@ -35,19 +35,19 @@ Production PHY62XX SDK не vendored: точная версия **3.1.2** зак
 
 ## BLE identity
 
-Boot path возвращён к аппаратно проверенной модели release 1.4.0:
+Текущая схема identity:
 
 1. firmware спрашивает заводской MAC PHY6252 через vendor `check_chip_mAddr()`;
 2. если заводского MAC нет, используется сохранённый SNV MAC;
 3. если и его нет, один раз генерируется MAC и сохраняется в SNV;
 4. IRK/CSRK аналогично живут в BLE SNV;
-5. public BD_ADDR задаётся через `HCI_EXT_SetBDADDRCmd()` **до** `GAPRole_StartDevice()`.
+5. public BD_ADDR задаётся через `HCI_EXT_SetBDADDRCmd()` до `GAPRole_StartDevice()`.
 
-Отдельного factory record в `0x1103F000` больше нет. Он не нужен для запуска BLE и не участвует в build/flash path.
+Отдельного factory record в `0x1103F000` нет. Он не нужен для запуска BLE и не участвует в build/flash path.
 
 Имя в эфире — `Test-DPLS-XXXX`, где `XXXX` берётся из identity MAC. Это discovery hint, не authoritative `NodeId`. Полный device identity подтверждается через `DEVICE_INFO_REPORT` после аутентификации.
 
-Если identity по какой-либо причине не подготовилась, это **не блокирует advertising**: плата остаётся видимой как `Test-DPLS-0000` вместо того, чтобы молча исчезнуть из эфира.
+Ошибка подготовки identity не блокирует advertising: плата остаётся видимой как `Test-DPLS-0000` вместо того, чтобы исчезнуть из эфира.
 
 ## Mobile architecture
 
@@ -87,8 +87,6 @@ Firmware гарантирует:
 
 ## Быстрые проверки
 
-Полный host-side набор:
-
 ```sh
 bash tools/check_all.sh
 ```
@@ -114,29 +112,9 @@ bash tools/dpls_lab.sh
 
 ### Production HEX / Firmverse
 
-Реальный GCC target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse):
-
-```yaml
-- uses: Pom4H/firmverse@v1
-  with:
-    firmware: tmp/test-dpls-firmverse.hex
-    board: pb03f-kit
-    strict: 'true'
-```
-
-Из Bolid удалены standalone `firmware/phy6252_emu`, `firmware/zmu`, `tools/zmu_*` и `third_party/phy6252-emu`. Быстрый продуктовый simulator остался только в `firmware/sim`. Детали: [docs/chip-emulator.md](docs/chip-emulator.md).
+Реальный GCC target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse). CI обязан подтвердить, что firmware не только исполняется, но и реально доходит до включения BLE advertising.
 
 ## Сборка firmware
-
-Host tests:
-
-```sh
-cmake -S firmware -B firmware/build
-cmake --build firmware/build
-ctest --test-dir firmware/build --output-on-failure
-```
-
-PHY6252 targets:
 
 ```sh
 tools/build_firmware.sh keil tmp/test-dpls.hex
@@ -145,13 +123,21 @@ tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 
 ## Прошивка платы
 
-Один application HEX, одна programmer operation:
+Обычная прошивка не требует Enter:
 
 ```sh
 tools/flash_firmware.sh tmp/test-dpls.hex
 ```
 
-Скрипт использует штатный PHY62x2 `wh`. Никакой `.factory.bin`, `--serial` или raw-записи `0x3F000` больше нет.
+Programmer сам посылает ROM handshake `UXTDWU` на 9600 бод и ждёт reset/входа в bootloader. Если control lines стенда не подключены, пользователь только удерживает KEY1 и делает reset/перезапуск питания — подтверждать это в терминале не нужно.
+
+Для стенда/агента с подключёнными RTS/DTR:
+
+```sh
+bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
+```
+
+Agent path полностью unattended: RTS/DTR используются для ROM-entry, затем идёт тот же `UXTDWU@9600` и обычный `wh`.
 
 Полный chip erase доступен явно:
 
@@ -162,8 +148,6 @@ tools/flash_firmware.sh tmp/test-dpls.hex --erase
 Он стирает SNV/bonds, поэтому после erase BLE identity и ключи будут созданы заново обычным boot path.
 
 ## Boot order PHY6252
-
-Boot-critical порядок намеренно простой:
 
 ```text
 power/reset
@@ -180,10 +164,10 @@ GAPROLE_STARTED
   ↓
 advertising ON
   ↓
-только потом idle/deferred flash work
+idle/deferred flash work
 ```
 
-Boot journal не имеет права задерживать GAP/advertising. Если после старта накопилась deferred flash work, она обслуживается отдельным idle OSAL turn без active BLE link.
+Boot journal не имеет права задерживать GAP/advertising. Deferred flash обслуживается без active BLE link.
 
 ## BLE/GATT
 
