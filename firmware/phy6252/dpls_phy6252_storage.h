@@ -3,12 +3,11 @@
 
 #include <stdbool.h>
 
-/* The target shell sees exactly one storage actor. It never knows whether work
- * came from settings/auth or journal persistence. */
+/* Target видит только единый flash facade и не знает, откуда пришла работа. */
 bool dpls_phy6252_flash_work_pending(void);
 bool dpls_phy6252_flash_disconnect_requested(void);
-/* Process at most one blocking flash unit while link is down. Returns true when
- * no flash work remains and advertising may be re-enabled. */
+/* Выполняет не больше одной blocking flash операции без активного BLE link.
+ * Возвращает true, когда очередь пуста и advertising можно включить снова. */
 bool dpls_phy6252_flash_process_one(void);
 
 #endif
