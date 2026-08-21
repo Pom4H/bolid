@@ -126,7 +126,7 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
 
     override fun sessionTrace(message: String) {
         android.util.Log.i(SESSION_TAG, message)
-        // Phone E2E and session_capture multiplex these tags from logcat.
+        // Phone E2E и session_capture читают эти теги из logcat.
         if (
             message.startsWith("E2E ") ||
             message.startsWith("LOG_") ||
@@ -155,8 +155,8 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
 }
 
 /**
- * Verifiers are authentication-equivalent secrets: possession is enough to build AUTH_PROOF.
- * Keep only AES-GCM ciphertext in SharedPreferences; the AES key itself never leaves Android Keystore.
+ * Verifier эквивалентен секрету аутентификации. В SharedPreferences хранится
+ * только AES-GCM ciphertext, а AES-ключ остаётся в Android Keystore.
  */
 private class AndroidVerifierStore(
     private val prefs: SharedPreferences,
@@ -164,7 +164,10 @@ private class AndroidVerifierStore(
     fun read(deviceKey: String): ByteArray? {
         val prefKey = DplsPlatformPrefs.verifierKey(deviceKey)
         val stored = prefs.getString(prefKey, null) ?: return null
-        if (!stored.startsWith(FORMAT_PREFIX)) return migrateLegacy(prefKey, deviceKey, stored)
+        if (!stored.startsWith(FORMAT_PREFIX)) {
+            prefs.edit { remove(prefKey) }
+            return null
+        }
 
         return runCatching {
             val parts = stored.removePrefix(FORMAT_PREFIX).split(':', limit = 2)
@@ -196,22 +199,6 @@ private class AndroidVerifierStore(
             "$FORMAT_PREFIX$iv:$body"
         }.getOrNull() ?: return
         prefs.edit { putString(prefKey, encoded) }
-    }
-
-    private fun migrateLegacy(prefKey: String, deviceKey: String, stored: String): ByteArray? {
-        val legacy = runCatching {
-            android.util.Base64.decode(stored, android.util.Base64.NO_WRAP)
-        }.getOrNull()
-        if (legacy == null || legacy.size != 32) {
-            prefs.edit { remove(prefKey) }
-            return null
-        }
-        write(deviceKey, legacy)
-        // Never retain the old unprotected form if Keystore migration failed.
-        if (prefs.getString(prefKey, null)?.startsWith(FORMAT_PREFIX) != true) {
-            prefs.edit { remove(prefKey) }
-        }
-        return legacy
     }
 
     private fun getOrCreateKey(): SecretKey {
