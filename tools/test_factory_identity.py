@@ -24,6 +24,7 @@ def assert_source_contract() -> None:
     scatter = (ROOT / "firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
     gcc_ld = (ROOT / "firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
     flash_factory = (ROOT / "tools/flash_factory_identity.sh").read_text(encoding="utf-8")
+    flash_firmware = (ROOT / "tools/flash_firmware.sh").read_text(encoding="utf-8")
     build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
     provision = (ROOT / "tools/provision_test_dpls.sh").read_text(encoding="utf-8")
     maker = (ROOT / "tools/make_factory_identity.py").read_text(encoding="utf-8")
@@ -50,20 +51,24 @@ def assert_source_contract() -> None:
     assert "s_device_id = factory.serial_number" in identity
     assert "s_factory_provisioned = true" in identity
 
-    # Build/provision boundary: personalization can be created once from a serial
-    # or reproduced from the saved factory BIN, and the resulting HEX contains
-    # application + factory sector in one programmer-safe image.
+    # Build/provision boundary: application image stays byte-for-byte in the
+    # programmer's `wh` domain. Factory identity is a 64-byte sidecar and is
+    # written separately through raw `we 0x3F000`. The two must never be merged.
     assert "--serial" in build
     assert "--factory-bin" in build
-    assert "--merge-app-hex" in build
-    assert "--flash-ready-output" in build
-    assert "identity: embedded factory sector" in build
-    assert "identity: application-only" in build
-    assert "merge_factory_into_hex" in maker
-    assert "record_type == 0x05" in maker
-    assert "--merge-app-hex" in provision
-    assert "--flash-ready-output" in provision
-    assert provision.count('"$ROOT/tools/flash_firmware.sh"') == 1
+    assert "output.factory.bin" in build
+    assert "Factory data is never appended here" in build
+    assert "--merge-app-hex" not in build
+    assert "--flash-ready-output" not in build
+    assert "merge_factory_into_hex" not in maker
+    assert "--merge-app-hex" not in provision
+    assert "--flash-ready-output" not in provision
+
+    assert 'APP_ARGS=(-p "$PORT" -r wh "$HEX")' in flash_firmware
+    assert 'run_programmer -p "$PORT" -r we "$FACTORY_OFFSET" "$FACTORY_BIN"' in flash_firmware
+    assert "FACTORY_OFFSET=0x3F000" in flash_firmware
+    assert "FACTORY_SIZE=64" in flash_firmware
+    assert "${HEX%.hex}.factory.bin" in flash_firmware
 
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
@@ -73,9 +78,11 @@ def assert_source_contract() -> None:
     assert "dpls_ble_identity_is_ready" in peripheral
     assert "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;" in peripheral
 
-    # Hardware-only boot invariants recovered during the SDK 3.1.2 migration.
+    # Hardware-proven 1.4.0 boot invariants must remain unchanged.
     assert "hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2)" in peripheral
     assert "hal_pwrmgr_RAM_retention_set()" in peripheral
+    assert "hal_pwrmgr_LowCurrentLdo_enable()" in peripheral
+    assert "hal_pwrmgr_register(MOD_USR1, NULL, NULL)" in peripheral
     assert "hal_fs_init(0x1103C000u, 3)" in peripheral
 
     # Static identity is configured before GAPRole_StartDevice().
@@ -121,8 +128,7 @@ def assert_source_contract() -> None:
     assert "0x1103C000" in gcc_ld
     assert "0x1103F000" in gcc_ld
 
-    # Standalone factory flashing still writes the raw 64-byte sector, never the
-    # generic application-header path.
+    # Standalone factory flashing remains a raw 64-byte sector write.
     assert "FACTORY_OFFSET=0x3F000" in flash_factory
     assert "FACTORY_SIZE=64" in flash_factory
     assert ' -r we "$FACTORY_OFFSET" "$BIN"' in flash_factory
@@ -152,37 +158,6 @@ def main() -> int:
     assert identity_hex.splitlines()[-1] == ":00000001FF"
     assert_hex_checksums(identity_hex)
 
-    # Simulate a compiler HEX containing a start-linear-address (type 05). The
-    # bundled programmer stops parsing at type 05, so the composer must remove
-    # it before appending the factory sector.
-    app_hex = "\n".join(
-        [
-            factory.hex_line(0, 0x04, bytes.fromhex("1100")),
-            factory.hex_line(0x0000, 0x00, b"\x01\x02\x03\x04"),
-            factory.hex_line(0, 0x05, struct.pack(">I", 0x1FFF1838)),
-            ":00000001FF",
-        ]
-    ) + "\n"
-    merged = factory.merge_factory_into_hex(app_hex, static_record)
-    assert_hex_checksums(merged)
-    assert not any(line[7:9] == "05" for line in merged.splitlines())
-    assert ":020000041103E6" in merged
-    assert merged.splitlines()[-1] == ":00000001FF"
-
-    overlap_hex = "\n".join(
-        [
-            factory.hex_line(0, 0x04, bytes.fromhex("1103")),
-            factory.hex_line(0xF000, 0x00, b"\x00"),
-            ":00000001FF",
-        ]
-    ) + "\n"
-    try:
-        factory.merge_factory_into_hex(overlap_hex, static_record)
-    except ValueError as exc:
-        assert "пересекает factory identity sector" in str(exc)
-    else:
-        raise AssertionError("factory-sector overlap was accepted")
-
     try:
         factory.make_record(43, 2, bytes.fromhex("023456789ABC"))
     except ValueError:
@@ -191,7 +166,7 @@ def main() -> int:
         raise AssertionError("non-static BLE address was accepted")
 
     assert_source_contract()
-    print("factory identity / flash-ready build boundary: OK")
+    print("factory identity / separate programmer boundary: OK")
     return 0
 
 
