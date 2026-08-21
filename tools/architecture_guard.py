@@ -11,6 +11,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
+CONNECTION_ACTOR = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt"
+CONNECTION_MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
+WIRE_ACTOR = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsWire.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
 ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
@@ -61,7 +64,14 @@ require_text(SESSION, "data class AuthSession", "authenticated wire material mus
 require_text(SESSION, "data class Synchronizing(", "authentication must not imply verified identity")
 require_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\s*,", "Online must require verified NodeId")
 forbid_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\?", "Online may not contain unknown identity")
-require_text(CLIENT, "private var session: DeviceSession", "controller must have one lifecycle owner")
+require_text(CLIENT, "private val connection = ConnectionActor()", "ConnectionActor must own product lifecycle")
+require_text(CLIENT, "get() = connection.state", "DplsClient may only project actor state")
+forbid_regex(CLIENT, r"private\s+var\s+session\s*:\s*DeviceSession", "mutable DeviceSession copy is forbidden")
+require_text(CLIENT, "connection.transitionTo(next)", "lifecycle transition bridge must pass through reducer")
+require_text(CONNECTION_ACTOR, "ConnectionMachine.reduce(state, event)", "actor must delegate every transition to pure reducer")
+require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must remain pure and explicit")
+require_text(WIRE_ACTOR, "private var pending: Pending? = null", "wire actor must own one outstanding transaction")
+require_text(WIRE_ACTOR, "if (!priority && !flush) return null", "ordinary product requests must be stop-and-wait")
 require_text(CLIENT, "private fun projectSession", "UI lifecycle must be projected")
 require_text(CLIENT, "phase = connectionPhase(ui)", "UI phase must derive from DeviceSession")
 for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "selectedAddress"):
@@ -107,6 +117,8 @@ require_regex(ANDROID_BLE, r"connectAttempts\s*=\s*0\s*\n\s*if\s*\(subscribed\)"
 forbid_text(ANDROID_BLE, "PAIRING_DISCONNECT_STATUSES", "pairing correctness may not depend on disconnect status whitelist")
 forbid_text(ANDROID_BLE, "POST_BOND_SETTLE_MS", "pairing may not depend on post-bond magic delay")
 forbid_text(ANDROID_BLE, "securityPendingWrite", "blocked frame must live inside SecurityState")
+forbid_text(ANDROID_BLE, "PAIRING_TIMEOUT_MS", "Android adapter may not own a second pairing deadline")
+require_text(ANDROID_BLE, "schedulePairingPoll()", "Android may poll bond state without owning product timeout")
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_AUTHENTICATION = 5", "GATT 5 must be pairing-required")
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_ENCRYPTION = 15", "GATT 15 must be pairing-required")
 require_regex(ANDROID_SECURITY, r"requiresPairing\s*\(status\)\s*->\s*WriteDisposition\.PAIRING_REQUIRED", "security errors must not fall through to retry")
@@ -154,7 +166,7 @@ require_regex(PHY_APP, r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX
 require_regex(PHY_APP, r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;", "one ATT PDU must be marked in-flight with a timestamp")
 require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must stay off 1 KiB OSAL stack")
 require_regex(PHY_APP_H, r"bool\s+dpls_phy6252_tx_idle\s*\(\s*void\s*\)\s*;", "target needs an explicit TX-drained predicate before flash disconnect")
-require_regex(PHY_TARGET, r"dpls_phy6252_snv_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "deferred flash disconnect must wait for TX drain")
+require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "storage actor disconnect must wait for TX drain")
 
 # Simulator/target ordering that previously caught real regressions.
 require_text(ROOT / "firmware/sim/dpls_sim_transport.c", "pace_ms = dpls_sim_transport_cccd_notify(transport)", "simulator must preserve ATT pacing")
