@@ -11,7 +11,7 @@
 #include "linkdb.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_app.h"
-#include "dpls_phy6252_snv_guard.h"
+#include "dpls_phy6252_storage.h"
 #include "dpls_server.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
@@ -65,15 +65,10 @@ static void apply_identity_to_adv(void)
     device_name[14] = '\0';
 }
 
-static bool flash_work_pending(void)
-{
-    return dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending();
-}
-
 static void disconnect_for_flash_if_ready(void)
 {
     if (dpls_phy6252_link_active() &&
-        dpls_phy6252_snv_disconnect_requested() &&
+        dpls_phy6252_flash_disconnect_requested() &&
         dpls_phy6252_tx_idle()) {
         (void)GAPRole_TerminateConnection();
     }
@@ -82,10 +77,8 @@ static void disconnect_for_flash_if_ready(void)
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
-    /* Flash safety is stronger than "no active handle": while deferred SNV is
-     * draining, advertising must remain off so the controller cannot accept a
-     * new central in the middle of a blocking erase/write. */
-    if (!dpls_ble_identity_is_ready() || flash_work_pending()) return false;
+    /* The storage actor owns the entire radio/flash exclusion window. */
+    if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
@@ -95,7 +88,9 @@ static bool enable_advertising_if_ready(void)
 
 static void schedule_storage_if_needed(void)
 {
-    if (flash_work_pending()) osal_set_event(app_task_id, DPLS_PHY6252_STORAGE_EVT);
+    if (dpls_phy6252_flash_work_pending()) {
+        osal_set_event(app_task_id, DPLS_PHY6252_STORAGE_EVT);
+    }
 }
 
 static void schedule_led_if_needed(void)
@@ -109,7 +104,7 @@ static void state_changed(gaprole_States_t state)
     switch (state) {
     case GAPROLE_STARTED:
         dpls_ble_identity_on_stack_started();
-        if (flash_work_pending()) {
+        if (dpls_phy6252_flash_work_pending()) {
             set_advertising_enabled(FALSE);
             schedule_storage_if_needed();
         } else {
@@ -129,7 +124,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         dpls_phy6252_disconnected();
         schedule_led_if_needed();
-        if (flash_work_pending()) {
+        if (dpls_phy6252_flash_work_pending()) {
             set_advertising_enabled(FALSE);
             schedule_storage_if_needed();
         } else {
@@ -248,15 +243,9 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     }
     if (events & DPLS_PHY6252_STORAGE_EVT) {
         if (dpls_phy6252_link_active()) return events ^ DPLS_PHY6252_STORAGE_EVT;
-        if (dpls_phy6252_snv_pending() && !dpls_phy6252_snv_flush_deferred()) {
-            set_advertising_enabled(FALSE);
+        set_advertising_enabled(FALSE);
+        if (!dpls_phy6252_flash_process_one()) {
             osal_start_timerEx(app_task_id, DPLS_PHY6252_STORAGE_EVT, DPLS_STORAGE_RETRY_MS);
-            return events ^ DPLS_PHY6252_STORAGE_EVT;
-        }
-        dpls_phy6252_process_storage();
-        if (flash_work_pending()) {
-            set_advertising_enabled(FALSE);
-            osal_set_event(app_task_id, DPLS_PHY6252_STORAGE_EVT);
         } else {
             (void)enable_advertising_if_ready();
         }
