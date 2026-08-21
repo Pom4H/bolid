@@ -138,7 +138,8 @@ ensure_macos_rosetta() {
     [ "$(uname -m)" = "arm64" ] || return 0
 
     # AC6 6.24 для macOS поставляется Arm как Intel/x86_64 binary.
-    if /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+    # oahd — системный Rosetta translation service.
+    if /usr/bin/pgrep oahd >/dev/null 2>&1; then
         return 0
     fi
 
