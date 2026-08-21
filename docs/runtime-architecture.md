@@ -1,6 +1,6 @@
-# Runtime-архитектура RC6: события → reducer → effects
+# Runtime-архитектура RC6: события → reducer → state
 
-Абстракция полезна здесь только если она убирает дублируемое mutable state, делает недопустимое состояние непредставимым или задаёт реальную границу, уже используемую продуктом.
+RC6 фиксирует один источник истины для соединения и отдельные владельцы safety/storage на PHY6252. Здесь нет второго lifecycle, скрытого в UI, transport или telemetry.
 
 ## Каноническая схема
 
@@ -22,7 +22,7 @@
                 │ Ready               │
                 │ Recovering          │
                 └──────────┬──────────┘
-                           │ protocol effects
+                           │ protocol
                            ▼
 
 ================================================== BLE
@@ -44,51 +44,49 @@
                       GPIO      FLASH WINDOW
 ```
 
-Это не схема «на будущее». В RC6 ей соответствуют реальные owners:
+Этой схеме соответствуют реальные production owners:
 
 - mobile mutable lifecycle owner — `ConnectionActor`;
-- переходы определяет чистый `ConnectionMachine.reduce(state, event)`;
-- значение lifecycle — `DeviceSession`;
-- PHY6252 app actor — единственный OSAL dispatcher `SimpleBLEPeripheral_ProcessEvent`;
+- legal state graph — чистый `ConnectionMachine.reduce(state, event)`;
+- lifecycle value — `DeviceSession`;
+- Android/iOS BLE adapters поставляют факты, но не владеют product lifecycle;
+- PHY app actor — `SimpleBLEPeripheral_ProcessEvent`;
 - dangerous-mode policy — `dpls_safety`;
 - radio/flash ordering — `dpls_storage_actor` через `dpls_phy6252_storage`;
-- GPIO и SNV/flash выполняют effects, но не принимают продуктовые решения.
+- GPIO и SNV/flash исполняют решения, но не принимают product/safety policy.
 
-Текущие имена типов сохраняют совместимость с RC5: `DeviceSession.Linked` соответствует фазе **Securing**, `DeviceSession.Online` — **Ready**. `Commissioning` — ветка `Authenticating` для первичной настройки, `Failed` — терминальное fail-closed состояние. Это не дополнительные владельцы lifecycle.
+Текущие имена типов сохраняют совместимость с RC5:
 
-## Зоны зависимостей
+- `DeviceSession.Linked` = **Securing**;
+- `DeviceSession.Online` = **Ready**;
+- `Commissioning` — ветка **Authenticating** для первичной настройки;
+- `Failed` — терминальное fail-closed состояние вне нормального happy-path графа.
 
-```text
-:wire      frame / CRC / crypto / radio-name helpers; без coroutines, UI и OS API
-   ↓
-:runtime   NodeId, BLE endpoint, DeviceSession, ConnectionMachine, frame sequencing
-   ↓
-:core      ConnectionActor, product orchestration, journal, platform adapters, UI
-```
+## Mobile lifecycle
 
-`core` может зависеть вниз. `wire` и `runtime` не должны зависеть от Compose, Android Bluetooth, CoreBluetooth или экранов приложения.
-
-## Mobile: один owner lifecycle
-
-`ConnectionActor.state` — единственное mutable lifecycle-состояние. `DplsClient` получает его только как read-only `session` projection и не хранит вторую mutable копию.
+`DplsClient` не пишет желаемое следующее состояние. Он преобразует callback/protocol milestone в `ConnectionEvent`:
 
 ```text
 BLE/platform fact
       ↓
 ConnectionEvent
       ↓
+ConnectionActor.dispatch(event)
+      ↓
 ConnectionMachine.reduce(oldState, event)
       ↓
-ConnectionTransition
-   ┌───────┴───────┐
- new DeviceSession effects
-                     ↓
-               protocol/link action
+new DeviceSession
+      ↓
+ConnectionActor.state
+      ↓
+DplsUiState projection
 ```
 
-Reducer является total function: тест проходит по матрице `state × event`. Невозможное или позднее событие не должно создавать новый допустимый lifecycle из воздуха; `Ready/Online` достигается только после `IdentityVerified` из `Synchronizing`.
+Reducer state-only: он не делает I/O и не возвращает декоративные effects, которые никто не исполняет. Реальный `transport.connect()`, protocol request и UI action остаются в product orchestration рядом с фактом, который их вызвал.
 
-### Lifecycle
+Единственный путь мутации lifecycle — `ConnectionActor.dispatch(ConnectionEvent)`. Compatibility bridge `transitionTo(nextState)` отсутствует.
+
+### Happy path
 
 ```text
 Offline
@@ -98,19 +96,43 @@ Connecting
 Discovering
   ↓ Subscribed
 Securing        = DeviceSession.Linked
-  ↓ AUTH_CHALLENGE
+  ↓ ChallengeReceived
 Authenticating  = Authenticating / Commissioning
-  ↓ AUTH_RESULT OK
+  ↓ Authenticated
 Synchronizing
-  ↓ STATE_REPORT + DEVICE_INFO_REPORT / IdentityVerified
+  ↓ IdentityVerified
 Ready           = DeviceSession.Online
 ```
 
-Потеря связи из восстановимого состояния переводит только в `Recovering`. Ошибка identity закрывается fail-closed. UI-поля `phase`, `authenticated`, `initialized`, `credentialsReady` — только projection и никогда не являются входом для lifecycle-решения.
+`Ready` невозможно получить только из факта успешной аутентификации: сначала обязательна проверка `DEVICE_INFO_REPORT` и стабильного `NodeId`.
+
+### Recovery
+
+Recovery определяется только `DeviceSession`, а не cached telemetry, UI phase или наличием ранее полученного `STATE_REPORT`.
+
+- link loss из `Authenticating/Synchronizing/Ready/Recovering` → `Recovering`;
+- radio loss во время активной connect/auth попытки → `Recovering`;
+- `Failed` не оживает от `BluetoothAvailable/BluetoothUnavailable`;
+- `Reset` из любого состояния → `Offline`;
+- operator disconnect диспатчит `Reset` **до** platform disconnect, поэтому синхронный callback не может случайно запустить reconnect.
+
+Safety reject команды (`REAL_SHORT`, low reserve и т.п.) не является ошибкой BLE connection. Mobile остаётся в `Ready`, завершает command operation и перечитывает `STATE`, чтобы показать фактический `NORMAL`.
+
+## UI не является истиной
+
+`DplsUiState.phase`, `authenticated`, `initialized`, `credentialsReady` — только projection из `DeviceSession`.
+
+Lifecycle-решение запрещено принимать по:
+
+- `state.phase`;
+- `state.authenticated`;
+- cached `state.state`;
+- `logLoadPending`;
+- старому BLE/display name.
+
+Telemetry может влиять на presentation и polling, но не решает, существует ли соединение и надо ли его восстанавливать.
 
 ## BLE security
-
-GATT security contract единый для Android и iOS:
 
 ```text
 connect
@@ -128,50 +150,36 @@ SMP pairing / encryption
 protocol auth
 ```
 
-RX остаётся encrypted boundary; CCCD намеренно доступен до encryption для совместимости с CoreBluetooth. Android GATT 5/15 — событие security transition, а не обычная ошибка write. Transport не владеет вторым pairing deadline: продуктовый connection deadline находится в `DplsClient`, firmware имеет только более длинный defensive plaintext deadline.
+RX — encrypted security boundary. CCCD намеренно доступен до encryption для Android/CoreBluetooth compatibility.
 
-Delayed mobile work дополнительно защищено identity:
+Android GATT 5/15 — security transition. Android/iOS transport владеют platform security mechanics, но не вторым product connection deadline и не product lifecycle.
+
+Delayed mobile work защищено identity:
 
 - protocol operation → `Frame.sequence` + `linkGeneration`;
 - reconnect/RSSI/session loop → `linkGeneration`;
 - scan → `scanGeneration`;
 - journal timeout → `logTimeoutGeneration`.
 
-## Identity
+## Protocol transaction ownership
 
-Identity прибора и маршрут подключения — разные факты.
+`DplsProtocol.Frame.sequence` — единственный transaction id. `DplsWire` допускает одну stop-and-wait product transaction одновременно.
 
-- `NodeId` — стабильный 32-битный `serial_number`, подтверждённый `DEVICE_INFO_REPORT`.
-- `LinkEndpoint.Ble` — текущий маршрут.
-- `Test-DPLS-XXXX` содержит только младшие 16 бит serial и не является identity.
-- `Ready/DeviceSession.Online` всегда содержит подтверждённый ненулевой `NodeId`.
+Не добавлять второй `commandId`, `awaitingFoo`, `fooPending` или generic broker без реальной потребности в параллельных protocol transactions.
 
-До первого `DEVICE_INFO_REPORT` verifier может временно храниться под `endpoint:<BLE endpoint>`, чтобы пережить reboot после первичной настройки. Канонический долговременный ключ — `node:<NodeId>`.
+## PHY6252 app actor
 
-## Protocol transaction identity
-
-`DplsProtocol.Frame.sequence` — единственный transaction id. Ответ или ошибка повторяет `sequence` запроса.
-
-Controller допускает одну transactional `Operation` одновременно. Не добавлять `commandId`, `awaitingFoo`, `fooPending` или generic request broker без реальной потребности в параллельных транзакциях.
-
-Таймаут проверяет одновременно physical-link generation и sequence операции. Отменённый coroutine, уже попавший в runnable queue, не может мутировать новую операцию.
-
-## PHY6252: один app actor
-
-PHY6252 уже имеет actor-модель на уровне OSAL: `SimpleBLEPeripheral_ProcessEvent` — единственное место, которое сериализует внешние события target runtime.
-
-Он принимает:
+`SimpleBLEPeripheral_ProcessEvent` сериализует target runtime events:
 
 - GAP connect/disconnect;
 - GATT confirmation;
-- RX;
-- TX;
+- RX/TX;
 - ADC completion;
 - tick;
 - storage event;
 - LED event.
 
-RX callback не выполняет domain work и не прокачивает TX. Он только ставит данные/событие; обработка идёт в OSAL turn. ATT timeout никогда не превращается в fake `TX_CONFIRMED`.
+RX callback не выполняет domain work и не прокачивает TX. ATT confirmation timeout закрывает физический link и никогда не подделывает `TX_CONFIRMED`.
 
 ## Safety reducer
 
@@ -180,24 +188,24 @@ RX callback не выполняет domain work и не прокачивает T
 - dangerous mode;
 - mode deadline;
 - revision;
-- приоритета forced return.
+- forced-return priority.
 
-Reducer не зависит от GAP/GATT/OSAL. Он получает safety inputs и возвращает решение. GPIO adapter только применяет effect.
+Safety reducer не зависит от GAP/GATT/OSAL. GPIO adapter только применяет решение.
 
-Ключевые fail-safe правила:
+Ключевые fail-safe переходы в `NORMAL`:
 
-- disconnect → `NORMAL`;
-- потеря валидных safety measurements в dangerous mode → `NORMAL`;
-- real short → `NORMAL`;
-- reserve low → `NORMAL`;
-- dangerous-mode deadline → `NORMAL`;
-- authenticated activity timeout → `NORMAL`.
+- disconnect;
+- потеря валидных safety measurements;
+- real short;
+- reserve low;
+- dangerous-mode deadline;
+- authenticated activity timeout.
 
-Если `apply_mode()` завершается ошибкой, физические выходы и logical safety state сходятся в `NORMAL`, не оставляя split-brain.
+Ошибка `apply_mode()` также сводит physical outputs и logical safety state к `NORMAL`, чтобы не было split-brain.
 
 ## Storage actor и flash window
 
-Flash нельзя считать безопасным только потому, что «сейчас нет handle». Storage actor владеет полным порядком:
+Storage actor владеет полным radio/flash порядком:
 
 ```text
 RADIO
@@ -207,52 +215,47 @@ DRAINING
 controlled disconnect
   ↓ LINK_DOWN
 FLASH
-  ↓ commit one bounded unit
+  ↓ bounded commit
 RADIO
   ↓
 advertising enabled
 ```
 
-Один staged SNV write хранит bytes; actor хранит phase. Target shell не знает, пришла запись из settings/auth или journal — он видит только `dpls_phy6252_storage` facade.
-
 Инварианты:
 
-- blocking SNV невозможен при active BLE link;
-- disconnect для flash разрешён только после `dpls_phy6252_tx_idle()`;
-- advertising выключен на время flash window;
+- blocking SNV запрещён при active BLE link;
+- disconnect для flash только после `dpls_phy6252_tx_idle()`;
+- advertising выключен на весь flash window;
 - один blocking flash unit за storage turn;
-- watchdog расширяется только вокруг физического SNV write и сразу возвращается к normal budget;
-- новый connect не может вклиниться между disconnect и commit.
+- watchdog расширяется только вокруг physical SNV write;
+- target shell видит один storage facade и не выбирает отдельно settings/auth/journal persistence policy.
 
-## Journal
+Firmware journal использует RAM write-behind и физически коммитится тем же storage path.
 
-`JournalMachine` на mobile владеет paging/index state и возвращает `Ack`, `Pause`, `Complete`, `Error` effects.
+## Identity
 
-Firmware journal использует RAM write-behind. Физический journal commit проходит только через storage event при link down. Журнал не создаёт альтернативного flash owner.
+`NodeId` и BLE route — разные факты.
 
-## Измерения
+- `NodeId` — подтверждённый 32-bit `serial_number`;
+- `LinkEndpoint.Ble` — текущий route;
+- `Test-DPLS-XXXX` содержит только младшие 16 бит serial и не является identity;
+- `Ready/Online` всегда содержит подтверждённый ненулевой `NodeId`.
 
-Validity кодируется значением на mobile:
+До первого `DEVICE_INFO_REPORT` verifier может временно храниться по endpoint, затем канонический ключ — `node:<NodeId>`.
 
-- `null` — достоверного измерения нет;
-- `0` — достоверный ноль вольт.
-
-Не добавлять пары `fooValue + fooValid` в product model. Firmware safety отдельно использует validity mask как доказательство пригодности измерений для опасного режима.
-
-## Правила для следующих изменений
+## Запрещённые архитектурные возвраты
 
 Изменение следует отклонить, если оно:
 
 - создаёт второй mutable owner lifecycle/auth;
-- обходит `ConnectionMachine` прямой записью lifecycle state;
-- делает `Ready/Online` возможным без identity proof;
+- добавляет прямой `transitionTo(nextState)` в обход semantic event;
+- делает `Ready` возможным без identity proof;
+- решает reconnect по UI/telemetry cache;
+- превращает safety command reject в connection failure;
 - добавляет второй transaction id;
-- принимает lifecycle-решение по UI projection;
-- добавляет delayed effect без sequence/generation identity;
 - позволяет GPIO принимать safety policy;
-- позволяет target shell напрямую выбирать SNV/journal flash policy;
-- выполняет blocking flash при active link или advertising;
-- считает timeout успешным подтверждением;
-- добавляет generic manager/repository/use-case только ради слоя.
+- позволяет PHY target напрямую выбирать SNV/journal flash policy;
+- выполняет blocking flash при active link/advertising;
+- считает timeout успешным ATT confirmation.
 
-`tools/architecture_guard.py` фиксирует эти ownership boundaries. Behavioral tests и production CI остаются основной проверкой корректности.
+`tools/architecture_guard.py`, reducer matrix tests, Soft-BLE E2E и production CI фиксируют эти границы.
