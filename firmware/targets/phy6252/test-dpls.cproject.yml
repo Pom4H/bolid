@@ -197,7 +197,6 @@ project:
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
         - file: ../../src/dpls_durable_settings.c
-        - file: ../../src/dpls_storage_actor.c
         - file: ../../phy6252/dpls_gatt_service.c
         - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_phy6252_snv_guard.c

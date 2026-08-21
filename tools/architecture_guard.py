@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Repository-specific architecture, ownership and safety invariants.
+"""Проверки архитектурных, ownership- и safety-инвариантов репозитория.
 
-Prefer semantic regexes for behavioral contracts. Exact string checks are kept
-only for constants / API declarations where formatting is part of the contract.
+Проверяем только правила, которые можно надёжно выразить по исходному коду.
+Поведенческие детали по-прежнему должны подтверждаться обычными тестами.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ PHY_APP = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 PHY_APP_H = ROOT / "firmware/phy6252/dpls_phy6252_app.h"
 PHY_TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 PHY_STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
-STORAGE_ACTOR = ROOT / "firmware/src/dpls_storage_actor.c"
+PHY_SNV = ROOT / "firmware/phy6252/dpls_phy6252_snv_guard.c"
 SAFETY = ROOT / "firmware/src/dpls_safety.c"
 SERVER = ROOT / "firmware/src/dpls_server.c"
 
@@ -59,7 +59,7 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
         fail(path, message)
 
 
-# Product lifecycle / transaction ownership.
+# Lifecycle продукта и идентичность транзакций.
 require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must define lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
@@ -107,7 +107,7 @@ require_regex(CLIENT, r"generation\s*==\s*linkGeneration\s*&&\s*operation\?\.seq
 for generation in ("linkGeneration", "scanGeneration", "logTimeoutGeneration"):
     require_text(CLIENT, generation, f"missing stale-work generation: {generation}")
 
-# Runtime and wire stay platform/UI free.
+# Runtime и wire не зависят от UI и платформенных BLE API.
 for path in (ROOT / "mobile/runtime/src/commonMain").rglob("*.kt"):
     for forbidden in ("android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
         if forbidden in source(path):
@@ -117,13 +117,13 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
         if forbidden in source(path):
             fail(path, f"wire dependency leak: {forbidden}")
 
-# Cross-platform BLE security contract.
+# Общий BLE security contract для Android и iOS.
 require_regex(GATT, r"dpls_rx_uuid\s*\}\s*,\s*GATT_PERMIT_WRITE\s*\|\s*GATT_PERMIT_ENCRYPT_WRITE", "RX must remain the encrypted security boundary")
 require_regex(GATT, r"clientCharCfgUUID\s*\}\s*,\s*GATT_PERMIT_READ\s*\|\s*GATT_PERMIT_WRITE", "CCCD must remain writable before encryption")
 require_text(GATT, "GATT_Notification", "Samsung notify path must remain available")
 require_text(ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt", "byteArrayOf(0x03, 0x00)", "Android CCCD must remain 0x03 for Samsung")
 
-# Android SMP has one explicit owner; GATT 5/15 is a security transition.
+# Android SMP имеет одного владельца состояния; GATT 5/15 — переход к pairing.
 require_text(ANDROID_BLE, "private sealed interface SecurityState", "Android SMP needs one state owner")
 require_text(ANDROID_BLE, "data class Pairing(", "Android SMP must represent Pairing explicitly")
 require_text(ANDROID_BLE, "data class Resuming(", "blocked RX frame needs explicit resume state")
@@ -139,7 +139,7 @@ require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_AUTHENTICATION = 5", "GATT 5 m
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_ENCRYPTION = 15", "GATT 15 must be pairing-required")
 require_regex(ANDROID_SECURITY, r"requiresPairing\s*\(status\)\s*->\s*WriteDisposition\.PAIRING_REQUIRED", "security errors must not fall through to retry")
 
-# iOS pairing is event/epoch based; no fixed human-vs-timer retry count.
+# iOS pairing опирается на события и epoch, а не на фиксированное число попыток.
 require_text(IOS_BLE, "private sealed interface SecurityState", "iOS SMP needs one state owner")
 require_regex(IOS_BLE, r"SecurityState\.Pairing\s*\(\s*blocked\.copyOf\(\)\s*\)", "iOS must preserve exact blocked RX frame")
 require_text(IOS_BLE, "private var securityEpoch = 0L", "delayed iOS security work needs epoch identity")
@@ -148,7 +148,7 @@ forbid_text(IOS_BLE, "PAIRING_WRITE_RETRIES", "iOS pairing may not fail after a 
 forbid_text(IOS_BLE, "pairingRetryCount", "iOS pairing may not use retry count as security truth")
 forbid_text(IOS_BLE, "looksLikeStaleBondError(error.localizedDescription)", "localized text may not decide bond validity")
 
-# Generic SMP failure terminates a link, never all persisted bonds.
+# Ошибка SMP закрывает link, но не стирает все сохранённые bonds.
 require_regex(PHY_TARGET, r"uint8\s+bond_fail\s*=\s*GAPBOND_FAIL_TERMINATE_LINK\s*;", "pairing failure must not erase bonds")
 forbid_text(PHY_TARGET, "GAPBOND_FAIL_TERMINATE_ERASE_BONDS", "generic SMP failure must not erase bonds")
 forbid_regex(PHY_TARGET, r"bond_pair_state_cb\s*\([^}]+GAPBondMgr_SetParameter", "pair callback must not mutate bond persistence")
@@ -157,22 +157,29 @@ forbid_text(PHY_APP, "DPLS_BOND_DESYNC", "application auth may not own BLE bond 
 forbid_text(PHY_APP, "note_pre_auth_disconnect", "DPLS auth disconnects may not erase BLE bonds")
 forbid_text(PHY_APP, "erase_bonds_and_drop_link", "plaintext timeout may not erase bonds")
 
-# PHY6252 app actor, safety reducer and storage actor.
+# PHY6252: один OSAL dispatcher, отдельная safety policy и простой flash facade.
 require_text(PHY_TARGET, "uint16 SimpleBLEPeripheral_ProcessEvent", "PHY target must expose one OSAL event dispatcher")
 require_text(SAFETY, "dpls_safety_required_return", "dangerous-mode policy must stay in safety reducer")
 for forbidden in ("GAPRole_", "osal_", "GATT_"):
     forbid_text(SAFETY, forbidden, f"safety reducer may not depend on transport/runtime API: {forbidden}")
 require_text(PHY_APP_H, "#define DPLS_PHY6252_STORAGE_EVT 0x1000", "storage needs a separate OSAL event")
-require_text(STORAGE_ACTOR, "dpls_storage_actor_reduce", "storage phase changes need one reducer")
-require_text(STORAGE_ACTOR, "DPLS_STORAGE_DRAINING", "storage actor must model radio drain")
-require_text(STORAGE_ACTOR, "DPLS_STORAGE_FLASH", "storage actor must model flash window")
 require_text(PHY_STORAGE, "dpls_phy6252_flash_work_pending", "PHY shell needs one storage facade")
+require_text(PHY_STORAGE, "dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending()", "flash pending must derive from real queues")
+require_text(PHY_STORAGE, "if (dpls_phy6252_link_active()) return false;", "physical flash work must refuse an active link")
+require_text(PHY_SNV, "return deferred.pending && dpls_phy6252_link_active();", "SNV disconnect request must derive from staged bytes and live link")
 require_text(PHY_APP, "static dpls_event_t journal_pending_events", "journal needs RAM write-behind")
 require_regex(PHY_APP, r"void\s+dpls_phy6252_process_storage\s*\([^)]*\)\s*\{[^}]*if\s*\(\s*dpls_phy6252_link_active\(\)\s*\|\|\s*journal_pending_event_count\s*==\s*0u\s*\)\s*return\s*;", "storage service must refuse an active BLE link")
 require_regex(PHY_APP, r"static\s+bool\s+journal_flush_one_block\s*\([^)]*\)\s*\{[^}]*connection_handle\s*!=\s*INVALID_CONNHANDLE[^}]*return\s+false\s*;", "physical journal commit needs a second active-link guard")
 require_text(PHY_TARGET, "if (events & DPLS_PHY6252_STORAGE_EVT)", "target must service deferred storage event")
-forbid_text(PHY_TARGET, "dpls_phy6252_snv_pending()", "target may not bypass storage actor")
-forbid_text(PHY_TARGET, "dpls_phy6252_storage_pending()", "target may not bypass storage actor")
+forbid_text(PHY_TARGET, "dpls_phy6252_snv_pending()", "target must use the storage facade")
+forbid_text(PHY_TARGET, "dpls_phy6252_storage_pending()", "target must use the storage facade")
+for legacy in (
+    ROOT / "firmware/include/dpls_storage_actor.h",
+    ROOT / "firmware/src/dpls_storage_actor.c",
+    ROOT / "firmware/tests/test_storage_actor.c",
+):
+    if legacy.exists():
+        fail(legacy, "legacy storage actor must not return")
 forbid_text(PHY_APP, "journal_flush_snv", "tick-time journal flash path must not return")
 forbid_text(PHY_APP, "journal_snv_dirty", "old dirty-page ownership is forbidden")
 forbid_text(PHY_APP, "journal_pending_block", "old single pending-page buffer is forbidden")
@@ -180,9 +187,7 @@ require_text(PHY_APP, "static uint8_t snv_write_bounded", "SNV writes need bound
 require_text(PHY_APP, "watchdog_config(WDG_8S)", "blocking SNV scope must widen watchdog")
 require_text(PHY_APP, "watchdog_config(WDG_2S)", "normal watchdog must be restored")
 
-# TX semantics. Notification pacing is timer-driven. Indications are completed
-# only by ATT CFM. A missing CFM must fail the physical link, never masquerade
-# as successful delivery by releasing the queue head locally.
+# TX: notify ограничен таймером, indication завершается только реальным ATT CFM.
 require_text(PHY_APP, "#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u", "indication needs a bounded confirmation timeout")
 require_text(PHY_TARGET, "#define DPLS_TICK_MS 1000u", "connected scheduler must check deadlines at <=1 s cadence")
 require_regex(PHY_APP, r"static\s+void\s+tick_tx\s*\([^)]*\)\s*\{[^}]*tx\.in_flight[^}]*dpls_gatt_needs_confirmation\s*\([^)]*\)[^}]*now\s*-\s*tx\.in_flight_since_ms[^}]*DPLS_TX_CONFIRM_TIMEOUT_MS[^}]*GAPRole_TerminateConnection\s*\(\s*\)", "indication timeout must terminate the unconfirmed link")
@@ -192,18 +197,16 @@ require_regex(PHY_APP, r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX
 require_regex(PHY_APP, r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;", "one ATT PDU must be marked in-flight with a timestamp")
 require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must stay off 1 KiB OSAL stack")
 require_regex(PHY_APP_H, r"bool\s+dpls_phy6252_tx_idle\s*\(\s*void\s*\)\s*;", "target needs an explicit TX-drained predicate before flash disconnect")
-require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "storage actor disconnect must wait for TX drain")
+require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "flash disconnect must wait for TX drain")
 
-# Simulator/target ordering that previously caught real regressions.
+# Симулятор сохраняет порядок turns, на котором уже ловились реальные регрессии.
 require_text(ROOT / "firmware/sim/dpls_sim_transport.c", "pace_ms = dpls_sim_transport_cccd_notify(transport)", "simulator must preserve ATT pacing")
 require_regex(ROOT / "firmware/sim/dpls_sim_board.c", r"phy6252_emu_tick\s*\([^;]+;\s*dpls_sim_board_process_tx\s*\(", "simulator timer/TX turns must remain separate")
 if (ROOT / "firmware/phy6252_emu").exists():
     fail(ROOT / "firmware/phy6252_emu", "standalone PHY6252 emulator is forbidden; production HEX belongs to Firmverse")
 
-# AUTH denial must be queued before audit append, so an audit failure cannot
-# hide the protocol result that triggered fail-safe. RX may only ask the target
-# shell whether a flash-mandated disconnect is now safe; it must never pump,
-# confirm, drop, or otherwise mutate the TX queue from the RX turn itself.
+# Ответ на неверный пароль должен попасть в TX раньше записи audit event.
+# RX turn может лишь проверить, пора ли безопасно закрыть link ради flash.
 require_regex(SERVER, r"send_auth_result\s*\(\s*s\s*,\s*f->sequence\s*,\s*DPLS_AUTH_DENIED\s*,\s*0\s*\)\s*;\s*\(void\)\s*dpls_server_log\s*\(\s*s\s*,\s*EVT_AUTH_FAILURE", "AUTH_RESULT must be queued before AUTH_FAILURE journal append")
 require_regex(PHY_TARGET, r"dpls_phy6252_process_rx\s*\(\s*\)\s*;\s*disconnect_for_flash_if_ready\s*\(\s*\)\s*;\s*schedule_led_if_needed\s*\(\s*\)\s*;\s*return\s+events\s*\^\s*DPLS_PHY6252_RX_EVT", "RX turn may only check connection quiescence after domain RX")
 forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]*dpls_phy6252_process_tx\s*\(", "RX turn must not pump TX")
@@ -211,7 +214,7 @@ forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]
 forbid_text(PHY_TARGET, "~DPLS_PHY6252_TX_EVT", "RX handler may not clear TX event")
 require_regex(PHY_TARGET, r"uint8\s+update_enabled\s*=\s*FALSE", "slave conn-param update must stay disabled")
 
-# Direct StateFlow replacement must visibly re-apply lifecycle projection.
+# Прямое присваивание StateFlow обязано повторно наложить lifecycle projection.
 for number, line in enumerate(source(CLIENT).splitlines(), start=1):
     stripped = line.strip()
     if "mutableState.value =" not in stripped:
@@ -234,5 +237,5 @@ print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
 print("  PHY app: one OSAL event dispatcher")
 print("  safety: dpls_safety reducer owns dangerous mode")
-print("  storage: actor owns radio -> drain -> flash window")
+print("  storage: real queues -> one flash facade, no actor state")
 print("  TX indication deadline != TX confirmation")
