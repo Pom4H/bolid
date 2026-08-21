@@ -44,8 +44,6 @@ require(TARGET, "dpls_phy6252_flash_disconnect_requested()")
 require(TARGET, "dpls_phy6252_flash_process_one()")
 require(TARGET, "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;")
 
-# The target is intentionally storage-agnostic. Re-introducing the SNV guard or
-# journal queue here would create a second owner of flash policy.
 target = text(TARGET)
 for forbidden in (
     "dpls_phy6252_snv_pending()",
@@ -56,32 +54,27 @@ for forbidden in (
     if forbidden in target:
         raise SystemExit(f"dplsBLEPeripheral.c: target bypasses storage actor with {forbidden!r}")
 
-# The macro guard must be visible before the vendor SNV header in the only
-# application TU that owns settings/auth/journal SNV calls.
 app = text(APP)
 if app.index('#include "dpls_phy6252_app.h"') > app.index('#include "osal_snv.h"'):
     raise SystemExit("dpls_phy6252_app.c: SNV guard header must precede osal_snv.h")
 
-# Identity is the only boot-time exception to the runtime storage actor. It may
-# restore/generate only BLE IRK/CSRK before GAPRole_StartDevice, plus erase those
-# same keys during an explicit bond reset. No settings/journal ID may leak here.
+# Identity has no migration/personalization logic. The only raw SNV writes are
+# the explicit bond-reset erases of runtime IRK/CSRK copies. Factory identity is
+# created by build/provision tooling, never synthesized inside firmware.
 identity = text(IDENTITY)
-if identity.count("osal_snv_write(") != 3:
-    raise SystemExit("dpls_ble_identity.c: unexpected raw SNV write surface")
-require(IDENTITY, "static bool write_key_snv(uint16_t snv_id")
-require(IDENTITY, "write_key_snv(BLE_NVID_IRK")
-require(IDENTITY, "write_key_snv(BLE_NVID_CSRK")
+if identity.count("osal_snv_write(") != 2:
+    raise SystemExit("dpls_ble_identity.c: expected exactly two raw IRK/CSRK reset writes")
 require(IDENTITY, "osal_snv_write(BLE_NVID_IRK")
 require(IDENTITY, "osal_snv_write(BLE_NVID_CSRK")
-require(IDENTITY, "ensure_legacy_identity_keys")
-
 for forbidden in (
-    "DPLS_SETTINGS_SNV",
-    "DPLS_AUTH_LOCK",
-    "DPLS_JOURNAL",
+    "DPLS_LEGACY_BLE_MAC",
+    "read_legacy_mac_snv",
+    "legacy_device_id_from_mac",
+    "LL_ENC_GenerateTrueRandNum",
+    "write_key_snv",
 ):
     if forbidden in identity:
-        raise SystemExit(f"dpls_ble_identity.c: boot identity must not write {forbidden}")
+        raise SystemExit(f"dpls_ble_identity.c: build-time identity logic leaked into runtime: {forbidden}")
 
 for path in (ROOT / "firmware/phy6252").glob("*.c"):
     if path in {APP, GUARD, IDENTITY}:
