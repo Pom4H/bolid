@@ -25,6 +25,7 @@ def assert_source_contract() -> None:
     gcc_ld = (ROOT / "firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
     flash_factory = (ROOT / "tools/flash_factory_identity.sh").read_text(encoding="utf-8")
     build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
+    provision = (ROOT / "tools/provision_test_dpls.sh").read_text(encoding="utf-8")
     maker = (ROOT / "tools/make_factory_identity.py").read_text(encoding="utf-8")
     mobile_ble = (ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt").read_text(encoding="utf-8")
     credentials = (ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsCredentials.kt").read_text(encoding="utf-8")
@@ -60,6 +61,9 @@ def assert_source_contract() -> None:
     assert "identity: application-only" in build
     assert "merge_factory_into_hex" in maker
     assert "record_type == 0x05" in maker
+    assert "--merge-app-hex" in provision
+    assert "--flash-ready-output" in provision
+    assert provision.count('"$ROOT/tools/flash_firmware.sh"') == 1
 
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
@@ -67,7 +71,7 @@ def assert_source_contract() -> None:
     assert "display_to_controller_addr" in identity
     assert "configure_static_identity_addr" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
-    assert "!link_up && !dpls_ble_identity_is_ready()" in peripheral
+    assert "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;" in peripheral
 
     # Hardware-only boot invariants recovered during the SDK 3.1.2 migration.
     assert "hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2)" in peripheral
