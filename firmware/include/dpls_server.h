@@ -46,14 +46,16 @@ typedef dpls_safety_mode_t dpls_mode_t;
 typedef enum { DPLS_POWER_LINE = 0, DPLS_POWER_RESERVE = 1 } dpls_power_t;
 
 enum {
-    DPLS_STATE_PORT_1_VALID         = 1u << 0,
-    DPLS_STATE_RESERVE_VOLTAGE_VALID = 1u << 1,
-    DPLS_STATE_POWER_VALID          = 1u << 2,
-    DPLS_STATE_AUTOISO_VALID        = 1u << 3,
-    DPLS_STATE_ADC_CALIBRATED       = 1u << 4,
-    DPLS_STATE_PORT_2_VALID         = 1u << 5,
-    DPLS_STATE_PORT_T_VALID         = 1u << 6,
+    DPLS_STATE_LINE_VOLTAGE_VALID = 1u << 0,
+    DPLS_STATE_RESERVE_VALID      = 1u << 1,
+    DPLS_STATE_POWER_VALID        = 1u << 2,
+    DPLS_STATE_AUTOISO_VALID      = 1u << 3,
+    DPLS_STATE_ADC_CALIBRATED     = 1u << 4,
+    DPLS_STATE_PORT_2_VALID       = 1u << 5,
+    DPLS_STATE_PORT_T_VALID       = 1u << 6,
 };
+#define DPLS_STATE_PORT_1_VALID DPLS_STATE_LINE_VOLTAGE_VALID
+#define DPLS_STATE_RESERVE_VOLTAGE_VALID DPLS_STATE_RESERVE_VALID
 
 typedef enum {
     DPLS_SETTINGS_EMPTY = 0,
@@ -97,6 +99,7 @@ typedef struct {
 typedef struct {
     bool (*apply_mode)(void *context, dpls_mode_t mode);
     void (*safe_normal)(void *context);
+    uint16_t (*voltage_mv)(void *context);
     uint16_t (*port1_voltage_mv)(void *context);
     uint16_t (*port2_voltage_mv)(void *context);
     uint16_t (*port_t_voltage_mv)(void *context);
