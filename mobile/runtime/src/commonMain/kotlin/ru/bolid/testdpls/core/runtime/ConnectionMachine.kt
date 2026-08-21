@@ -40,7 +40,6 @@ sealed interface ConnectionEffect {
     data object RequestState : ConnectionEffect
     data object AwaitSetupDisconnect : ConnectionEffect
     data object CloseLink : ConnectionEffect
-    data object None : ConnectionEffect
 }
 
 data class ConnectionTransition(
@@ -137,13 +136,12 @@ object ConnectionMachine {
         ConnectionEvent.SetupCommitted -> when (state) {
             is DeviceSession.Commissioning,
             is DeviceSession.Authenticating,
-            -> {
-                val endpoint = state.endpointOrNull ?: return unchanged(state)
+            -> state.endpointOrNull?.let { endpoint ->
                 ConnectionTransition(
                     DeviceSession.Recovering(state.nodeIdOrNull, endpoint),
                     listOf(ConnectionEffect.AwaitSetupDisconnect),
                 )
-            }
+            } ?: unchanged(state)
             else -> unchanged(state)
         }
 
