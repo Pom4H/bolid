@@ -65,13 +65,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var negotiatedMtu = 23
     private var securityState: SecurityState = SecurityState.Idle
     private var subscribed = false
-    private var servicesDiscovered = false
 
     private val writeQueue = ArrayDeque<ByteArray>()
-    private var writeInProgress = false
     private var pendingWrite: ByteArray? = null
     private var writeRetryCount = 0
-    private var pairingTimeout: Runnable? = null
     private var pairingPoll: Runnable? = null
     private var closingGatt: BluetoothGatt? = null
     private var closeTimeout: Runnable? = null
@@ -122,12 +119,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     -> {
                         suppressDisconnectEvent = true
                         securityState = SecurityState.Idle
-                        cancelPairingTimeout()
+                        cancelPairingWatch()
                         releaseGatt()
                         rx = null
                         tx = null
                         subscribed = false
-                        servicesDiscovered = false
                         resetWrites()
                         emit { onBluetoothUnavailable() }
                     }
@@ -214,7 +210,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         stopScan()
         handler.post {
             securityState = SecurityState.Idle
-            cancelPairingTimeout()
+            cancelPairingWatch()
             cancelReopen()
             connectAttempts = 0
             suppressDisconnectEvent = true
@@ -222,7 +218,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             rx = null
             tx = null
             subscribed = false
-            servicesDiscovered = false
             resetWrites()
             if (clearSelection) selectedAddress = null
         }
@@ -284,7 +279,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     }
                     BluetoothDevice.BOND_BONDING -> {
                         if (!pairing) securityState = SecurityState.Pairing(PairingTrigger.LINK)
-                        schedulePairingTimeout()
+                        watchPairing()
                     }
                     else -> beginGattNegotiation()
                 }
@@ -301,7 +296,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 rx = null
                 tx = null
                 subscribed = false
-                servicesDiscovered = false
                 resetWrites()
                 cancelCccdRetry()
                 if (closingGatt === current) {
@@ -317,14 +311,14 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     when (securityAtDisconnect) {
                         is SecurityState.Pairing -> if (bonded) handleBonded()
                         is SecurityState.Resuming -> {
-                            cancelPairingTimeout()
+                            cancelPairingWatch()
                             scheduleOpenGatt(REOPEN_DELAY_MS)
                         }
                     }
                     return
                 }
 
-                cancelPairingTimeout()
+                cancelPairingWatch()
                 if (suppressDisconnectEvent) {
                     suppressDisconnectEvent = false
                     return
@@ -352,7 +346,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (gatt !== this@AndroidBleTransport.gatt) return
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
             Log.i(TAG, "MTU changed mtu=$negotiatedMtu status=$status")
-            if (servicesDiscovered || subscribed) return
+            if (rx != null || subscribed) return
             if (!gatt.discoverServices()) retryLinkOrFail("Не удалось запустить поиск BLE-службы")
         }
 
@@ -371,7 +365,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 return
             }
             Log.i(TAG, "Services discovered")
-            servicesDiscovered = true
             if (!subscribed) writeCccd()
         }
 
@@ -439,7 +432,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     @SuppressLint("MissingPermission")
     private fun beginGattNegotiation() {
         val current = gatt ?: return
-        if (!pairing) cancelPairingTimeout()
+        if (!pairing) cancelPairingWatch()
         if (!current.requestMtu(PREFERRED_MTU)) {
             negotiatedMtu = 23
             if (!current.discoverServices()) retryLinkOrFail("Не удалось запустить поиск BLE-службы")
@@ -496,7 +489,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private fun failPairingNotConfirmed() {
         if (securityState is SecurityState.Failed) return
         securityState = SecurityState.Failed
-        cancelPairingTimeout()
+        cancelPairingWatch()
         cancelReopen()
         cancelCccdRetry()
         emit { onTransportError(PAIRING_NOT_CONFIRMED) }
@@ -511,7 +504,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             return
         }
         securityState = SecurityState.Pairing(trigger, blockedWrite?.copyOf())
-        schedulePairingTimeout()
+        watchPairing()
         when (current.device.bondState) {
             BluetoothDevice.BOND_BONDING -> Unit
             BluetoothDevice.BOND_NONE -> if (!current.device.createBond()) failPairingNotConfirmed()
@@ -519,7 +512,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 /* Protected RX still returning 5/15 with a pre-existing bond is
                  * a real phone/peripheral key mismatch, not a retry condition. */
                 securityState = SecurityState.Failed
-                cancelPairingTimeout()
+                cancelPairingWatch()
                 emit { onStaleBond() }
                 suppressDisconnectEvent = true
                 releaseGatt()
@@ -529,7 +522,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
 
     private fun handleBonded() {
         val state = securityState as? SecurityState.Pairing ?: return
-        cancelPairingTimeout()
+        cancelPairingWatch()
         securityState = state.blockedWrite?.let(SecurityState::Resuming) ?: SecurityState.Idle
         if (gatt == null) {
             scheduleOpenGatt(REOPEN_DELAY_MS)
@@ -544,7 +537,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     }
 
     private fun resumeSecurityWrite() {
-        if (writeInProgress || gatt == null || rx == null || !subscribed) return
+        if (pendingWrite != null || gatt == null || rx == null || !subscribed) return
         val state = securityState as? SecurityState.Resuming ?: return
         securityState = SecurityState.Idle
         writeQueue.addFirst(state.blockedWrite)
@@ -553,7 +546,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
 
     @SuppressLint("MissingPermission")
     private fun drainWriteQueue() {
-        if (writeInProgress || securityState is SecurityState.Pairing ||
+        if (pendingWrite != null || securityState is SecurityState.Pairing ||
             securityState is SecurityState.Resuming
         ) {
             return
@@ -561,7 +554,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         val current = gatt ?: return
         val characteristic = rx ?: return
         val bytes = writeQueue.removeFirstOrNull() ?: return
-        writeInProgress = true
         pendingWrite = bytes
         Log.i(TAG, "TX write bytes=${bytes.size} hex=${bytes.toHexUpper()}")
         val result = current.writeCharacteristic(
@@ -569,14 +561,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             bytes,
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
         )
-        if (result != BluetoothStatusCodes.SUCCESS) {
-            writeInProgress = false
-            completeWrite(result)
-        }
+        if (result != BluetoothStatusCodes.SUCCESS) completeWrite(result)
     }
 
     private fun completeWrite(status: Int) {
-        writeInProgress = false
         when (
             AndroidGattSecurityPolicy.classifyWrite(
                 status = status,
@@ -622,13 +610,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
 
     private fun resetWrites() {
         writeQueue.clear()
-        writeInProgress = false
         pendingWrite = null
         writeRetryCount = 0
     }
 
-    private fun schedulePairingTimeout() {
-        cancelPairingTimeout()
+    private fun watchPairing() {
+        cancelPairingWatch()
         pairingPoll = object : Runnable {
             @SuppressLint("MissingPermission")
             override fun run() {
@@ -637,16 +624,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 else handler.postDelayed(this, PAIRING_POLL_MS)
             }
         }.also { handler.postDelayed(it, PAIRING_POLL_MS) }
-        pairingTimeout = Runnable {
-            if (!pairing) return@Runnable
-            Log.i(TAG, "pairing timeout state=$securityState")
-            failPairingNotConfirmed()
-        }.also { handler.postDelayed(it, PAIRING_TIMEOUT_MS) }
     }
 
-    private fun cancelPairingTimeout() {
-        pairingTimeout?.let(handler::removeCallbacks)
-        pairingTimeout = null
+    private fun cancelPairingWatch() {
         pairingPoll?.let(handler::removeCallbacks)
         pairingPoll = null
     }
@@ -656,10 +636,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         selectedAddress = address
         securityState = SecurityState.Idle
         subscribed = false
-        servicesDiscovered = false
         negotiatedMtu = 23
         resetWrites()
-        cancelPairingTimeout()
+        cancelPairingWatch()
         cancelReopen()
         suppressDisconnectEvent = true
         cccdRetryCount = 0
@@ -700,7 +679,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         }
         connectAttempts++
         cccdRetryCount = 0
-        servicesDiscovered = false
         subscribed = false
         rx = null
         tx = null
@@ -769,7 +747,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private const val TAG = "TestDplsBle"
         private const val PREFERRED_MTU = DplsBle.PREFERRED_MTU
         private const val ATT_HEADER_BYTES = DplsBle.ATT_HEADER_BYTES
-        private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val PAIRING_POLL_MS = 250L
         private const val MAX_WRITE_RETRIES = 3
         private const val WRITE_RETRY_BASE_MS = 150L
