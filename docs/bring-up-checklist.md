@@ -5,10 +5,10 @@
 Source of truth:
 
 - pin mapping — `firmware/phy6252/dpls_board.h`;
+- BLE startup/identity — `firmware/targets/phy6252/source/dplsBLEPeripheral.c`, `firmware/phy6252/dpls_ble_identity.c`;
 - ADC/power/reserve/auto-isolation — `firmware/phy6252/dpls_phy6252_app.c`;
 - calibration — `firmware/src/dpls_calib.c`;
-- LED — `firmware/src/dpls_led.c`;
-- production identity — [factory-identity.md](factory-identity.md).
+- LED — `firmware/src/dpls_led.c`.
 
 ## 0. Подготовка
 
@@ -29,28 +29,19 @@ tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex
 ```
 
-Для новой платы **до BLE-теста обязателен provisioning**:
+Прошивка новой или существующей платы одинаковая:
 
 ```sh
-python3 tools/make_factory_identity.py \
-  --serial 12874 \
-  --hw-revision 2 \
-  --binary-output tmp/factory-00012874.bin \
-  --metadata tmp/factory-00012874.json
-
 tools/flash_firmware.sh tmp/test-dpls.hex
-tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-Обычная перепрошивка не использует `--erase` и сохраняет SNV/factory identity.
-
-Полный erase разрешён только намеренно:
+Никакого factory sidecar/provisioning шага нет. Полный erase при необходимости:
 
 ```sh
-DPLS_ALLOW_FACTORY_ERASE=1 tools/flash_firmware.sh tmp/test-dpls.hex --erase
+tools/flash_firmware.sh tmp/test-dpls.hex --erase
 ```
 
-После него factory record уничтожен, поэтому provisioning надо повторить до любого BLE acceptance.
+После erase SNV MAC/IRK/CSRK/bonds/settings будут восстановлены обычными runtime путями.
 
 UART/session capture:
 
@@ -60,18 +51,44 @@ python3 tools/session_capture/record_session.py --name bringup
 python3 tools/session_capture/parse_session.py tmp/sessions/session-*-bringup.log
 ```
 
-## 1. Factory identity и BLE startup
+## 1. Boot и BLE startup
 
-- [ ] Без factory record плата не начинает advertising.
-- [ ] При корректном record виден Service UUID `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`.
-- [ ] Radio name = `Test-DPLS-XXXX`, где `XXXX` совпадает с младшими 16 бит provisioned serial.
-- [ ] В эфире нет Manufacturer Specific Data `0x0B01`.
-- [ ] После подключения `DEVICE_INFO_REPORT.device_id` равен полному 32-битному serial.
+Главный acceptance этого RC:
+
+- [ ] После application-only `wh` и полного power-cycle плата появляется в scan без дополнительных записей flash.
+- [ ] Виден Service UUID `7b5f1000-5d7a-4d2f-9a4c-14b7d5f00001`.
+- [ ] Radio name = `Test-DPLS-XXXX`; если identity не подготовилась, допустим диагностический `Test-DPLS-0000`, но плата не должна исчезать из эфира.
+- [ ] BLE address не нулевой и не `FF:FF:FF:FF:FF:FF` в нормальном identity path.
+- [ ] BLE address сохраняется после reboot и обычной перепрошивки.
+- [ ] После chip erase создаётся новая SNV identity без отдельного provisioning.
+- [ ] Boot journal/deferred flash не задерживает первый advertising.
+- [ ] Через несколько секунд idle flash flush не ломает advertising и последующее подключение.
+- [ ] В эфире нет Manufacturer Specific Data старого контракта.
 - [ ] `DEVICE_INFO_REPORT` показывает firmware `1.4.2`, hardware revision и сохранённое пользовательское имя.
-- [ ] BLE address не нулевой и не `FF:FF:FF:FF:FF:FF`.
-- [ ] Address/serial не меняются после reboot и обычной перепрошивки.
-- [ ] Factory reset не меняет serial, BLE identity и factory IRK/CSRK.
-- [ ] Pairing запускается через protected GATT/CCCD и работает без manufacturer marker.
+
+### Boot order
+
+Проверяем именно такой порядок:
+
+```text
+power/reset
+  ↓
+RAM retention + SNV mount
+  ↓
+identity prepare
+  ↓
+DPLS init
+  ↓
+GAPRole_StartDevice
+  ↓
+GAPROLE_STARTED
+  ↓
+advertising
+  ↓
+idle/deferred flash
+```
+
+Flash до первого advertising — regression.
 
 ## 2. Силовые выходы
 
@@ -120,7 +137,7 @@ Revision 2:
 - [ ] 27–30 В не насыщают измерительный тракт.
 - [ ] Выполнена двухточечная calibration.
 - [ ] Calibration записана в SNV `0x83` и читается обратно с валидной CRC.
-- [ ] SNV `0x82` не используется для BLE identity.
+- [ ] SNV `0x82` используется только как fallback BLE MAC.
 - [ ] В 5–27 В ошибка каждого канала ≤±0,1 В, UI resolution не хуже 0,1 В.
 - [ ] `null`/invalid measurement не маскируется под достоверный 0 В.
 
@@ -149,7 +166,7 @@ Revision 2:
 - [ ] P34↔GND ≥5 с очищает пользовательское имя/пароль/bonds и возвращает commissioning state.
 - [ ] P24 не используется как reset: это ADC +Т.
 - [ ] Удалённого factory reset по BLE нет.
-- [ ] `serial_number`, BLE address и factory IRK/CSRK после reset неизменны.
+- [ ] BLE identity после reset остаётся валидной/восстанавливается из SNV/vendor MAC.
 - [ ] Calibration не должна случайно исчезать при обычной эксплуатации; её lifecycle проверяется отдельно от user settings.
 
 ## 8. BLE round-trip
@@ -159,7 +176,7 @@ Revision 2:
 - [ ] Safety return работает по timeout, disconnect и low reserve.
 - [ ] После пяти неверных application passwords действует lock 300 с.
 - [ ] Protected GATT operation без encryption отвергается.
-- [ ] После auth `DEVICE_INFO_REPORT` является единственным источником полного NodeId и данных «Об устройстве».
+- [ ] После auth `DEVICE_INFO_REPORT` является authoritative источником identity текущей сессии и данных «Об устройстве».
 
 ## 9. E2E на живом железе
 
@@ -172,12 +189,13 @@ python3 tools/e2e/journal_reboot_check.py
 - [ ] Полный phone+board E2E проходит.
 - [ ] Journal переживает reboot и обычную перепрошивку.
 - [ ] Ring journal корректно ротируется на проектной ёмкости.
-- [ ] Serial выше `0xFFFF` не конфликтует с 16-битным radio-name suffix: после `DEVICE_INFO` приложение использует полный NodeId.
+- [ ] Reconnect после deferred flash flush проходит без ручного сброса bonds.
 
 ## 10. Финальная приёмка
 
 - [ ] Host tests/lint/coverage проходят.
-- [ ] Keil и GCC target помещаются до `0x1103C000`.
-- [ ] Factory provisioning `we 0x3F000` не изменяет application header и SNV.
+- [ ] Keil и GCC production HEX фактически не содержат data records в `0x1103C000..0x1103FFFF`.
+- [ ] Keil и GCC/Firmverse проходят на одном application-only artifact contract.
+- [ ] Реальная PB-03F стартует и рекламируется после обычного `wh` без factory sidecar.
 - [ ] Сценарии ТЗ раздела 5 пройдены на стенде С2000-КДЛ.
 - [ ] Финальные calibration coefficients и thresholds зафиксированы в эксплуатационной/испытательной документации.
