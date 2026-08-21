@@ -11,7 +11,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
-CONNECTION_ACTOR = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt"
 CONNECTION_MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
@@ -61,21 +60,26 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
         fail(path, message)
 
 
-# Lifecycle продукта: одно значение DeviceSession и один путь его мутации.
+# Lifecycle продукта: один DeviceSession, один reducer, один путь записи.
 require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must define lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
+require_text(SESSION, "data class Securing(", "challenge state must be represented once")
 require_text(SESSION, "data class Synchronizing(", "authentication must not imply verified identity")
+for old_state in ("data class Commissioning(", "data class Authenticating("):
+    forbid_text(SESSION, old_state, f"duplicated lifecycle state is forbidden: {old_state}")
 require_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\s*,", "Online must require verified NodeId")
 forbid_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\?", "Online may not contain unknown identity")
-require_text(CLIENT, "private val connection = ConnectionActor()", "ConnectionActor must own product lifecycle")
-require_text(CLIENT, "get() = connection.state", "DplsClient may only read lifecycle through ConnectionActor")
-forbid_regex(CLIENT, r"private\s+var\s+session\s*:\s*DeviceSession", "second mutable DeviceSession owner is forbidden")
-require_text(CLIENT, "connection.dispatch(event)", "DplsClient lifecycle mutations must dispatch semantic events")
-require_text(CONNECTION_ACTOR, "ConnectionMachine.reduce(state, event)", "ConnectionActor must delegate transitions to reducer")
+require_text(CLIENT, "private var session: DeviceSession = DeviceSession.Offline", "DplsClient must own the single mutable lifecycle value")
+require_text(CLIENT, "session = ConnectionMachine.reduce(session, event)", "all lifecycle writes must pass through ConnectionMachine")
+forbid_regex(CLIENT, r"^\s*session\s*=\s*(?!ConnectionMachine\.reduce\()", "direct DeviceSession assignment outside reducer is forbidden")
 require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must stay explicit and pure")
-for path in (CLIENT, CONNECTION_ACTOR):
-    forbid_text(path, "transitionTo(", "direct desired-state compatibility bridge is forbidden")
+forbid_text(CLIENT, "ConnectionActor", "ConnectionActor wrapper must not return")
+legacy_actor = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt"
+if legacy_actor.exists():
+    fail(legacy_actor, "ConnectionActor wrapper must not return")
+for old_event in ("SetupCommitted", "BluetoothAvailable", "AttemptTimedOut", "sendHello"):
+    forbid_text(CONNECTION_MACHINE, old_event, f"redundant lifecycle event/field is forbidden: {old_event}")
 for event_name in (
     "ConnectRequested",
     "LinkConnected",
@@ -85,11 +89,11 @@ for event_name in (
     "IdentityVerified",
     "LinkLost",
     "BluetoothUnavailable",
-    "BluetoothAvailable",
     "Failed",
     "Reset",
 ):
     require_text(CLIENT, f"ConnectionEvent.{event_name}", f"missing semantic connection event: {event_name}")
+require_text(CLIENT, "private fun scheduleReconnect(): Boolean", "reconnect side effect must not own a second transition API")
 require_text(CLIENT, "private fun projectSession", "UI lifecycle must be projected")
 require_text(CLIENT, "phase = connectionPhase(ui)", "UI phase must derive from DeviceSession")
 for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "selectedAddress"):
@@ -238,7 +242,7 @@ if violations:
     raise SystemExit(1)
 
 print("Architecture guard: OK")
-print("  mobile lifecycle: BLE driver -> ConnectionActor -> ConnectionMachine -> DeviceSession")
+print("  mobile lifecycle: BLE callbacks -> DplsClient.dispatch -> ConnectionMachine -> DeviceSession")
 print("  protocol: v2 only, Frame.sequence is the only transaction id")
 print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
