@@ -1,6 +1,6 @@
 # Runtime-архитектура RC7
 
-RC7 упрощает ownership: состояние хранится там, где уже существует реальный факт. Не создаём второй state только ради красивой абстракции.
+RC7 хранит состояние там, где существует реальный факт. Не создаём второй state ради абстракции.
 
 ## Общая схема
 
@@ -9,9 +9,9 @@ RC7 упрощает ownership: состояние хранится там, гд
   ↓ BLE callbacks
 Android / iOS transport
   ↓ ConnectionEvent
-ConnectionActor
-  ↓ pure reduce(oldState, event)
-ConnectionMachine
+DplsClient.dispatchConnection()
+  ↓
+ConnectionMachine.reduce(oldState, event)
   ↓
 DeviceSession
   ↓ projection
@@ -24,16 +24,16 @@ PHY6252 OSAL event loop
   ├─ TX → GATT
   ├─ ADC
   ├─ LED
-  └─ STORAGE
-        ↓
-      реальные очереди RAM
-        ↓ только без active link
-      SNV / flash
+  └─ STORAGE → RAM queues → SNV/flash только без active link
 ```
 
 ## Mobile: один lifecycle
 
-`DeviceSession` — единственное значение, описывающее состояние соединения и application-authentication.
+`DplsClient.session: DeviceSession` — единственное mutable lifecycle-значение. Записывать его можно только так:
+
+```kotlin
+session = ConnectionMachine.reduce(session, event)
+```
 
 Нормальный путь:
 
@@ -46,18 +46,20 @@ Discovering
   ↓ Subscribed
 Linked
   ↓ ChallengeReceived
-Authenticating / Commissioning
+Securing
   ↓ Authenticated
 Synchronizing
   ↓ IdentityVerified
 Online
 ```
 
+`Securing.challenge.initialized` уже говорит, нужна первичная настройка или обычная аутентификация. Поэтому отдельные `Commissioning` и `Authenticating` удалены.
+
 `Online` всегда содержит подтверждённый `NodeId`. Успешная аутентификация сама по себе ещё не переводит устройство в `Online`.
 
-`DplsClient` не хранит отдельные `sessionId`, `token`, `authenticated` или другой второй lifecycle. UI-поля `phase`, `authenticated`, `initialized` и `credentialsReady` — только проекция `DeviceSession`.
+UI-поля `phase`, `authenticated`, `initialized` и `credentialsReady` — только проекция `DeviceSession`.
 
-Поздняя асинхронная работа дополнительно защищена:
+Поздняя работа защищена identity своей попытки:
 
 - protocol response — `Frame.sequence`;
 - operation timeout — `sequence + linkGeneration`;
@@ -67,45 +69,31 @@ Online
 
 ## Protocol
 
-Protocol v2 имеет один transaction id — `Frame.sequence`.
-
-```text
-request #42
-   ↓
-firmware
-   ↓
-response #42
-```
-
-Не добавлять второй `commandId` или отдельные correlation-id для того же запроса.
+Protocol v2 имеет один transaction id — `Frame.sequence`. Старые `commandId` и v1 layouts удалены.
 
 ## Firmware safety
 
-`dpls_safety` единолично владеет опасным режимом, его deadline и причинами forced return.
+`dpls_safety` единолично владеет опасным режимом, deadline и forced return.
 
-Приложение может попросить режим, но только firmware решает, может ли он оставаться включённым.
-
-Обязательные возвраты в `NORMAL`:
+Возврат в `NORMAL` обязателен при:
 
 - disconnect;
-- отсутствие authenticated activity;
+- отсутствии authenticated activity;
 - timeout режима;
 - low reserve;
 - real short;
-- ошибка применения силового режима.
+- ошибке применения силового режима.
 
 Переключение выходов остаётся break-before-make.
 
 ## Firmware storage: без второго state machine
 
-В RC6 существовал отдельный `dpls_storage_actor` со своими `pending`, `link_active` и `phase`. Эти значения дублировали реальные факты и удалены в RC7.
-
-Теперь истина простая:
+Истина берётся из реальных очередей:
 
 ```text
-есть staged SNV?        → dpls_phy6252_snv_pending()
-есть journal writeback? → dpls_phy6252_storage_pending()
-есть BLE link?          → dpls_phy6252_link_active()
+staged SNV?        → dpls_phy6252_snv_pending()
+journal writeback? → dpls_phy6252_storage_pending()
+BLE link?          → dpls_phy6252_link_active()
 ```
 
 `dpls_phy6252_storage.c` только объединяет эти факты:
@@ -114,50 +102,46 @@ response #42
 flash_work_pending = SNV pending || journal pending
 ```
 
-Правило записи:
+Порядок записи:
 
 ```text
 active BLE link
     ↓
-ждём TX idle
+TX idle
     ↓
 disconnect
     ↓
 advertising off
     ↓
-ровно одна flash operation за OSAL turn
+одна flash operation за OSAL turn
     ↓
-если работа осталась — следующий STORAGE event
-если закончилась — advertising on
+ещё есть работа? → следующий STORAGE event
+нет работы?      → advertising on
 ```
 
-SNV во время активного link хранит в RAM одну staged-транзакцию. Это намеренное ограничение RAM PHY6252. Повторная запись того же record обновляет staged-значение; второй record до flush отклоняется.
-
-Journal использует RAM write-behind и физически записывает flash только без активного BLE link.
+SNV во время active link держит одну staged-транзакцию в RAM. Повторная запись того же record обновляет её; другой record до flush отклоняется.
 
 ## PHY6252 workaround'ы, которые не являются legacy
 
-Не удалять ради «чистоты» подтверждённые ограничения платформы:
+Не удалять подтверждённые ограничения платформы:
 
-- RX, TX, ADC и flash работают отдельными OSAL turns;
+- RX, TX, ADC и flash выполняются отдельными OSAL turns;
 - HMAC state не кладётся на 1 KiB OSAL stack;
 - ADC channels запускаются последовательно;
-- один ATT PDU находится in-flight;
-- indication считается завершённым только после ATT confirmation;
+- одновременно in-flight только один ATT PDU;
+- indication завершается только после ATT confirmation;
 - Samsung notify path сохраняется;
-- blocking SNV временно расширяет watchdog и затем возвращает `WDG_2S`;
-- slave connection parameter update остаётся выключен;
+- blocking SNV временно расширяет watchdog и возвращает `WDG_2S`;
+- slave connection parameter update выключен;
 - CCCD доступен до encryption, защищённой границей остаётся RX characteristic.
-
-Это не архитектурный мусор, а зафиксированные свойства PHY6252/BLE stack.
 
 ## Правило дальнейшего рефакторинга
 
-Новая абстракция допустима только если она хотя бы одно из следующего:
+Новая сущность допустима только если она:
 
-1. удаляет существующий mutable state;
+1. удаляет mutable state;
 2. делает недопустимое состояние непредставимым;
-3. изолирует реальный platform boundary;
+3. изолирует реальную platform boundary; или
 4. позволяет тестировать важную policy как pure function.
 
-Если новая сущность просто копирует `pending`, `connected`, `phase` или другой уже существующий факт — её не добавляем.
+Если сущность просто копирует `pending`, `connected`, `phase` или другой существующий факт — её не добавляем.
