@@ -3,11 +3,11 @@
 #
 #   tools/flash_firmware.sh <application.hex> [--erase]
 #
-# Application всегда пишется штатной операцией `wh`. Если рядом лежит
+# Application всегда пишется штатной операцией wh. Если рядом лежит
 # <application>.factory.bin (или задан DPLS_FACTORY_BIN), скрипт после этого
-# отдельно пишет factory identity raw-операцией `we 0x3F000`.
+# отдельно пишет factory identity raw-операцией we 0x3F000.
 #
-# НИКОГДА не объединяйте factory sector с application HEX: `wh` формирует
+# НИКОГДА не объединяйте factory sector с application HEX: wh формирует
 # application segment table и не является generic multi-region HEX writer.
 set -euo pipefail
 
@@ -56,6 +56,25 @@ run_programmer() {
   PYTHONPATH="$ROOT/.python-deps" python3 "$PROGRAMMER" "$@"
 }
 
+wait_for_bootloader_entry() {
+  local stage="$1"
+  if [ "${DPLS_NO_FLASH_PROMPT:-0}" = "1" ]; then
+    echo "$stage: ожидается, что плата уже удерживается в ROM bootloader."
+    return
+  fi
+  if [ ! -t 0 ]; then
+    echo "ОТКАЗ: для $stage нужен интерактивный вход в ROM bootloader через KEY1." >&2
+    echo "Для автоматизированного стенда задайте DPLS_NO_FLASH_PROMPT=1 и обеспечьте reset/power externally." >&2
+    exit 2
+  fi
+  echo
+  echo "$stage"
+  echo "1. Зажмите KEY1 и НЕ отпускайте."
+  echo "2. Нажмите Enter, продолжая удерживать KEY1."
+  echo "3. Отпустите KEY1 только когда programmer напишет: Turn on the power..."
+  read -r
+}
+
 cat <<EOF
 Порт: $PORT
 Application: $HEX
@@ -65,16 +84,15 @@ EOF
 APP_ARGS=(-p "$PORT" -r wh "$HEX")
 if [ "$ERASE" -eq 1 ]; then APP_ARGS=(-p "$PORT" -a -r wh "$HEX"); fi
 
-printf '\n[1/%s] Application (`wh`)\n' "$([ "$HAS_FACTORY" -eq 1 ] && echo 2 || echo 1)"
-echo "Зажмите KEY1 и отпустите на строке «Turn on the power»."
+TOTAL=1
+if [ "$HAS_FACTORY" -eq 1 ]; then TOTAL=2; fi
+printf '\n[1/%s] Application (wh)\n' "$TOTAL"
+wait_for_bootloader_entry "Прошивка application"
 run_programmer "${APP_ARGS[@]}"
 
 if [ "$HAS_FACTORY" -eq 1 ]; then
-  cat <<EOF
-
-[2/2] Factory identity (`we 0x3F000`)
-Нужен второй вход в ROM bootloader: снова зажмите KEY1 и отпустите на строке «Turn on the power».
-EOF
+  printf '\n[2/2] Factory identity (we 0x3F000)\n'
+  wait_for_bootloader_entry "Прошивка factory identity"
   run_programmer -p "$PORT" -r we "$FACTORY_OFFSET" "$FACTORY_BIN"
 fi
 
