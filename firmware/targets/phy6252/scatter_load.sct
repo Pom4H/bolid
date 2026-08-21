@@ -1,5 +1,4 @@
-; Test-DPLS PHY6252 memory map.
-; Hardware-proven PB-03F XIP window from release 1.4.0.
+; Test-DPLS PHY6252 production memory map.
 
 LR_IROM1 0x1fff1838 0x0E7C8 {
   ER_IROM1 0x1fff1838 0x077C8 {
