@@ -101,7 +101,6 @@ static void state_changed(gaprole_States_t state)
     switch (state) {
     case GAPROLE_STARTED:
         dpls_ble_identity_on_stack_started();
-        /* Boot должен стать видимым раньше любых deferred flash writes. */
         enable_advertising();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
@@ -224,9 +223,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & SBP_START_DEVICE_EVT) {
         GAPRole_StartDevice(&role_callbacks);
         GAPBondMgr_Register(&bond_callbacks);
-        /* dpls_phy6252_init() может поставить boot journal STORAGE_EVT. Не даём
-         * ему писать flash в окно запуска GAP; idle tick поставит его заново. */
-        return (events ^ SBP_START_DEVICE_EVT) & (uint16)~DPLS_PHY6252_STORAGE_EVT;
+        return events ^ SBP_START_DEVICE_EVT;
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
