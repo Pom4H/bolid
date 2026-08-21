@@ -2,9 +2,6 @@
 # Сборка одного application HEX для PHY6252.
 #
 #   tools/build_firmware.sh [keil|ac6|gcc] [output.hex]
-#
-# Никаких sidecar/factory image этот скрипт не создаёт. На PB-03F прошивается
-# ровно один application HEX штатной операцией programmer `wh`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -134,7 +131,7 @@ build_keil() {
         fi
     done
 
-    # Тот же состав application image, который использовался на рабочем 1.4.0.
+    # Application HEX contains the XIP image plus the two SRAM load regions.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
