@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Статический contract для PHY6252: flash никогда не конкурирует с активным BLE link."""
+"""PHY6252 contract: flash не конкурирует с active BLE и не блокирует boot advertising."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +22,7 @@ def require(path: Path, needle: str) -> None:
         raise SystemExit(f"{path.relative_to(ROOT)}: missing {needle!r}")
 
 
-# Все обычные SNV операции из PHY app проходят через guarded API.
+# Обычные SNV операции product app проходят через guarded API.
 require(APP_H, "#define osal_snv_read dpls_phy6252_snv_read_guarded")
 require(APP_H, "#define osal_snv_write dpls_phy6252_snv_write_guarded")
 require(GUARD, "bool dpls_phy6252_snv_flush_deferred(void)")
@@ -30,8 +30,7 @@ require(GUARD, "if (dpls_phy6252_link_active()) return false;")
 require(GUARD, "return deferred.pending && dpls_phy6252_link_active();")
 require(GUARD, "if (deferred.pending && deferred.id != id)")
 
-# Единый facade выводит наличие flash-работы из реальных очередей, а не из
-# дублирующего state machine.
+# Один facade выводит flash work из реальных очередей.
 require(STORAGE, "dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending()")
 require(STORAGE, "bool dpls_phy6252_flash_process_one(void)")
 require(STORAGE, "if (dpls_phy6252_link_active()) return false;")
@@ -44,22 +43,25 @@ for legacy in (
     ROOT / "firmware/tests/test_storage_actor.c",
 ):
     if legacy.exists():
-        raise SystemExit(f"{legacy.relative_to(ROOT)}: legacy storage actor must be removed")
+        raise SystemExit(f"{legacy.relative_to(ROOT)}: storage actor must stay removed")
 
-for build_file in (MAKEFILE, CPROJECT):
-    if "dpls_storage_actor" in text(build_file):
-        raise SystemExit(f"{build_file.relative_to(ROOT)}: legacy storage actor is still compiled")
-
-# Target видит только facade и не лезет напрямую в SNV/journal ownership.
+# Target знает только facade; boot advertising не зависит от pending flash.
 require(TARGET, '#include "dpls_phy6252_storage.h"')
 require(TARGET, "dpls_phy6252_flash_work_pending()")
 require(TARGET, "dpls_phy6252_flash_disconnect_requested()")
 require(TARGET, "dpls_phy6252_flash_process_one()")
-require(TARGET, "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;")
 require(TARGET, "dpls_phy6252_flash_disconnect_requested() &&")
 require(TARGET, "dpls_phy6252_tx_idle()")
+require(TARGET, "case GAPROLE_STARTED:")
+require(TARGET, "enable_advertising();")
+require(TARGET, "~DPLS_PHY6252_STORAGE_EVT")
 
 target = text(TARGET)
+started = target[target.index("case GAPROLE_STARTED:"):target.index("case GAPROLE_CONNECTED:")]
+if "dpls_phy6252_flash_work_pending()" in started:
+    raise SystemExit("dplsBLEPeripheral.c: boot advertising must not wait for flash")
+if "dpls_ble_identity_is_ready" in target:
+    raise SystemExit("dplsBLEPeripheral.c: identity-ready advertising gate must not return")
 for forbidden in (
     "dpls_phy6252_snv_pending()",
     "dpls_phy6252_snv_flush_deferred()",
@@ -73,27 +75,34 @@ app = text(APP)
 if app.index('#include "dpls_phy6252_app.h"') > app.index('#include "osal_snv.h"'):
     raise SystemExit("dpls_phy6252_app.c: SNV guard header must precede osal_snv.h")
 
-# Factory identity не содержит runtime migration/personalization. Два прямых
-# SNV write здесь разрешены только для явного сброса IRK/CSRK bond-копий.
+# BLE identity — отдельный pre-link boot boundary, как в рабочем 1.4.0.
+# Здесь разрешены SNV MAC/IRK/CSRK read/write до GAPRole_StartDevice и явный
+# reset bonding keys. Raw arbitrary flash sector и factory sidecar запрещены.
 identity = text(IDENTITY)
-if identity.count("osal_snv_write(") != 2:
-    raise SystemExit("dpls_ble_identity.c: expected exactly two raw IRK/CSRK reset writes")
-require(IDENTITY, "osal_snv_write(BLE_NVID_IRK")
-require(IDENTITY, "osal_snv_write(BLE_NVID_CSRK")
-for forbidden in (
-    "DPLS_LEGACY_BLE_MAC",
-    "read_legacy_mac_snv",
-    "legacy_device_id_from_mac",
-    "LL_ENC_GenerateTrueRandNum",
+for required in (
+    "check_chip_mAddr();",
+    "DPLS_BLE_MAC_SNV_ID 0x82u",
+    "read_mac_snv",
+    "write_mac_snv",
+    "read_key_snv",
     "write_key_snv",
+    "HCI_EXT_SetBDADDRCmd",
+):
+    require(IDENTITY, required)
+for forbidden in (
+    "hal_flash_read",
+    "DPLS_FACTORY_IDENTITY_FLASH_ADDR",
+    "0x1103F000",
+    "dpls_ble_identity_is_ready",
 ):
     if forbidden in identity:
-        raise SystemExit(f"dpls_ble_identity.c: build-time identity logic leaked into runtime: {forbidden}")
+        raise SystemExit(f"dpls_ble_identity.c: boot-breaking factory path returned: {forbidden}")
 
+# Никакой другой PHY6252 unit не пишет raw SNV в обход app guard / identity boot boundary.
 for path in (ROOT / "firmware/phy6252").glob("*.c"):
     if path in {APP, GUARD, IDENTITY}:
         continue
     if "osal_snv_write(" in text(path):
         raise SystemExit(f"{path.relative_to(ROOT)}: raw osal_snv_write bypasses storage facade")
 
-print("PHY6252 storage facade contract: PASS")
+print("PHY6252 storage/boot flash contract: PASS")
