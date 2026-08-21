@@ -110,9 +110,17 @@ object ConnectionMachine {
             else -> state
         }
 
-        ConnectionEvent.LinkLost -> if (shouldRecover(state)) recover(state) else DeviceSession.Offline
+        ConnectionEvent.LinkLost -> if (shouldRecoverAfterLinkLoss(state)) {
+            recover(state)
+        } else {
+            DeviceSession.Offline
+        }
 
-        ConnectionEvent.BluetoothUnavailable -> recover(state)
+        ConnectionEvent.BluetoothUnavailable -> if (shouldRecoverAfterRadioLoss(state)) {
+            recover(state)
+        } else {
+            state
+        }
 
         /* Radio availability is a fact used by the driver to retry the route;
          * it does not invent a new lifecycle state by itself. */
@@ -153,7 +161,7 @@ object ConnectionMachine {
         return DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
     }
 
-    private fun shouldRecover(state: DeviceSession): Boolean = when (state) {
+    private fun shouldRecoverAfterLinkLoss(state: DeviceSession): Boolean = when (state) {
         is DeviceSession.Commissioning,
         is DeviceSession.Authenticating,
         is DeviceSession.Synchronizing,
@@ -161,5 +169,20 @@ object ConnectionMachine {
         is DeviceSession.Recovering,
         -> true
         else -> false
+    }
+
+    private fun shouldRecoverAfterRadioLoss(state: DeviceSession): Boolean = when (state) {
+        is DeviceSession.Connecting,
+        is DeviceSession.Discovering,
+        is DeviceSession.Linked,
+        is DeviceSession.Commissioning,
+        is DeviceSession.Authenticating,
+        is DeviceSession.Synchronizing,
+        is DeviceSession.Online,
+        is DeviceSession.Recovering,
+        -> true
+        DeviceSession.Offline,
+        is DeviceSession.Failed,
+        -> false
     }
 }
