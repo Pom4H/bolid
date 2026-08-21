@@ -1,6 +1,7 @@
-; Test-DPLS PHY6252 production memory map.
-; 0x1103C000..0x1103FFFF is persistent flash (SNV/factory data).
-; Application XIP must never overlap it.
+; Test-DPLS PHY6252 memory map.
+; Retains the proven PB-03F layout while using the SDK 3.1.2 libraries.
+; 0x1103C000..0x1103EFFF is SNV and 0x1103F000..0x1103FFFF is factory identity.
+; Neither persistent region is linkable as application XIP.
 
 LR_IROM1 0x1fff1838 0x0E7C8 {
   ER_IROM1 0x1fff1838 0x077C8 {
@@ -35,8 +36,15 @@ LR_ROM_XIP 0x11020000 0x01C000 {
     sm*.o(+RO)
     gap*.o(+RO)
     peripheral.o(+RO)
+    dplsBLEPeripheral.o(+RO)
     gapbondmgr.o(+RO)
-    dpls*.o(+RO)
+    dpls_protocol.o(+RO)
+    dpls_server.o(+RO)
+    dpls_led.o(+RO)
+    dpls_calib.o(+RO)
+    dpls_gatt_service.o(+RO)
+    dpls_phy6252_app.o(+RO)
+    dpls_ble_identity.o(+RO)
     hmac.o(+RO)
     sha256.o(+RO)
     utils.o(+RO)

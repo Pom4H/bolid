@@ -3,13 +3,14 @@
 #include "dpls_ble_identity.h"
 #include "dpls_board.h"
 #include "dpls_calib.h"
-#include "dpls_durable_settings.h"
 #include "dpls_gatt_service.h"
 #include "dpls_led.h"
 #include "dpls_server.h"
 #include "OSAL.h"
 #include "log.h"
 #if defined(__GNUC__)
+/* adc.h prototypes static helpers that live in adc.c. GCC diagnoses them at
+ * end of TU, so a push/pop around the include does not hide -Wunused-function. */
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
 #include "adc.h"
@@ -27,49 +28,73 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Настройки хранятся только в двух durable-слотах с generation + CRC. */
-#define DPLS_SETTINGS_SLOT_A_SNV_ID 0x85u
-#define DPLS_SETTINGS_SLOT_B_SNV_ID 0x86u
+#define DPLS_SETTINGS_MAGIC 0x534C5044u
 #define DPLS_CALIB_MAGIC 0x434C5044u
-#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u
-#define DPLS_CALIB_SNV_ID 0x83u
+#define DPLS_AUTH_LOCK_MAGIC 0x4B434C44u /* "DLCK" */
+#define DPLS_SETTINGS_SNV_ID 0x80u
+#define DPLS_SETTINGS_STATE_SNV_ID 0x81u
+#define DPLS_CALIB_SNV_ID 0x83u /* 0x82 is taken by dpls_ble_identity (BLE MAC) */
 #define DPLS_AUTH_LOCK_SNV_ID 0x84u
 #define DPLS_JOURNAL_FIRST_SNV_ID 0x90u
 #define DPLS_JOURNAL_EVENTS_PER_BLOCK 10u
 #define DPLS_JOURNAL_RECORD_SIZE 12u
 #define DPLS_JOURNAL_BLOCK_COUNT (DPLS_EVENT_CAPACITY / DPLS_JOURNAL_EVENTS_PER_BLOCK)
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
-#define DPLS_PENDING_EVENT_CAPACITY 24u
 #define DPLS_NAME_SIZE 32u
-#define DPLS_HW_REVISION 2u
+#define DPLS_HW_REVISION 2u /* four independent voltage inputs: +1, +2, +T, reserve */
+#define DPLS_SETTINGS_EMPTY_MARKER 0x45u
+#define DPLS_SETTINGS_VALID_MARKER 0x56u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
+/* LED re-arm bounds: fine enough for a 150 ms flash edge, cheap in long pauses. */
 #define DPLS_LED_TICK_MIN_MS 10u
 #define DPLS_LED_TICK_MAX_MS 250u
+/* Sampling rides the 1 Hz tick and averages over a window against noise. The ISR
+ * only copies raw samples and wakes the task — scaling and calibration must not
+ * compete with the radio in interrupt context. */
 #define DPLS_ADC_DECIMATE 1u
 #define DPLS_ADC_WINDOW 8u
+/* One channel per kick. The SDK's ADCC handler drains the IRQ only once every
+ * requested channel has finished, so a multi-channel kick can leave an interrupt
+ * pending and starve the OSAL loop. See tests/test_adc_irq_model.c. */
 #define DPLS_ADC_NEED_PORT1 0x01u
 #define DPLS_ADC_NEED_PORT2 0x02u
 #define DPLS_ADC_NEED_PORT_T 0x04u
 #define DPLS_ADC_NEED_VCAP 0x08u
 #define DPLS_ADC_NEED_ALL (DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_PORT2 | \
                            DPLS_ADC_NEED_PORT_T | DPLS_ADC_NEED_VCAP)
-#define DPLS_MEASUREMENT_STALE_MS 3000u
+/* Line present/absent, with hysteresis so a value near the threshold does not
+ * flap. Below the 5 V line minimum the device runs from reserve — which is also
+ * true while a KZ mode shorts the line. */
 #define DPLS_LINE_PRESENT_MV 4000u
 #define DPLS_LINE_ABSENT_MV 3000u
+/* Usable reserve window ~5.0→3.6 V. Both thresholds depend on the VCAP divider,
+ * which the supplied schematic does not give: confirm on hardware. */
 #define DPLS_RESERVE_LOW_MV 3700u
 #define DPLS_RESERVE_OK_MV 4000u
+/* Placeholder until the schematic gives the divider; calibratable like the line. */
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
+/* BRIZ-T auto-isolation trips somewhere in 2.9–3.4 V per the RE. Firmware only
+ * observes, indicates and logs; the ≤200 ms interruption is hardware. Detection
+ * arms only after a healthy line, so a cold start without one is not a short. */
 #define DPLS_AUTOISO_TRIP_MV 3000u
 #define DPLS_AUTOISO_CLEAR_MV 4500u
-#define DPLS_LINK_ENCRYPT_TIMEOUT_MS 60000u
+/* Drop stale NV bonds after repeated encrypted links that never reach DPLS auth. */
+#define DPLS_BOND_DESYNC_LIMIT 3u
+#define DPLS_BOND_DESYNC_WINDOW_MS 120000u
+/* Plaintext link timeout — pairing never completed. */
+#define DPLS_LINK_ENCRYPT_TIMEOUT_MS 15000u
 
 typedef struct {
+    uint32_t magic;
     char name[DPLS_NAME_SIZE];
     uint8_t salt[DPLS_AUTH_SALT_SIZE];
     uint8_t verifier[DPLS_AUTH_PROOF_SIZE];
+    uint16_t crc;
 } dpls_settings_t;
 
+/* Brute-force lock marker: written on the 5th wrong password, cleared when the
+ * block expires or on factory reset. */
 typedef struct {
     uint32_t magic;
     uint8_t locked;
@@ -77,6 +102,8 @@ typedef struct {
     uint16_t crc;
 } dpls_auth_lock_t;
 
+/* Two-point calibration. The VCAP fields are stored now so the record layout
+ * stays fixed once reserve monitoring lands. */
 typedef struct {
     uint32_t magic;
     uint32_t line_gain_milli;
@@ -88,41 +115,58 @@ typedef struct {
 
 static dpls_server_t server;
 static dpls_settings_t settings;
-static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
-static uint8_t settings_active_slot = 0xffu;
-static uint32_t settings_generation;
 static dpls_led_t status_led;
 static bool identify_led_active;
 static uint16 connection_handle = INVALID_CONNHANDLE;
 static uint8 task_id;
+static dpls_mode_t hardware_mode = DPLS_MODE_NORMAL;
+static dpls_settings_state_t settings_state = DPLS_SETTINGS_EMPTY;
 static bool factory_reset_armed;
 static uint32_t factory_reset_started_ms;
 static uint32_t connected_at_ms;
 static bool connection_had_encryption;
-
+static uint8_t pre_auth_disconnect_count;
+static uint32_t pre_auth_disconnect_window_ms;
+/* The largest request is SETUP: 9 overhead + 5 + 31 name + 16 salt + 32
+ * verifier = 93 bytes. */
 #define DPLS_RX_QUEUE_DEPTH 6u
 #define DPLS_RX_SLOT_SIZE 96u
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
-typedef struct { dpls_rx_slot_t slots[DPLS_RX_QUEUE_DEPTH]; uint8 head, tail, count; } dpls_rx_queue_t;
+typedef struct {
+    dpls_rx_slot_t slots[DPLS_RX_QUEUE_DEPTH];
+    uint8 head;
+    uint8 tail;
+    uint8 count;
+} dpls_rx_queue_t;
 static dpls_rx_queue_t rx;
 
+/* Indications are paced one-in-flight against the ATT confirmation, otherwise a
+ * busy stack drops back-to-back responses. The largest response is a batched
+ * LOG_CHUNK (9 + 3 + 15×10 = 162), so slots are sized for that rather than for
+ * the 244-byte frame maximum. */
 #define DPLS_TX_QUEUE_DEPTH 4u
 #define DPLS_TX_SLOT_SIZE 168u
 typedef struct { uint16 length; uint8 data[DPLS_TX_SLOT_SIZE]; } dpls_tx_slot_t;
 typedef struct {
     dpls_tx_slot_t slots[DPLS_TX_QUEUE_DEPTH];
-    uint8 head, tail, count;
+    uint8 head;
+    uint8 tail;
+    uint8 count;
     bool in_flight;
     uint32_t in_flight_since_ms;
 } dpls_tx_queue_t;
+/* The host occasionally loses a confirmation, and without a deadline the
+ * one-in-flight pipeline would wedge behind it forever. On timeout the frame is
+ * written off and the pump moves on; the client's next poll refreshes state. */
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
 #define DPLS_TX_NOTIFY_PACE_MS 80u
 static dpls_tx_queue_t tx;
-
-static dpls_event_t journal_pending_events[DPLS_PENDING_EVENT_CAPACITY];
-static uint8_t journal_pending_event_count;
 static uint8_t journal_block_cache[DPLS_JOURNAL_BLOCK_SIZE];
 static uint8_t journal_cached_block = 0xffu;
+static bool journal_snv_dirty;
+static uint8_t journal_dirty_block = 0xffu;
+static uint8_t journal_pending[DPLS_JOURNAL_BLOCK_SIZE];
+static uint8_t journal_pending_block = 0xffu;
 
 static dpls_calib_t line_calib;
 static dpls_calib_t vcap_calib;
@@ -134,12 +178,18 @@ static uint8_t line_window_count, line_window_pos;
 static uint8_t port2_window_count, port2_window_pos;
 static uint8_t port_t_window_count, port_t_window_pos;
 static uint8_t vcap_window_count, vcap_window_pos;
-static uint32_t line_last_sample_ms, port2_last_sample_ms, port_t_last_sample_ms, vcap_last_sample_ms;
-static volatile uint16_t cached_line_mv, cached_port2_mv, cached_port_t_mv, cached_vcap_mv;
+static volatile uint16_t cached_line_mv;
+static volatile uint16_t cached_port2_mv;
+static volatile uint16_t cached_port_t_mv;
+static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
-static uint8_t adc_pending, adc_decimate;
+static uint8_t adc_pending; /* DPLS_ADC_NEED_* bits still owed this cycle */
+static uint8_t adc_decimate;
 static dpls_power_t power_state = DPLS_POWER_LINE;
-static bool reserve_low_state, auto_isolation_active, line_established, line_calib_from_nv;
+static bool reserve_low_state;
+static bool auto_isolation_active;
+static bool line_established;
+static bool line_calib_from_nv;
 static bool control_sleep_locked;
 
 static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
@@ -147,172 +197,6 @@ static uint32_t now_ms(void) { return (uint32_t)osal_GetSystemClock(); }
 #if DPLS_EVENT_CAPACITY != 200u
 #error "PHY6252 journal layout is defined for exactly 200 events"
 #endif
-#if DPLS_DURABLE_SETTINGS_NAME_SIZE != DPLS_NAME_SIZE
-#error "durable settings name layout mismatch"
-#endif
-
-static uint8_t snv_write_bounded(osalSnvId_t id, osalSnvLen_t len, void *data)
-{
-    uint8_t rc;
-    (void)watchdog_config(WDG_8S);
-    hal_watchdog_feed();
-    rc = osal_snv_write(id, len, data);
-    hal_watchdog_feed();
-    (void)watchdog_config(WDG_2S);
-    return rc;
-}
-
-/* ---------------- durable settings ---------------- */
-
-static osalSnvId_t settings_slot_id(uint8_t slot)
-{
-    return slot == 0u ? DPLS_SETTINGS_SLOT_A_SNV_ID : DPLS_SETTINGS_SLOT_B_SNV_ID;
-}
-
-static void settings_from_durable(const dpls_durable_settings_t *record)
-{
-    memset(&settings, 0, sizeof(settings));
-    if (record->state == DPLS_DURABLE_SETTINGS_VALID) {
-        memcpy(settings.name, record->name, sizeof(settings.name));
-        memcpy(settings.salt, record->salt, sizeof(settings.salt));
-        memcpy(settings.verifier, record->verifier, sizeof(settings.verifier));
-        settings_state = DPLS_SETTINGS_VALID;
-    } else {
-        settings_state = DPLS_SETTINGS_EMPTY;
-    }
-    settings_generation = record->generation;
-}
-
-static bool load_durable_settings(void)
-{
-    uint8_t a[DPLS_DURABLE_SETTINGS_RECORD_SIZE];
-    uint8_t b[DPLS_DURABLE_SETTINGS_RECORD_SIZE];
-    dpls_durable_settings_t selected;
-    uint8_t slot;
-    memset(a, 0xff, sizeof(a));
-    memset(b, 0xff, sizeof(b));
-    (void)osal_snv_read(DPLS_SETTINGS_SLOT_A_SNV_ID, (osalSnvLen_t)sizeof(a), a);
-    (void)osal_snv_read(DPLS_SETTINGS_SLOT_B_SNV_ID, (osalSnvLen_t)sizeof(b), b);
-    if (!dpls_durable_settings_select(a, b, &selected, &slot)) return false;
-    settings_active_slot = slot;
-    settings_from_durable(&selected);
-    return true;
-}
-
-static void classify_settings(void)
-{
-    settings_active_slot = 0xffu;
-    settings_generation = 0u;
-    settings_state = DPLS_SETTINGS_EMPTY;
-    memset(&settings, 0, sizeof(settings));
-    (void)load_durable_settings();
-}
-
-static bool durable_record_matches(const dpls_durable_settings_t *left,
-                                   const dpls_durable_settings_t *right)
-{
-    return left->generation == right->generation && left->state == right->state &&
-           memcmp(left->name, right->name, sizeof(left->name)) == 0 &&
-           memcmp(left->salt, right->salt, sizeof(left->salt)) == 0 &&
-           memcmp(left->verifier, right->verifier, sizeof(left->verifier)) == 0;
-}
-
-static bool persist_settings_candidate(const dpls_settings_t *candidate,
-                                       dpls_durable_settings_state_t state)
-{
-    dpls_durable_settings_t record, verified;
-    uint8_t raw[DPLS_DURABLE_SETTINGS_RECORD_SIZE];
-    uint8_t readback[DPLS_DURABLE_SETTINGS_RECORD_SIZE];
-    uint8_t target_slot = settings_active_slot == 0u ? 1u : 0u;
-    osalSnvId_t id = settings_slot_id(target_slot);
-
-    memset(&record, 0, sizeof(record));
-    record.generation = dpls_durable_settings_next_generation(settings_generation);
-    record.state = state;
-    if (state == DPLS_DURABLE_SETTINGS_VALID && candidate) {
-        memcpy(record.name, candidate->name, sizeof(record.name));
-        memcpy(record.salt, candidate->salt, sizeof(record.salt));
-        memcpy(record.verifier, candidate->verifier, sizeof(record.verifier));
-    }
-    dpls_durable_settings_encode(raw, &record);
-    if (snv_write_bounded(id, (osalSnvLen_t)sizeof(raw), raw) != SUCCESS ||
-        osal_snv_read(id, (osalSnvLen_t)sizeof(readback), readback) != SUCCESS ||
-        !dpls_durable_settings_decode(readback, &verified) ||
-        !durable_record_matches(&record, &verified)) {
-        return false;
-    }
-
-    settings_active_slot = target_slot;
-    settings_generation = record.generation;
-    if (state == DPLS_DURABLE_SETTINGS_VALID && candidate) {
-        settings = *candidate;
-        settings_state = DPLS_SETTINGS_VALID;
-    } else {
-        memset(&settings, 0, sizeof(settings));
-        settings_state = DPLS_SETTINGS_EMPTY;
-    }
-    return true;
-}
-
-static dpls_settings_state_t get_settings_state(void *context)
-{ (void)context; return settings_state; }
-
-static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
-{
-    (void)context;
-    if (settings_state == DPLS_SETTINGS_VALID) memcpy(out, settings.salt, DPLS_AUTH_SALT_SIZE);
-    else memset(out, 0, DPLS_AUTH_SALT_SIZE);
-}
-
-static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
-{
-    dpls_settings_t candidate;
-    size_t name_length;
-    (void)context;
-    memset(&candidate, 0, sizeof(candidate));
-    name_length = strlen(name);
-    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
-    memcpy(candidate.name, name, name_length);
-    memcpy(candidate.salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(candidate.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
-    return persist_settings_candidate(&candidate, DPLS_DURABLE_SETTINGS_VALID);
-}
-
-static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
-{
-    (void)context;
-    if (settings_state == DPLS_SETTINGS_VALID) {
-        memcpy(out, settings.name, DPLS_NAME_MAX);
-        out[DPLS_NAME_MAX] = '\0';
-    } else out[0] = '\0';
-}
-
-static bool settings_set_name(void *context, const char *name)
-{
-    dpls_settings_t candidate;
-    size_t name_length;
-    (void)context;
-    if (settings_state != DPLS_SETTINGS_VALID) return false;
-    candidate = settings;
-    name_length = strlen(name);
-    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
-    memset(candidate.name, 0, sizeof(candidate.name));
-    memcpy(candidate.name, name, name_length);
-    return persist_settings_candidate(&candidate, DPLS_DURABLE_SETTINGS_VALID);
-}
-
-static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
-{
-    dpls_settings_t candidate;
-    (void)context;
-    if (settings_state != DPLS_SETTINGS_VALID) return false;
-    candidate = settings;
-    memcpy(candidate.salt, salt, DPLS_AUTH_SALT_SIZE);
-    memcpy(candidate.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
-    return persist_settings_candidate(&candidate, DPLS_DURABLE_SETTINGS_VALID);
-}
-
-/* ---------------- журнал ---------------- */
 
 static uint32_t journal_rd32(const uint8_t *p)
 {
@@ -322,13 +206,22 @@ static uint32_t journal_rd32(const uint8_t *p)
 
 static void journal_wr32(uint8_t *p, uint32_t value)
 {
-    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
-    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+    p[0] = (uint8_t)value;
+    p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16);
+    p[3] = (uint8_t)(value >> 24);
 }
 
 static uint8_t *journal_load_block(uint8_t block_index)
 {
     if (journal_cached_block == block_index) return journal_block_cache;
+    if (journal_snv_dirty && journal_cached_block != 0xffu) {
+        /* Park the dirty page in RAM. osal_snv_write on the RX path stalls the
+         * radio long enough that AUTH_RESULT never leaves the queue. */
+        memcpy(journal_pending, journal_block_cache, sizeof(journal_pending));
+        journal_pending_block = journal_cached_block;
+        journal_snv_dirty = false;
+    }
     memset(journal_block_cache, 0, sizeof(journal_block_cache));
     (void)osal_snv_read((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
                         (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
@@ -355,11 +248,16 @@ static void journal_encode_record(uint8_t record[DPLS_JOURNAL_RECORD_SIZE], cons
     record[8] = event->event_type;
     record[9] = event->parameter;
     crc = dpls_crc16(record, 10u);
-    record[10] = (uint8_t)crc; record[11] = (uint8_t)(crc >> 8);
+    record[10] = (uint8_t)crc;
+    record[11] = (uint8_t)(crc >> 8);
 }
 
 static uint8_t *journal_scan_block(uint16_t block_index)
-{ hal_watchdog_feed(); return journal_load_block((uint8_t)block_index); }
+{
+    /* A full boot scan exceeds the watchdog period before the OSAL feed task exists. */
+    hal_watchdog_feed();
+    return journal_load_block((uint8_t)block_index);
+}
 
 static bool journal_record_in_slot(const uint8_t *record, uint16_t slot, dpls_event_t *event)
 {
@@ -372,6 +270,7 @@ static uint32_t journal_latest_sequence(void)
     dpls_event_t event;
     uint32_t max_sequence = 0;
     uint16_t block_index, record_index;
+
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         uint8_t *block = journal_scan_block(block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
@@ -385,10 +284,12 @@ static uint32_t journal_latest_sequence(void)
 
 static uint16_t journal_contiguous_count(uint32_t max_sequence)
 {
+    /* A torn slot truncates exported history; older bytes must never bridge the gap. */
     uint8_t present[(DPLS_EVENT_CAPACITY + 7u) / 8u];
     dpls_event_t event;
     uint16_t block_index, record_index, count = 0;
     memset(present, 0, sizeof(present));
+
     for (block_index = 0; block_index < DPLS_JOURNAL_BLOCK_COUNT; ++block_index) {
         uint8_t *block = journal_scan_block(block_index);
         for (record_index = 0; record_index < DPLS_JOURNAL_EVENTS_PER_BLOCK; ++record_index) {
@@ -411,22 +312,56 @@ static bool journal_storage_init(void *context, uint16_t *count, uint32_t *next_
     uint32_t max_sequence;
     (void)context;
     journal_cached_block = 0xffu;
-    journal_pending_event_count = 0u;
     max_sequence = journal_latest_sequence();
     if (max_sequence == 0u || max_sequence == UINT32_MAX) {
-        *count = 0u; *next_sequence = 1u; return true;
+        *count = 0u;
+        *next_sequence = 1u;
+        return true;
     }
     *count = journal_contiguous_count(max_sequence);
     *next_sequence = max_sequence + 1u;
     return true;
 }
 
+static void journal_flush_snv(void)
+{
+    /* Flash erase during an in-flight notify stalls the LL: UART then shows
+     * QTX t=04, osal_snv_write + FS GC, and no DPLS TX — AUTH_RESULT never
+     * reaches the phone. */
+    if (tx.count != 0u || tx.in_flight) return;
+    if (journal_pending_block == 0xffu && !journal_snv_dirty) return;
+    LOG("DPLS SNV flush pending=%u dirty=%u\n",
+        journal_pending_block != 0xffu ? 1u : 0u,
+        journal_snv_dirty ? 1u : 0u);
+    if (journal_pending_block != 0xffu) {
+        (void)osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + journal_pending_block),
+                             (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_pending);
+        journal_pending_block = 0xffu;
+    }
+    if (!journal_snv_dirty) return;
+    (void)osal_snv_write((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + journal_dirty_block),
+                         (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, journal_block_cache);
+    journal_snv_dirty = false;
+}
+
 static bool journal_storage_append(void *context, const dpls_event_t *event)
 {
+    uint8_t *block;
+    uint16_t slot;
+    uint8_t block_index, record_index;
     (void)context;
-    if (!event || event->sequence == 0u || journal_pending_event_count >= DPLS_PENDING_EVENT_CAPACITY)
-        return false;
-    journal_pending_events[journal_pending_event_count++] = *event;
+    if (!event || event->sequence == 0u) return false;
+    slot = (uint16_t)((event->sequence - 1u) % DPLS_EVENT_CAPACITY);
+    block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
+    block = journal_load_block(block_index);
+    journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, event);
+    /* Defer the flash write until AUTH_RESULT (or any other indication) has
+     * left the radio. A 120-byte SNV page erase on PHY6252 stalls the LL long
+     * enough for Samsung to drop the link — UART then shows RX t=03, two
+     * osal_snv_write:9b, DPLS DISC, and no QTX/TX t=04. */
+    journal_dirty_block = block_index;
+    journal_snv_dirty = true;
     return true;
 }
 
@@ -434,14 +369,9 @@ static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t 
 {
     uint8_t *block;
     uint16_t slot;
-    uint8_t block_index, record_index, i;
+    uint8_t block_index, record_index;
     (void)context;
     if (!event || sequence == 0u) return false;
-    for (i = journal_pending_event_count; i > 0u; --i) {
-        if (journal_pending_events[i - 1u].sequence == sequence) {
-            *event = journal_pending_events[i - 1u]; return true;
-        }
-    }
     slot = (uint16_t)((sequence - 1u) % DPLS_EVENT_CAPACITY);
     block_index = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
     record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
@@ -450,83 +380,75 @@ static bool journal_storage_read(void *context, uint32_t sequence, dpls_event_t 
            event->sequence == sequence;
 }
 
-static bool journal_flush_one_block(void)
-{
-    uint8_t block_index, applied = 0u, i;
-    uint8_t *block;
-    if (journal_pending_event_count == 0u) return true;
-    if (connection_handle != INVALID_CONNHANDLE) return false;
-    block_index = (uint8_t)(((journal_pending_events[0].sequence - 1u) % DPLS_EVENT_CAPACITY) /
-                            DPLS_JOURNAL_EVENTS_PER_BLOCK);
-    block = journal_load_block(block_index);
-    for (i = 0u; i < journal_pending_event_count; ++i) {
-        uint16_t slot = (uint16_t)((journal_pending_events[i].sequence - 1u) % DPLS_EVENT_CAPACITY);
-        uint8_t event_block = (uint8_t)(slot / DPLS_JOURNAL_EVENTS_PER_BLOCK);
-        uint8_t record_index;
-        if (event_block != block_index) break;
-        record_index = (uint8_t)(slot % DPLS_JOURNAL_EVENTS_PER_BLOCK);
-        journal_encode_record(block + record_index * DPLS_JOURNAL_RECORD_SIZE, &journal_pending_events[i]);
-        ++applied;
-    }
-    if (applied == 0u) return false;
-    if (snv_write_bounded((osalSnvId_t)(DPLS_JOURNAL_FIRST_SNV_ID + block_index),
-                          (osalSnvLen_t)DPLS_JOURNAL_BLOCK_SIZE, block) != SUCCESS) {
-        journal_cached_block = 0xffu; return false;
-    }
-    memmove(journal_pending_events, journal_pending_events + applied,
-            (size_t)(journal_pending_event_count - applied) * sizeof(journal_pending_events[0]));
-    journal_pending_event_count = (uint8_t)(journal_pending_event_count - applied);
-    return true;
-}
-
-bool dpls_phy6252_link_active(void) { return connection_handle != INVALID_CONNHANDLE; }
-bool dpls_phy6252_storage_pending(void) { return journal_pending_event_count != 0u; }
-
-void dpls_phy6252_process_storage(void)
-{
-    if (dpls_phy6252_link_active() || journal_pending_event_count == 0u) return;
-    if (!journal_flush_one_block()) {
-        osal_start_timerEx(task_id, DPLS_PHY6252_STORAGE_EVT, 1000u); return;
-    }
-    if (journal_pending_event_count != 0u) osal_set_event(task_id, DPLS_PHY6252_STORAGE_EVT);
-}
-
 static bool link_encrypted(void *context)
-{ (void)context; return dpls_phy6252_link_active() && linkDB_Encrypted(connection_handle); }
+{
+    (void)context;
+    return connection_handle != INVALID_CONNHANDLE && linkDB_Encrypted(connection_handle);
+}
 
-/* ---------------- выходы и измерения ---------------- */
-
+/* De-energize every mode output: isolation switches conduct, short shunts open,
+ * which is "Norma". Every auto-return path funnels through here. */
 static void mode_outputs_off(void)
 {
-    hal_gpio_write(DPLS_PIN_ISO_1, 0); hal_gpio_write(DPLS_PIN_ISO_2, 0);
-    hal_gpio_write(DPLS_PIN_ISO_T, 0); hal_gpio_write(DPLS_PIN_KZ_1, 0);
-    hal_gpio_write(DPLS_PIN_KZ_2, 0); hal_gpio_write(DPLS_PIN_KZ_T, 0);
+    hal_gpio_write(DPLS_PIN_ISO_1, 0);
+    hal_gpio_write(DPLS_PIN_ISO_2, 0);
+    hal_gpio_write(DPLS_PIN_ISO_T, 0);
+    hal_gpio_write(DPLS_PIN_KZ_1, 0);
+    hal_gpio_write(DPLS_PIN_KZ_2, 0);
+    hal_gpio_write(DPLS_PIN_KZ_T, 0);
 }
 
+/* Sleep is forbidden only while a power stage is asserted: waking reprograms the
+ * clocks and the GPIO block underneath an energized output. Norma sleeps freely,
+ * connected or not — staying awake for a whole session would blow the 0.5 mA
+ * budget. The target layer registers MOD_USR1; without that the lock is a no-op. */
 static void control_sleep_guard(bool energized)
 {
     if (energized == control_sleep_locked) return;
     if (energized) {
         if (hal_pwrmgr_lock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = true;
-    } else if (hal_pwrmgr_unlock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = false;
+    } else {
+        if (hal_pwrmgr_unlock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = false;
+    }
 }
 
-static void safe_normal(void *context) { (void)context; mode_outputs_off(); control_sleep_guard(false); }
+static void safe_normal(void *context)
+{
+    (void)context;
+    mode_outputs_off();
+    hardware_mode = DPLS_MODE_NORMAL;
+    control_sleep_guard(false);
+}
 
+/* True means "output driven", not "electrically confirmed": the board has no
+ * power-stage feedback (capability HW_READBACK is clear), so reports carry the
+ * commanded mode. The false path is where a future read-back build would fail. */
 static bool apply_mode(void *context, dpls_mode_t mode)
 {
     (void)context;
     if (mode > DPLS_MODE_SHORT_T) return false;
+    /* Break-before-make: all outputs safe first, then assert the single line. */
     mode_outputs_off();
     switch (mode) {
     case DPLS_MODE_NORMAL: break;
-    case DPLS_MODE_OPEN_T: hal_gpio_write(DPLS_PIN_ISO_T, 1); break;
-    case DPLS_MODE_OPEN_MAIN: hal_gpio_write(DPLS_PIN_ISO_2, 1); break;
-    case DPLS_MODE_SHORT_1: hal_gpio_write(DPLS_PIN_KZ_1, 1); break;
-    case DPLS_MODE_SHORT_2: hal_gpio_write(DPLS_PIN_KZ_2, 1); break;
-    case DPLS_MODE_SHORT_T: hal_gpio_write(DPLS_PIN_KZ_T, 1); break;
+    case DPLS_MODE_OPEN_T:
+        hal_gpio_write(DPLS_PIN_ISO_T, 1);
+        break;
+    case DPLS_MODE_OPEN_MAIN:
+        hal_gpio_write(DPLS_PIN_ISO_2, 1);
+        break;
+    case DPLS_MODE_SHORT_1:
+        hal_gpio_write(DPLS_PIN_KZ_1, 1);
+        break;
+    case DPLS_MODE_SHORT_2:
+        hal_gpio_write(DPLS_PIN_KZ_2, 1);
+        break;
+    case DPLS_MODE_SHORT_T:
+        hal_gpio_write(DPLS_PIN_KZ_T, 1);
+        break;
     default: return false;
     }
+    hardware_mode = mode;
     control_sleep_guard(mode != DPLS_MODE_NORMAL);
     LOG("DPLS MODE %u\n", (unsigned)mode);
     return true;
@@ -547,14 +469,19 @@ static dpls_led_scene_t led_scene_for_mode(dpls_mode_t mode)
 static void status_led_output(void *context, bool on)
 {
     (void)context;
-    hal_gpio_write(DPLS_PIN_LED_RED, 0); hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
+    /* Scenes are green. Hold the other channels low so a retained RGB state
+     * cannot bleed into the colour. */
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
     hal_gpio_write(DPLS_PIN_LED_GREEN, on ? 1 : 0);
+    LOG("DPLS LED %u\n", on ? 1u : 0u);
 }
 
 static void load_calibration(void)
 {
     dpls_calib_nv_t nv;
-    dpls_calib_default(&line_calib); dpls_calib_default(&vcap_calib);
+    dpls_calib_default(&line_calib);
+    dpls_calib_default(&vcap_calib);
     vcap_calib.gain_milli = DPLS_VCAP_NOMINAL_GAIN_MILLI;
     line_calib_from_nv = false;
     if (osal_snv_read(DPLS_CALIB_SNV_ID, sizeof(nv), &nv) == SUCCESS &&
@@ -569,28 +496,40 @@ static void load_calibration(void)
 
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
-    uint32_t sum = 0u; uint8_t i;
-    window[*pos] = value; *pos = (uint8_t)((*pos + 1u) % DPLS_ADC_WINDOW);
+    uint32_t sum = 0u;
+    uint8_t i;
+    window[*pos] = value;
+    *pos = (uint8_t)((*pos + 1u) % DPLS_ADC_WINDOW);
     if (*count < DPLS_ADC_WINDOW) ++*count;
     for (i = 0u; i < *count; ++i) sum += window[i];
     return (uint16_t)(sum / *count);
 }
 
-static bool sample_fresh(uint8_t count, uint32_t last_sample_ms, uint32_t now)
-{ return count != 0u && (uint32_t)(now - last_sample_ms) <= DPLS_MEASUREMENT_STALE_MS; }
-
+/* One shared buffer: channels convert strictly one at a time, so per-input
+ * buffers would only waste SRAM. */
 static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
 static volatile uint8_t adc_raw_size;
 static volatile adc_CH_t adc_raw_channel;
 static volatile bool adc_raw_ready;
 
+/* Completion ISR: copy the samples, flag the channel, wake the task. Keep float,
+ * averaging, flash and BLE out of here — doing that work in interrupt context is
+ * the leading suspect for the ADC/radio watchdog reset loop. */
 static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i, n;
-    if (event->type != HAL_ADC_EVT_DATA) { adc_busy = false; return; }
+    if (event->type != HAL_ADC_EVT_DATA) {
+        adc_busy = false;
+        return;
+    }
     n = event->size > MAX_ADC_SAMPLE_SIZE ? MAX_ADC_SAMPLE_SIZE : event->size;
     for (i = 0; i < n; ++i) adc_raw[i] = event->data[i];
-    adc_raw_size = n; adc_raw_channel = event->ch; adc_raw_ready = true; adc_busy = false;
+    adc_raw_size = n;
+    adc_raw_channel = event->ch;
+    adc_raw_ready = true;
+    /* One-shot: the IRQ handler stops the converter itself, so only the
+     * re-entrancy guard is ours to clear. */
+    adc_busy = false;
     osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
 }
 
@@ -605,329 +544,690 @@ static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t siz
 
 static void adc_kick(void)
 {
-    adc_Cfg_t cfg; uint8_t channel, claim;
+    adc_Cfg_t cfg;
+    uint8_t channel;
+    uint8_t claim;
     if (adc_busy || adc_raw_ready || adc_pending == 0u) return;
     memset(&cfg, 0, sizeof(cfg));
+    /* Standard resolution: every divider keeps its pin at or below ~1 V. */
     if (adc_pending & DPLS_ADC_NEED_PORT1) {
-        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC)); claim = DPLS_ADC_NEED_PORT1;
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC));
+        claim = DPLS_ADC_NEED_PORT1;
     } else if (adc_pending & DPLS_ADC_NEED_PORT2) {
-        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC)); claim = DPLS_ADC_NEED_PORT2;
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC));
+        claim = DPLS_ADC_NEED_PORT2;
     } else if (adc_pending & DPLS_ADC_NEED_PORT_T) {
-        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC)); claim = DPLS_ADC_NEED_PORT_T;
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC));
+        claim = DPLS_ADC_NEED_PORT_T;
     } else {
-        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC)); claim = DPLS_ADC_NEED_VCAP;
+        channel = ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC));
+        claim = DPLS_ADC_NEED_VCAP;
     }
-    cfg.channel = channel; cfg.is_continue_mode = FALSE; cfg.is_differential_mode = 0u; cfg.is_high_resolution = 0u;
+    cfg.channel = channel;
+    cfg.is_continue_mode = FALSE;
+    cfg.is_differential_mode = 0u;
+    cfg.is_high_resolution = 0u;
     adc_busy = true;
-    if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) { adc_busy = false; return; }
-    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) { (void)hal_adc_stop(); adc_busy = false; return; }
+    if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
+        adc_busy = false;
+        return;
+    }
+    if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
+        (void)hal_adc_stop();
+        adc_busy = false;
+        return;
+    }
     adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
 }
 
 void dpls_phy6252_process_adc(void)
 {
     if (adc_raw_ready) {
-        adc_CH_t ch = adc_raw_channel; uint8_t size = adc_raw_size; uint32_t sample_ms = now_ms();
+        adc_CH_t ch = adc_raw_channel;
+        uint8_t size = adc_raw_size;
         adc_raw_ready = false;
         switch (ch) {
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC):
-            process_adc_channel(ch, adc_raw, size, &line_calib, line_window, &line_window_count, &line_window_pos, &cached_line_mv);
-            line_last_sample_ms = sample_ms; break;
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                line_window, &line_window_count, &line_window_pos,
+                                &cached_line_mv);
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT2_ADC):
-            process_adc_channel(ch, adc_raw, size, &line_calib, port2_window, &port2_window_count, &port2_window_pos, &cached_port2_mv);
-            port2_last_sample_ms = sample_ms; break;
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                port2_window, &port2_window_count, &port2_window_pos,
+                                &cached_port2_mv);
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_PORT_T_ADC):
-            process_adc_channel(ch, adc_raw, size, &line_calib, port_t_window, &port_t_window_count, &port_t_window_pos, &cached_port_t_mv);
-            port_t_last_sample_ms = sample_ms; break;
+            process_adc_channel(ch, adc_raw, size, &line_calib,
+                                port_t_window, &port_t_window_count, &port_t_window_pos,
+                                &cached_port_t_mv);
+            break;
         case DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC):
-            process_adc_channel(ch, adc_raw, size, &vcap_calib, vcap_window, &vcap_window_count, &vcap_window_pos, &cached_vcap_mv);
-            vcap_last_sample_ms = sample_ms; break;
-        default: break;
+            process_adc_channel(ch, adc_raw, size, &vcap_calib,
+                                vcap_window, &vcap_window_count, &vcap_window_pos,
+                                &cached_vcap_mv);
+            break;
+        default:
+            break;
         }
     }
+    /* Start the next channel from task context after consuming the shared raw
+     * buffer. A complete four-channel cycle is still initiated every second. */
     adc_kick();
 }
 
+/* Derive the power-source and reserve-low flags with hysteresis. Skipped until
+ * the first real sample of each channel so a cold cache of 0 mV cannot spoof a
+ * reserve/low-battery state at boot. */
 static void update_power_state(void)
 {
-    uint32_t now = now_ms();
-    if (sample_fresh(line_window_count, line_last_sample_ms, now)) {
+    if (line_window_count != 0u) {
         uint16_t line = cached_line_mv;
-        if (power_state == DPLS_POWER_LINE && line < DPLS_LINE_ABSENT_MV) power_state = DPLS_POWER_RESERVE;
-        else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV) power_state = DPLS_POWER_LINE;
+        if (power_state == DPLS_POWER_LINE && line < DPLS_LINE_ABSENT_MV)
+            power_state = DPLS_POWER_RESERVE;
+        else if (power_state == DPLS_POWER_RESERVE && line > DPLS_LINE_PRESENT_MV)
+            power_state = DPLS_POWER_LINE;
+        /* A real downstream short is a healthy line collapsing; ignore sags in
+         * the KZ test modes (we cause those ourselves). */
         if (line > DPLS_LINE_PRESENT_MV) line_established = true;
-        if (line_established && server.safety.mode == DPLS_MODE_NORMAL) {
+        if (line_established && hardware_mode == DPLS_MODE_NORMAL) {
             if (!auto_isolation_active && line < DPLS_AUTOISO_TRIP_MV) auto_isolation_active = true;
             else if (auto_isolation_active && line > DPLS_AUTOISO_CLEAR_MV) auto_isolation_active = false;
         }
     }
-    if (sample_fresh(vcap_window_count, vcap_last_sample_ms, now)) {
+    if (vcap_window_count != 0u) {
         uint16_t vcap = cached_vcap_mv;
         if (!reserve_low_state && vcap < DPLS_RESERVE_LOW_MV) reserve_low_state = true;
         else if (reserve_low_state && vcap > DPLS_RESERVE_OK_MV) reserve_low_state = false;
     }
 }
 
-static uint16_t voltage_mv(void *c) { (void)c; return cached_line_mv; }
-static uint16_t port1_voltage_mv(void *c) { (void)c; return cached_line_mv; }
-static uint16_t port2_voltage_mv(void *c) { (void)c; return cached_port2_mv; }
-static uint16_t port_t_voltage_mv(void *c) { (void)c; return cached_port_t_mv; }
-static uint16_t reserve_voltage_mv(void *c) { (void)c; return cached_vcap_mv; }
-static dpls_power_t power_source(void *c) { (void)c; return power_state; }
-static bool reserve_low(void *c) { (void)c; return reserve_low_state; }
-static bool real_short_active(void *c) { (void)c; return auto_isolation_active; }
+static uint16_t voltage_mv(void *context)
+{
+    (void)context;
+    return cached_line_mv;
+}
 
+static uint16_t port1_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_line_mv;
+}
+
+static uint16_t port2_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_port2_mv;
+}
+
+static uint16_t port_t_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_port_t_mv;
+}
+
+static uint16_t reserve_voltage_mv(void *context)
+{
+    (void)context;
+    return cached_vcap_mv;
+}
+
+static dpls_power_t power_source(void *context)
+{
+    (void)context;
+    return power_state;
+}
+
+static bool reserve_low(void *context)
+{
+    (void)context;
+    return reserve_low_state;
+}
+
+static bool real_short_active(void *context)
+{
+    (void)context;
+    return auto_isolation_active;
+}
+
+/* Which STATE_REPORT fields carry a real measurement. Line-derived fields
+ * (voltage, power source, auto-isolation) become valid once the line channel
+ * has produced a sample; reserve once the VCAP channel has. Until the first
+ * conversion lands the mask stays 0 and the app shows "—" / "Не определён"
+ * instead of the cold-cache 0 mV / "from line" defaults. */
 static uint8_t measurement_validity(void *context)
 {
-    uint8_t flags = 0; uint32_t now = now_ms(); (void)context;
-    if (sample_fresh(line_window_count, line_last_sample_ms, now))
-        flags |= DPLS_STATE_PORT_1_VALID | DPLS_STATE_POWER_VALID | DPLS_STATE_AUTOISO_VALID;
-    if (sample_fresh(port2_window_count, port2_last_sample_ms, now)) flags |= DPLS_STATE_PORT_2_VALID;
-    if (sample_fresh(port_t_window_count, port_t_last_sample_ms, now)) flags |= DPLS_STATE_PORT_T_VALID;
-    if (sample_fresh(vcap_window_count, vcap_last_sample_ms, now)) flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
-    if (line_calib_from_nv) flags |= DPLS_STATE_ADC_CALIBRATED;
+    uint8_t flags = 0;
+    (void)context;
+    if (line_window_count != 0u)
+        flags |= DPLS_STATE_PORT_1_VALID | DPLS_STATE_POWER_VALID |
+                 DPLS_STATE_AUTOISO_VALID;
+    if (port2_window_count != 0u)
+        flags |= DPLS_STATE_PORT_2_VALID;
+    if (port_t_window_count != 0u)
+        flags |= DPLS_STATE_PORT_T_VALID;
+    if (vcap_window_count != 0u)
+        flags |= DPLS_STATE_RESERVE_VOLTAGE_VALID;
+    if (line_calib_from_nv)
+        flags |= DPLS_STATE_ADC_CALIBRATED;
     return flags;
 }
 
-static void identify_led(void *c, bool enabled) { (void)c; identify_led_active = enabled; }
-
-/* ---------------- auth и TX ---------------- */
+static void identify_led(void *context, bool enabled)
+{
+    (void)context;
+    /* The LED driver renders the 1 Hz identify blink; here we only latch that
+     * identify is the active scene so the next LED tick picks it up. */
+    identify_led_active = enabled;
+}
 
 static bool random_bytes(void *context, uint8_t *out, size_t length)
 {
-    size_t offset = 0; (void)context;
+    uint8_t generated;
+    size_t offset = 0;
+    (void)context;
     while (offset < length) {
         uint8_t chunk = (uint8_t)((length - offset) > 16u ? 16u : (length - offset));
-        if (LL_ENC_GenerateTrueRandNum(out + offset, chunk) != SUCCESS) {
-            memset(out, 0, length); safe_normal(NULL); return false;
+        generated = LL_ENC_GenerateTrueRandNum(out + offset, chunk);
+        if (generated != SUCCESS) {
+            memset(out, 0, length);
+            safe_normal(NULL);
+            return false;
         }
         offset += chunk;
     }
     return true;
 }
 
+static dpls_settings_state_t get_settings_state(void *context)
+{
+    (void)context;
+    return settings_state;
+}
+
+static void settings_salt(void *context, uint8_t out[DPLS_AUTH_SALT_SIZE])
+{
+    (void)context;
+    if (settings_state == DPLS_SETTINGS_VALID) memcpy(out, settings.salt, DPLS_AUTH_SALT_SIZE);
+    else memset(out, 0, DPLS_AUTH_SALT_SIZE);
+}
+
+/* Persist the current in-RAM `settings` record (magic + CRC), read it back to
+ * confirm the write, then set the VALID marker. Shared by initial commissioning
+ * and the in-place name/password updates. */
+static bool persist_current_settings(void)
+{
+    dpls_settings_t verified;
+    uint8 marker = DPLS_SETTINGS_VALID_MARKER;
+    settings.magic = DPLS_SETTINGS_MAGIC;
+    settings.crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
+    if (osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings) != SUCCESS ||
+        osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(verified), &verified) != SUCCESS ||
+        verified.magic != DPLS_SETTINGS_MAGIC ||
+        verified.crc != dpls_crc16((const uint8_t *)&verified, offsetof(dpls_settings_t, crc)) ||
+        osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) != SUCCESS) {
+        memset(&settings, 0, sizeof(settings));
+        settings_state = DPLS_SETTINGS_CORRUPT;
+        return false;
+    }
+    settings_state = DPLS_SETTINGS_VALID;
+    return true;
+}
+
+static bool write_settings(void *context, const char *name, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    size_t name_length;
+    (void)context;
+    memset(&settings, 0, sizeof(settings));
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memcpy(settings.name, name, name_length);
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
+static void settings_name(void *context, char out[DPLS_NAME_MAX + 1u])
+{
+    (void)context;
+    if (settings_state == DPLS_SETTINGS_VALID) {
+        memcpy(out, settings.name, DPLS_NAME_MAX);
+        out[DPLS_NAME_MAX] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+}
+
+static bool settings_set_name(void *context, const char *name)
+{
+    size_t name_length;
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    name_length = strlen(name);
+    if (name_length >= DPLS_NAME_SIZE) name_length = DPLS_NAME_SIZE - 1u;
+    memset(settings.name, 0, sizeof(settings.name));
+    memcpy(settings.name, name, name_length);
+    return persist_current_settings();
+}
+
+static bool settings_set_password(void *context, const uint8_t salt[16], const uint8_t verifier[32])
+{
+    (void)context;
+    if (settings_state != DPLS_SETTINGS_VALID) return false;
+    memcpy(settings.salt, salt, DPLS_AUTH_SALT_SIZE);
+    memcpy(settings.verifier, verifier, DPLS_AUTH_PROOF_SIZE);
+    return persist_current_settings();
+}
+
 static void device_info(void *context, dpls_device_info_t *out)
 {
     (void)context;
     out->device_id = dpls_ble_identity_device_id();
-    out->fw_major = DPLS_FW_VERSION_MAJOR; out->fw_minor = DPLS_FW_VERSION_MINOR;
-    out->fw_patch = DPLS_FW_VERSION_PATCH; out->hw_revision = DPLS_HW_REVISION;
-    out->capabilities = DPLS_CAP_ADC_PRESENT | DPLS_CAP_MULTI_VOLTAGE_REPORT;
+    out->fw_major = DPLS_FW_VERSION_MAJOR;
+    out->fw_minor = DPLS_FW_VERSION_MINOR;
+    out->fw_patch = DPLS_FW_VERSION_PATCH;
+    out->hw_revision = DPLS_HW_REVISION;
+    out->capabilities = 0u;
+    out->capabilities |= DPLS_CAP_ADC_PRESENT;
+    out->capabilities |= DPLS_CAP_MULTI_VOLTAGE_REPORT;
     if (line_calib_from_nv) out->capabilities |= DPLS_CAP_ADC_CALIBRATED;
+    /* DPLS_CAP_HW_READBACK stays clear: no power-stage feedback yet (stage 6). */
 }
 
 static bool auth_lock_read(void *context)
 {
-    dpls_auth_lock_t record; (void)context;
+    dpls_auth_lock_t record;
+    (void)context;
     if (osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) != SUCCESS) return false;
     if (record.magic != DPLS_AUTH_LOCK_MAGIC ||
-        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc))) return false;
+        record.crc != dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc)))
+        return false;
     return record.locked != 0u;
 }
 
 static bool auth_lock_write(void *context, bool locked)
 {
-    dpls_auth_lock_t current, record; bool current_valid; (void)context;
+    dpls_auth_lock_t current;
+    dpls_auth_lock_t record;
+    bool current_valid;
+    (void)context;
+
     current_valid = osal_snv_read(DPLS_AUTH_LOCK_SNV_ID, sizeof(current), &current) == SUCCESS &&
                     current.magic == DPLS_AUTH_LOCK_MAGIC &&
                     current.crc == dpls_crc16((const uint8_t *)&current, offsetof(dpls_auth_lock_t, crc));
     if (current_valid && ((current.locked != 0u) == locked)) return true;
+    /* A missing or corrupt marker already means "not persistently locked", so
+     * writing the default state would burn a flash erase/write cycle after every
+     * successful authentication for nothing. */
     if (!current_valid && !locked) return true;
-    record.magic = DPLS_AUTH_LOCK_MAGIC; record.locked = locked ? 1u : 0u; record.reserved = 0u;
+
+    record.magic = DPLS_AUTH_LOCK_MAGIC;
+    record.locked = locked ? 1u : 0u;
+    record.reserved = 0u;
     record.crc = dpls_crc16((const uint8_t *)&record, offsetof(dpls_auth_lock_t, crc));
-    return snv_write_bounded(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) == SUCCESS;
+    return osal_snv_write(DPLS_AUTH_LOCK_SNV_ID, sizeof(record), &record) == SUCCESS;
 }
 
 static bool verify_proof(void *context, const uint8_t device_nonce[16], const uint8_t client_nonce[16],
                          uint32_t session_id, const uint8_t proof[32])
 {
+    /* HMAC on the OSAL stack overflows the 1 KiB ARMCM0 stack: receive already
+     * uses 496 bytes, verify_proof was 344, total ~1092. UART then shows
+     * QTX n=20 t=04 followed by TX n=57347 and drop rc=13. */
     static struct tc_hmac_state_struct hmac;
-    uint8_t signed_data[36], expected[32], difference = 0, i; (void)context;
+    uint8_t signed_data[36];
+    uint8_t expected[32];
+    uint8_t difference = 0;
+    uint8_t i;
+    (void)context;
     if (settings_state != DPLS_SETTINGS_VALID) return false;
-    memcpy(signed_data, device_nonce, 16); memcpy(signed_data + 16, client_nonce, 16);
-    signed_data[32] = (uint8_t)session_id; signed_data[33] = (uint8_t)(session_id >> 8);
-    signed_data[34] = (uint8_t)(session_id >> 16); signed_data[35] = (uint8_t)(session_id >> 24);
+    memcpy(signed_data, device_nonce, 16);
+    memcpy(signed_data + 16, client_nonce, 16);
+    signed_data[32] = (uint8_t)session_id;
+    signed_data[33] = (uint8_t)(session_id >> 8);
+    signed_data[34] = (uint8_t)(session_id >> 16);
+    signed_data[35] = (uint8_t)(session_id >> 24);
     if (!tc_hmac_set_key(&hmac, settings.verifier, sizeof(settings.verifier)) ||
         !tc_hmac_init(&hmac) || !tc_hmac_update(&hmac, signed_data, sizeof(signed_data)) ||
         !tc_hmac_final(expected, sizeof(expected), &hmac)) {
-        memset(&hmac, 0, sizeof(hmac)); return false;
+        memset(&hmac, 0, sizeof(hmac));
+        return false;
     }
     for (i = 0; i < sizeof(expected); ++i) difference |= (uint8_t)(expected[i] ^ proof[i]);
-    memset(&hmac, 0, sizeof(hmac)); memset(expected, 0, sizeof(expected)); memset(signed_data, 0, sizeof(signed_data));
+    memset(&hmac, 0, sizeof(hmac));
+    memset(expected, 0, sizeof(expected));
+    memset(signed_data, 0, sizeof(signed_data));
     return difference == 0;
 }
 
+/* Send the head of the TX queue if nothing is in flight. Runs from the OSAL
+ * task (via DPLS_PHY6252_TX_EVT or the tick), never nested under the RX handler,
+ * so the ATT indication buffer stays off the receive path's stack. */
 static void tx_complete_head(void)
 {
-    if (tx.count == 0u) { tx.in_flight = false; return; }
-    tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH); --tx.count; tx.in_flight = false;
+    if (tx.count == 0u) {
+        tx.in_flight = false;
+        return;
+    }
+    tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
+    --tx.count;
+    tx.in_flight = false;
 }
 
 static void tx_pump(void)
 {
     bStatus_t rc;
-    if (tx.in_flight || tx.count == 0u || !dpls_phy6252_link_active()) return;
-    rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data, tx.slots[tx.head].length, task_id);
-    if (rc == SUCCESS) { tx.in_flight = true; tx.in_flight_since_ms = now_ms(); }
-    else if (rc != bleMemAllocError && rc != blePending && rc != MSG_BUFFER_NOT_AVAIL && rc != bleNotConnected) {
-        tx_complete_head(); if (tx.count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) {
+        if (tx.count != 0u) {
+            LOG("DPLS TX skip inflight=%u count=%u conn=%u\n",
+                tx.in_flight ? 1u : 0u,
+                tx.count,
+                connection_handle == INVALID_CONNHANDLE ? 0u : 1u);
+        }
+        return;
+    }
+    rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
+                                   tx.slots[tx.head].length, task_id);
+    if (rc == SUCCESS) {
+        /* rc1: one PDU in flight until the stack is ready again. Immediate
+         * complete_head on notify re-pumped the queue on every LED tick,
+         * exhausted ATT buffers (rc=19), and drop-new swallowed AUTH_RESULT. */
+        tx.in_flight = true;
+        tx.in_flight_since_ms = now_ms();
+    } else if (rc == bleMemAllocError || rc == blePending || rc == MSG_BUFFER_NOT_AVAIL ||
+               rc == bleNotConnected) {
+        /* Keep the head. bleNotConnected from a CCCD read in the write turn is
+         * not a reason to discard AUTH_RESULT; TX_EVT / tick retries. */
+    } else {
+        LOG("DPLS TX drop t=%02x rc=%u\n",
+            tx.slots[tx.head].length > 1u ? tx.slots[tx.head].data[1] : 0u,
+            rc);
+        tx_complete_head();
+        if (tx.count) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
     }
 }
 
 static bool tx_indicate(void *context, const uint8_t *frame, size_t length)
 {
     (void)context;
-    if (length > DPLS_TX_SLOT_SIZE || tx.count >= DPLS_TX_QUEUE_DEPTH) return false;
-    memcpy(tx.slots[tx.tail].data, frame, length); tx.slots[tx.tail].length = (uint16)length;
-    tx.tail = (uint8)((tx.tail + 1u) % DPLS_TX_QUEUE_DEPTH); ++tx.count;
-    osal_set_event(task_id, DPLS_PHY6252_TX_EVT); return true;
+    if (length > DPLS_TX_SLOT_SIZE) return false;
+    if (tx.count >= DPLS_TX_QUEUE_DEPTH) {
+        LOG("DPLS QTX full t=%02x count=%u\n", length > 1u ? frame[1] : 0u, tx.count);
+        return false;
+    }
+    memcpy(tx.slots[tx.tail].data, frame, length);
+    tx.slots[tx.tail].length = (uint16)length;
+    tx.tail = (uint8)((tx.tail + 1u) % DPLS_TX_QUEUE_DEPTH);
+    ++tx.count;
+    LOG("DPLS QTX n=%u t=%02x count=%u\n",
+        (unsigned)length,
+        length > 1u ? frame[1] : 0u,
+        tx.count);
+    osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+    return true;
 }
 
 void dpls_phy6252_process_tx(void)
 {
-    uint32_t elapsed_ms;
-    if (tx.in_flight) {
-        if (dpls_gatt_needs_confirmation(connection_handle)) return;
-        elapsed_ms = (uint32_t)(now_ms() - tx.in_flight_since_ms);
-        if (elapsed_ms < DPLS_TX_NOTIFY_PACE_MS) {
-            osal_start_timerEx(task_id, DPLS_PHY6252_TX_EVT, DPLS_TX_NOTIFY_PACE_MS - elapsed_ms); return;
-        }
-        tx_complete_head();
-    }
     tx_pump();
-    if (tx.in_flight && !dpls_gatt_needs_confirmation(connection_handle))
-        osal_start_timerEx(task_id, DPLS_PHY6252_TX_EVT, DPLS_TX_NOTIFY_PACE_MS);
-}
-
-bool dpls_phy6252_tx_idle(void)
-{
-    return tx.count == 0u && !tx.in_flight;
 }
 
 void dpls_phy6252_tx_confirmed(void)
 {
-    if (!tx.in_flight || !dpls_gatt_needs_confirmation(connection_handle)) return;
-    tx_complete_head(); tx_pump();
+    LOG("DPLS CFM inflight=%u count=%u\n", tx.in_flight ? 1u : 0u, tx.count);
+    if (tx.in_flight) tx_complete_head();
+    tx_pump();
 }
 
 static uint8 receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
     if (length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
+    /* Full queue: NAK the write so the client retries instead of losing the
+     * frame silently. */
     if (rx.count >= DPLS_RX_QUEUE_DEPTH) return ATT_ERR_INSUFFICIENT_RESOURCES;
-    slot = &rx.slots[rx.tail]; memcpy(slot->data, data, length); slot->length = length;
-    rx.tail = (uint8)((rx.tail + 1u) % DPLS_RX_QUEUE_DEPTH); ++rx.count;
-    osal_set_event(task_id, DPLS_PHY6252_RX_EVT); return SUCCESS;
+    slot = &rx.slots[rx.tail];
+    memcpy(slot->data, data, length);
+    slot->length = length;
+    rx.tail = (uint8)((rx.tail + 1u) % DPLS_RX_QUEUE_DEPTH);
+    ++rx.count;
+    osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
+    return SUCCESS;
 }
 
 static void clear_settings_and_bonds(void)
 {
-    /* EMPTY generation — durable tombstone. Если питание пропадёт после этой
-     * записи, следующий boot всё равно выберет EMPTY и завершит очистку bonds. */
-    if (!persist_settings_candidate(NULL, DPLS_DURABLE_SETTINGS_EMPTY)) {
-        LOG("DPLS factory reset settings commit failed\n");
-        return;
-    }
+    uint8 marker = DPLS_SETTINGS_EMPTY_MARKER;
+    memset(&settings, 0, sizeof(settings));
+    /* The explicit marker is written only by the physical reset path. A bad
+     * settings record never becomes remotely commissionable by accident. */
+    (void)osal_snv_write(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
+    (void)osal_snv_write(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker);
+    /* Factory reset also lifts any persisted brute-force lock. */
     (void)auth_lock_write(NULL, false);
+    settings_state = DPLS_SETTINGS_EMPTY;
     GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
     dpls_ble_identity_reset_bonding_keys();
     hal_gpio_write(DPLS_PIN_LED_GREEN, 1);
     NVIC_SystemReset();
 }
 
-static void disconnect_after_setup(void *context) { (void)context; (void)GAPRole_TerminateConnection(); }
+static void disconnect_after_setup(void *context)
+{
+    (void)context;
+    (void)GAPRole_TerminateConnection();
+}
+
+static void classify_settings(void)
+{
+    uint16_t expected_crc;
+    uint8 marker = 0;
+    uint8 state_read;
+    memset(&settings, 0, sizeof(settings));
+    state_read = osal_snv_read(DPLS_SETTINGS_SNV_ID, sizeof(settings), &settings);
+    if (state_read != SUCCESS) {
+        settings_state = DPLS_SETTINGS_EMPTY;
+        return;
+    }
+    expected_crc = dpls_crc16((const uint8_t *)&settings, offsetof(dpls_settings_t, crc));
+    if (settings.magic == DPLS_SETTINGS_MAGIC && settings.crc == expected_crc) {
+        settings_state = DPLS_SETTINGS_VALID;
+        return;
+    }
+    if (osal_snv_read(DPLS_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) == SUCCESS &&
+        marker == DPLS_SETTINGS_EMPTY_MARKER) {
+        settings_state = DPLS_SETTINGS_EMPTY;
+        return;
+    }
+    settings_state = DPLS_SETTINGS_CORRUPT;
+    memset(&settings, 0, sizeof(settings));
+}
 
 static void initialize_retained_outputs(void)
 {
+    /* hal_gpio_write loads the safe latch before enabling output; pin_init can pulse a retained high latch. */
     mode_outputs_off();
-    hal_gpio_write(DPLS_PIN_LED_RED, 0); hal_gpio_write(DPLS_PIN_LED_GREEN, 0); hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
-    (void)hal_gpioretention_register(DPLS_PIN_ISO_1); (void)hal_gpioretention_register(DPLS_PIN_ISO_2);
-    (void)hal_gpioretention_register(DPLS_PIN_ISO_T); (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
-    (void)hal_gpioretention_register(DPLS_PIN_KZ_2); (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
-    (void)hal_gpioretention_register(DPLS_PIN_LED_RED); (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
+    hal_gpio_write(DPLS_PIN_LED_RED, 0);
+    hal_gpio_write(DPLS_PIN_LED_GREEN, 0);
+    hal_gpio_write(DPLS_PIN_LED_BLUE, 0);
+
+    /* PHY62xx powers GPIO down in sleep, so every stateful output must use AON retention. */
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_1);
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_2);
+    (void)hal_gpioretention_register(DPLS_PIN_ISO_T);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_1);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_2);
+    (void)hal_gpioretention_register(DPLS_PIN_KZ_T);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_RED);
+    (void)hal_gpioretention_register(DPLS_PIN_LED_GREEN);
     (void)hal_gpioretention_register(DPLS_PIN_LED_BLUE);
+    hardware_mode = DPLS_MODE_NORMAL;
 }
 
 static void reset_measurements(void)
 {
-    line_window_count = line_window_pos = 0; port2_window_count = port2_window_pos = 0;
-    port_t_window_count = port_t_window_pos = 0; vcap_window_count = vcap_window_pos = adc_decimate = 0;
-    line_last_sample_ms = port2_last_sample_ms = port_t_last_sample_ms = vcap_last_sample_ms = 0u;
+    line_window_count = line_window_pos = 0;
+    port2_window_count = port2_window_pos = 0;
+    port_t_window_count = port_t_window_pos = 0;
+    vcap_window_count = vcap_window_pos = adc_decimate = 0;
     cached_line_mv = cached_port2_mv = cached_port_t_mv = cached_vcap_mv = 0;
-    adc_pending = 0u; adc_raw_ready = false; adc_busy = false; power_state = DPLS_POWER_LINE;
-    reserve_low_state = false; auto_isolation_active = false; line_established = false;
+    adc_pending = 0u;
+    adc_raw_ready = false;
+    adc_busy = false;
+    power_state = DPLS_POWER_LINE;
+    reserve_low_state = false;
+    auto_isolation_active = false;
+    line_established = false;
 }
 
 static dpls_hal_t server_hal(void)
 {
-    dpls_hal_t hal; memset(&hal, 0, sizeof(hal));
-    hal.link.encrypted = link_encrypted; hal.link.indicate = tx_indicate; hal.link.disconnect = disconnect_after_setup;
-    hal.hardware.apply_mode = apply_mode; hal.hardware.safe_normal = safe_normal;
-    hal.hardware.voltage_mv = voltage_mv; hal.hardware.port1_voltage_mv = port1_voltage_mv;
-    hal.hardware.port2_voltage_mv = port2_voltage_mv; hal.hardware.port_t_voltage_mv = port_t_voltage_mv;
-    hal.hardware.reserve_voltage_mv = reserve_voltage_mv; hal.hardware.power_source = power_source;
-    hal.hardware.reserve_low = reserve_low; hal.hardware.measurement_validity = measurement_validity;
-    hal.hardware.real_short_active = real_short_active; hal.hardware.identify_led = identify_led;
+    dpls_hal_t hal;
+    memset(&hal, 0, sizeof(hal));
+    hal.link.encrypted = link_encrypted;
+    hal.link.indicate = tx_indicate;
+    hal.link.disconnect = disconnect_after_setup;
+    hal.hardware.apply_mode = apply_mode;
+    hal.hardware.safe_normal = safe_normal;
+    hal.hardware.voltage_mv = voltage_mv;
+    hal.hardware.port1_voltage_mv = port1_voltage_mv;
+    hal.hardware.port2_voltage_mv = port2_voltage_mv;
+    hal.hardware.port_t_voltage_mv = port_t_voltage_mv;
+    hal.hardware.reserve_voltage_mv = reserve_voltage_mv;
+    hal.hardware.power_source = power_source;
+    hal.hardware.reserve_low = reserve_low;
+    hal.hardware.measurement_validity = measurement_validity;
+    hal.hardware.real_short_active = real_short_active;
+    hal.hardware.identify_led = identify_led;
     hal.hardware.device_info = device_info;
-    hal.settings.state = get_settings_state; hal.settings.salt = settings_salt; hal.settings.write = write_settings;
-    hal.settings.name = settings_name; hal.settings.set_name = settings_set_name; hal.settings.set_password = settings_set_password;
-    hal.auth.random_bytes = random_bytes; hal.auth.verify_proof = verify_proof;
-    hal.auth.lock_read = auth_lock_read; hal.auth.lock_write = auth_lock_write;
-    hal.events.init = journal_storage_init; hal.events.append = journal_storage_append; hal.events.read = journal_storage_read;
+    hal.settings.state = get_settings_state;
+    hal.settings.salt = settings_salt;
+    hal.settings.write = write_settings;
+    hal.settings.name = settings_name;
+    hal.settings.set_name = settings_set_name;
+    hal.settings.set_password = settings_set_password;
+    hal.auth.random_bytes = random_bytes;
+    hal.auth.verify_proof = verify_proof;
+    hal.auth.lock_read = auth_lock_read;
+    hal.auth.lock_write = auth_lock_write;
+    hal.events.init = journal_storage_init;
+    hal.events.append = journal_storage_append;
+    hal.events.read = journal_storage_read;
     return hal;
 }
 
 void dpls_phy6252_init(uint8 new_task_id)
 {
     dpls_hal_t hal = server_hal();
-    task_id = new_task_id; connection_handle = INVALID_CONNHANDLE;
-    memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
-    journal_pending_event_count = 0u; journal_cached_block = 0xffu; identify_led_active = false;
-    initialize_retained_outputs(); dpls_led_init(&status_led, status_led_output, NULL, now_ms());
-    reset_measurements(); load_calibration(); hal_adc_init();
-    hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE); hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
+    task_id = new_task_id;
+    connection_handle = INVALID_CONNHANDLE;
+    memset(&rx, 0, sizeof(rx));
+    memset(&tx, 0, sizeof(tx));
+    identify_led_active = false;
+    initialize_retained_outputs();
+    dpls_led_init(&status_led, status_led_output, NULL, now_ms());
+    reset_measurements();
+    load_calibration();
+    hal_adc_init();
+    hal_gpio_pin_init(DPLS_FACTORY_RESET_PIN, IE);
+    hal_gpio_pull_set(DPLS_FACTORY_RESET_PIN, GPIO_PULL_DOWN);
     classify_settings();
-    factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN); factory_reset_started_ms = now_ms();
+    factory_reset_armed = hal_gpio_read(DPLS_FACTORY_RESET_PIN);
+    factory_reset_started_ms = now_ms();
     if (settings_state == DPLS_SETTINGS_EMPTY) {
         GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
         dpls_ble_identity_reset_bonding_keys();
     }
+
     dpls_server_init(&server, &hal, now_ms());
     (void)dpls_gatt_add_service(receive_frame);
-    /* Boot event остаётся в RAM. Target разрешит storage только после GAPROLE_STARTED. */
-    LOG("DPLS boot settings=%u gen=%lu slot=%u\n", (unsigned)settings_state,
-        (unsigned long)settings_generation, (unsigned)settings_active_slot);
+    LOG("DPLS boot settings=%u\n", (unsigned)settings_state);
+}
+
+static void erase_stored_bonds(void)
+{
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
+}
+
+static void erase_bonds_and_drop_link(void)
+{
+    erase_stored_bonds();
+    if (connection_handle != INVALID_CONNHANDLE) {
+        (void)GAPRole_TerminateConnection();
+    }
+}
+
+static void note_pre_auth_disconnect(void)
+{
+    uint32_t now = now_ms();
+    if (dpls_server_authenticated(&server) || !connection_had_encryption) {
+        return;
+    }
+    if (pre_auth_disconnect_window_ms == 0u ||
+        (uint32_t)(now - pre_auth_disconnect_window_ms) > DPLS_BOND_DESYNC_WINDOW_MS) {
+        pre_auth_disconnect_count = 0;
+        pre_auth_disconnect_window_ms = now;
+    }
+    if (++pre_auth_disconnect_count < DPLS_BOND_DESYNC_LIMIT) {
+        return;
+    }
+    pre_auth_disconnect_count = 0;
+    pre_auth_disconnect_window_ms = 0;
+    erase_stored_bonds();
 }
 
 void dpls_phy6252_connected(uint16 conn_handle)
 {
-    connection_handle = conn_handle; connected_at_ms = now_ms(); connection_had_encryption = false;
+    connection_handle = conn_handle;
+    connected_at_ms = now_ms();
+    connection_had_encryption = false;
+    /* An idle connection is allowed to sleep: the guard belongs to the power
+     * stage, not to the link. See control_sleep_guard(). */
     dpls_server_connected(&server, now_ms());
+    LOG("DPLS CONN %u\n", conn_handle);
 }
 
 void dpls_phy6252_disconnected(void)
 {
-    dpls_server_disconnected(&server, now_ms()); connection_handle = INVALID_CONNHANDLE;
-    connected_at_ms = 0; connection_had_encryption = false; memset(&rx, 0, sizeof(rx)); memset(&tx, 0, sizeof(tx));
-    if (journal_pending_event_count != 0u) osal_set_event(task_id, DPLS_PHY6252_STORAGE_EVT);
+    /* No unlock here: dpls_server_disconnected() forces Norma, and that path
+     * owns the guard. */
+    note_pre_auth_disconnect();
+    dpls_server_disconnected(&server, now_ms());
+    connection_handle = INVALID_CONNHANDLE;
+    connected_at_ms = 0;
+    connection_had_encryption = false;
+    memset(&rx, 0, sizeof(rx));
+    memset(&tx, 0, sizeof(tx));
+    LOG("DPLS DISC\n");
 }
 
 void dpls_phy6252_process_rx(void)
 {
     dpls_rx_slot_t *slot;
     if (rx.count == 0u) return;
-    slot = &rx.slots[rx.head]; (void)dpls_server_receive(&server, slot->data, slot->length, now_ms());
-    slot->length = 0; rx.head = (uint8)((rx.head + 1u) % DPLS_RX_QUEUE_DEPTH); --rx.count;
+    slot = &rx.slots[rx.head];
+    (void)dpls_server_receive(&server, slot->data, slot->length, now_ms());
+    slot->length = 0;
+    rx.head = (uint8)((rx.head + 1u) % DPLS_RX_QUEUE_DEPTH);
+    --rx.count;
     if (rx.count != 0u) osal_set_event(task_id, DPLS_PHY6252_RX_EVT);
 }
 
 static void tick_link_security(uint32_t now)
 {
-    if (!dpls_phy6252_link_active()) return;
-    if (link_encrypted(NULL)) connection_had_encryption = true;
-    if (!link_encrypted(NULL) && !connection_had_encryption && connected_at_ms != 0u &&
+    if (connection_handle != INVALID_CONNHANDLE) {
+        if (link_encrypted(NULL)) connection_had_encryption = true;
+        if (dpls_server_authenticated(&server)) {
+            pre_auth_disconnect_count = 0;
+            pre_auth_disconnect_window_ms = 0;
+        }
+    }
+    if (connection_handle != INVALID_CONNHANDLE && !link_encrypted(NULL) &&
+        !connection_had_encryption && connected_at_ms != 0u &&
         (uint32_t)(now - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
-        connected_at_ms = 0; (void)GAPRole_TerminateConnection();
+        LOG("DPLS KILL encrypt\n");
+        connected_at_ms = 0;
+        erase_bonds_and_drop_link();
     }
 }
 
@@ -936,7 +1236,8 @@ static void tick_factory_reset(uint32_t now)
     if (factory_reset_armed) {
         if (!hal_gpio_read(DPLS_FACTORY_RESET_PIN)) factory_reset_armed = false;
         else if ((uint32_t)(now - factory_reset_started_ms) >= DPLS_FACTORY_RESET_HOLD_MS) {
-            factory_reset_armed = false; clear_settings_and_bonds();
+            factory_reset_armed = false;
+            clear_settings_and_bonds();
         }
     }
 }
@@ -945,8 +1246,9 @@ static void tick_measurements(void)
 {
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0;
-        adc_pending = dpls_phy6252_link_active() ? (uint8_t)DPLS_ADC_NEED_ALL :
-            (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
+        adc_pending = connection_handle != INVALID_CONNHANDLE
+            ? (uint8_t)DPLS_ADC_NEED_ALL
+            : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
         adc_kick();
     }
     update_power_state();
@@ -954,30 +1256,43 @@ static void tick_measurements(void)
 
 static void tick_tx(uint32_t now)
 {
-    if (tx.in_flight && dpls_gatt_needs_confirmation(connection_handle) &&
-        (uint32_t)(now - tx.in_flight_since_ms) >= DPLS_TX_CONFIRM_TIMEOUT_MS) {
-        LOG("DPLS TX indication confirmation timeout\n");
-        (void)GAPRole_TerminateConnection();
+    uint32_t pace_ms = dpls_gatt_needs_confirmation(connection_handle)
+                           ? DPLS_TX_CONFIRM_TIMEOUT_MS
+                           : DPLS_TX_NOTIFY_PACE_MS;
+    if (tx.in_flight && (uint32_t)(now - tx.in_flight_since_ms) >= pace_ms) {
+        dpls_phy6252_tx_confirmed();
         return;
     }
-    dpls_phy6252_process_tx();
+    tx_pump();
 }
 
 void dpls_phy6252_tick(void)
 {
     uint32_t now = now_ms();
-    tick_link_security(now); tick_factory_reset(now); tick_measurements(); dpls_server_tick(&server, now); tick_tx(now);
-    /* Flash scheduling принадлежит target idle/connection lifecycle, не domain tick. */
+    tick_link_security(now);
+    tick_factory_reset(now);
+    tick_measurements();
+    dpls_server_tick(&server, now);
+    tick_tx(now);
+    /* Journal flash must not share an OSAL turn with GATT_Notification:
+     * SNV GC after AUTH_RESULT notify leaves the PDU in the LL until erase,
+     * and Samsung never sees t=04. */
+    journal_flush_snv();
 }
 
 uint32 dpls_phy6252_led_tick(void)
 {
-    uint32_t now = now_ms(), delay; dpls_led_scene_t scene;
+    uint32_t now = now_ms();
+    uint32_t delay;
+    dpls_led_scene_t scene;
     bool reserve = power_source(NULL) == DPLS_POWER_RESERVE;
     if (identify_led_active) scene = DPLS_LED_SCENE_IDENTIFY;
     else if (auto_isolation_active) scene = DPLS_LED_SCENE_AUTO_ISOLATION;
-    else scene = led_scene_for_mode(server.safety.mode);
-    dpls_led_set(&status_led, scene, reserve, now); delay = dpls_led_tick(&status_led, now);
+    else scene = led_scene_for_mode(hardware_mode);
+    dpls_led_set(&status_led, scene, reserve, now);
+    delay = dpls_led_tick(&status_led, now);
+    /* Pass a zero straight through: it is the "nothing to show" answer, and
+     * clamping it to the minimum would keep the core waking up in Norma. */
     if (delay == 0u) return 0u;
     if (delay < DPLS_LED_TICK_MIN_MS) delay = DPLS_LED_TICK_MIN_MS;
     if (delay > DPLS_LED_TICK_MAX_MS) delay = DPLS_LED_TICK_MAX_MS;
