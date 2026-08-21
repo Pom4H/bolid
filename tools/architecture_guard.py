@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
+CONNECTION_ACTOR = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt"
+CONNECTION_MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
 ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
@@ -20,6 +22,9 @@ GATT = ROOT / "firmware/phy6252/dpls_gatt_service.c"
 PHY_APP = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 PHY_APP_H = ROOT / "firmware/phy6252/dpls_phy6252_app.h"
 PHY_TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
+PHY_STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
+STORAGE_ACTOR = ROOT / "firmware/src/dpls_storage_actor.c"
+SAFETY = ROOT / "firmware/src/dpls_safety.c"
 SERVER = ROOT / "firmware/src/dpls_server.c"
 
 violations: list[str] = []
@@ -55,13 +60,18 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
 
 
 # Product lifecycle / transaction ownership.
-require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must own lifecycle state")
+require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must define lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
 require_text(SESSION, "data class Synchronizing(", "authentication must not imply verified identity")
 require_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\s*,", "Online must require verified NodeId")
 forbid_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\?", "Online may not contain unknown identity")
-require_text(CLIENT, "private var session: DeviceSession", "controller must have one lifecycle owner")
+require_text(CLIENT, "private val connection = ConnectionActor()", "ConnectionActor must own product lifecycle")
+require_text(CLIENT, "get() = connection.state", "DplsClient may only read lifecycle through ConnectionActor")
+forbid_regex(CLIENT, r"private\s+var\s+session\s*:\s*DeviceSession", "second mutable DeviceSession owner is forbidden")
+require_text(CLIENT, "connection.transitionTo(next)", "all compatibility lifecycle transitions must pass through reducer")
+require_text(CONNECTION_ACTOR, "ConnectionMachine.reduce(state, event)", "ConnectionActor must delegate transitions to reducer")
+require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must stay explicit and pure")
 require_text(CLIENT, "private fun projectSession", "UI lifecycle must be projected")
 require_text(CLIENT, "phase = connectionPhase(ui)", "UI phase must derive from DeviceSession")
 for stale_owner in ("DplsSessionRuntime", "wireSession", "runtimeSession", "selectedAddress"):
@@ -107,6 +117,8 @@ require_regex(ANDROID_BLE, r"connectAttempts\s*=\s*0\s*\n\s*if\s*\(subscribed\)"
 forbid_text(ANDROID_BLE, "PAIRING_DISCONNECT_STATUSES", "pairing correctness may not depend on disconnect status whitelist")
 forbid_text(ANDROID_BLE, "POST_BOND_SETTLE_MS", "pairing may not depend on post-bond magic delay")
 forbid_text(ANDROID_BLE, "securityPendingWrite", "blocked frame must live inside SecurityState")
+forbid_text(ANDROID_BLE, "PAIRING_TIMEOUT_MS", "Android transport must not own a second connection deadline")
+forbid_text(ANDROID_BLE, "pairingTimeout", "Android transport must not own a second timeout state")
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_AUTHENTICATION = 5", "GATT 5 must be pairing-required")
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_ENCRYPTION = 15", "GATT 15 must be pairing-required")
 require_regex(ANDROID_SECURITY, r"requiresPairing\s*\(status\)\s*->\s*WriteDisposition\.PAIRING_REQUIRED", "security errors must not fall through to retry")
@@ -129,12 +141,22 @@ forbid_text(PHY_APP, "DPLS_BOND_DESYNC", "application auth may not own BLE bond 
 forbid_text(PHY_APP, "note_pre_auth_disconnect", "DPLS auth disconnects may not erase BLE bonds")
 forbid_text(PHY_APP, "erase_bonds_and_drop_link", "plaintext timeout may not erase bonds")
 
-# PHY6252 storage contracts.
+# PHY6252 app actor, safety reducer and storage actor.
+require_text(PHY_TARGET, "uint16 SimpleBLEPeripheral_ProcessEvent", "PHY target must expose one OSAL event dispatcher")
+require_text(SAFETY, "dpls_safety_required_return", "dangerous-mode policy must stay in safety reducer")
+for forbidden in ("GAPRole_", "osal_", "GATT_"):
+    forbid_text(SAFETY, forbidden, f"safety reducer may not depend on transport/runtime API: {forbidden}")
 require_text(PHY_APP_H, "#define DPLS_PHY6252_STORAGE_EVT 0x1000", "storage needs a separate OSAL event")
+require_text(STORAGE_ACTOR, "dpls_storage_actor_reduce", "storage phase changes need one reducer")
+require_text(STORAGE_ACTOR, "DPLS_STORAGE_DRAINING", "storage actor must model radio drain")
+require_text(STORAGE_ACTOR, "DPLS_STORAGE_FLASH", "storage actor must model flash window")
+require_text(PHY_STORAGE, "dpls_phy6252_flash_work_pending", "PHY shell needs one storage facade")
 require_text(PHY_APP, "static dpls_event_t journal_pending_events", "journal needs RAM write-behind")
 require_regex(PHY_APP, r"void\s+dpls_phy6252_process_storage\s*\([^)]*\)\s*\{[^}]*if\s*\(\s*dpls_phy6252_link_active\(\)\s*\|\|\s*journal_pending_event_count\s*==\s*0u\s*\)\s*return\s*;", "storage service must refuse an active BLE link")
 require_regex(PHY_APP, r"static\s+bool\s+journal_flush_one_block\s*\([^)]*\)\s*\{[^}]*connection_handle\s*!=\s*INVALID_CONNHANDLE[^}]*return\s+false\s*;", "physical journal commit needs a second active-link guard")
 require_text(PHY_TARGET, "if (events & DPLS_PHY6252_STORAGE_EVT)", "target must service deferred storage event")
+forbid_text(PHY_TARGET, "dpls_phy6252_snv_pending()", "target may not bypass storage actor")
+forbid_text(PHY_TARGET, "dpls_phy6252_storage_pending()", "target may not bypass storage actor")
 forbid_text(PHY_APP, "journal_flush_snv", "tick-time journal flash path must not return")
 forbid_text(PHY_APP, "journal_snv_dirty", "old dirty-page ownership is forbidden")
 forbid_text(PHY_APP, "journal_pending_block", "old single pending-page buffer is forbidden")
@@ -154,7 +176,7 @@ require_regex(PHY_APP, r"osal_start_timerEx\s*\(\s*task_id\s*,\s*DPLS_PHY6252_TX
 require_regex(PHY_APP, r"if\s*\(\s*rc\s*==\s*SUCCESS\s*\)\s*\{[^}]*tx\.in_flight\s*=\s*true\s*;[^}]*tx\.in_flight_since_ms\s*=\s*now_ms\(\)\s*;", "one ATT PDU must be marked in-flight with a timestamp")
 require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must stay off 1 KiB OSAL stack")
 require_regex(PHY_APP_H, r"bool\s+dpls_phy6252_tx_idle\s*\(\s*void\s*\)\s*;", "target needs an explicit TX-drained predicate before flash disconnect")
-require_regex(PHY_TARGET, r"dpls_phy6252_snv_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "deferred flash disconnect must wait for TX drain")
+require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "storage actor disconnect must wait for TX drain")
 
 # Simulator/target ordering that previously caught real regressions.
 require_text(ROOT / "firmware/sim/dpls_sim_transport.c", "pace_ms = dpls_sim_transport_cccd_notify(transport)", "simulator must preserve ATT pacing")
@@ -189,10 +211,11 @@ if violations:
     raise SystemExit(1)
 
 print("Architecture guard: OK")
-print("  product lifecycle owner: DeviceSession")
+print("  mobile lifecycle: BLE driver -> ConnectionActor -> ConnectionMachine -> DeviceSession")
 print("  transaction identity: Frame.sequence + generation")
 print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
-print("  PHY6252 bond failures: terminate link, never erase all bonds")
-print("  journal: RAM write-behind, SNV only outside active link")
+print("  PHY app: one OSAL event dispatcher")
+print("  safety: dpls_safety reducer owns dangerous mode")
+print("  storage: actor owns radio -> drain -> flash window")
 print("  TX indication deadline != TX confirmation")
