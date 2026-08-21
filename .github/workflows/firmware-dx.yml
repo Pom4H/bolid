@@ -1,0 +1,38 @@
+name: Firmware DX
+
+on:
+  pull_request:
+    paths:
+      - 'tools/build_firmware.sh'
+      - 'tools/flash_firmware.sh'
+      - 'tools/test_flash_firmware.py'
+      - 'firmware/targets/phy6252/vcpkg-configuration.json'
+      - 'firmware/targets/phy6252/test-dpls.csolution.yml'
+      - 'firmware/targets/phy6252/test-dpls.cproject.yml'
+      - 'firmware/sdk/phy6252-sdk.env'
+      - '.github/workflows/firmware-dx.yml'
+  workflow_dispatch:
+
+jobs:
+  fresh-clone-macos:
+    name: Fresh clone → AC6 build (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build without preinstalled project toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${AC6_TOOLCHAIN_6_24_0:-}"
+          ! command -v cbuild >/dev/null 2>&1
+          ! command -v armclang >/dev/null 2>&1
+          tools/build_firmware.sh keil tmp/fresh-clone.hex
+          test -s tmp/fresh-clone.hex
+          grep -q '^:' tmp/fresh-clone.hex
+      - name: Verify flasher CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/flash_firmware.sh --help
+          python3 tools/test_flash_firmware.py
