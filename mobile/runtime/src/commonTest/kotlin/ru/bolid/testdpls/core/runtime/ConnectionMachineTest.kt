@@ -2,7 +2,6 @@ package ru.bolid.testdpls.core.runtime
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -20,13 +19,10 @@ class ConnectionMachineTest {
     private val auth = AuthSession(7, ByteArray(8) { it.toByte() }, challenge.authSalt)
 
     @Test
-    fun happyPathIsLinearAndReadyRequiresVerifiedIdentity() {
+    fun happyPathIsLinearAndOnlineRequiresVerifiedIdentity() {
         var state: DeviceSession = DeviceSession.Offline
 
-        state = ConnectionMachine.reduce(
-            state,
-            ConnectionEvent.ConnectRequested(endpoint, node),
-        )
+        state = ConnectionMachine.reduce(state, ConnectionEvent.ConnectRequested(endpoint, node))
         assertIs<DeviceSession.Connecting>(state)
 
         state = ConnectionMachine.reduce(state, ConnectionEvent.LinkConnected)
@@ -35,36 +31,34 @@ class ConnectionMachineTest {
         state = ConnectionMachine.reduce(state, ConnectionEvent.Subscribed(nonce))
         assertIs<DeviceSession.Linked>(state)
 
-        state = ConnectionMachine.reduce(
-            state,
-            ConnectionEvent.ChallengeReceived(challenge),
-        )
-        assertIs<DeviceSession.Authenticating>(state)
+        state = ConnectionMachine.reduce(state, ConnectionEvent.ChallengeReceived(challenge))
+        assertIs<DeviceSession.Securing>(state)
 
         state = ConnectionMachine.reduce(state, ConnectionEvent.Authenticated(auth))
         assertIs<DeviceSession.Synchronizing>(state)
 
-        state = ConnectionMachine.reduce(
-            state,
-            ConnectionEvent.IdentityVerified(node),
-        )
+        state = ConnectionMachine.reduce(state, ConnectionEvent.IdentityVerified(node))
         assertIs<DeviceSession.Online>(state)
+    }
+
+    @Test
+    fun setupChallengeCannotBecomeAuthenticatedSession() {
+        val setup = DeviceSession.Securing(endpoint, challenge.copy(initialized = false), node)
+        assertEquals(setup, ConnectionMachine.reduce(setup, ConnectionEvent.Authenticated(auth)))
+        assertIs<DeviceSession.Recovering>(ConnectionMachine.reduce(setup, ConnectionEvent.LinkLost))
     }
 
     @Test
     fun identityMismatchFailsClosed() {
         val state = DeviceSession.Synchronizing(endpoint, auth, node)
-        val next = ConnectionMachine.reduce(
-            state,
-            ConnectionEvent.IdentityVerified(NodeId(0x9999)),
-        )
+        val next = ConnectionMachine.reduce(state, ConnectionEvent.IdentityVerified(NodeId(0x9999)))
         assertIs<DeviceSession.Failed>(next)
     }
 
     @Test
-    fun linkLossFromAuthenticatedStatesAlwaysBecomesRecovering() {
+    fun authenticatedLinkLossAlwaysBecomesRecovering() {
         val states = listOf<DeviceSession>(
-            DeviceSession.Authenticating(endpoint, challenge, node),
+            DeviceSession.Securing(endpoint, challenge, node),
             DeviceSession.Synchronizing(endpoint, auth, node),
             DeviceSession.Online(node, endpoint, auth),
             DeviceSession.Recovering(node, endpoint),
@@ -77,17 +71,24 @@ class ConnectionMachineTest {
     }
 
     @Test
-    fun failedStateCannotBeRevivedByRadioOrLinkFacts() {
-        val failed: DeviceSession = DeviceSession.Failed(endpoint, LinkFailure.Closed)
-        val afterAvailable = ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothAvailable)
-        val afterUnavailable = ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothUnavailable)
-        val afterLost = ConnectionMachine.reduce(failed, ConnectionEvent.LinkLost)
+    fun radioLossKeepsRouteDuringConnectionAttempt() {
+        val states = listOf<DeviceSession>(
+            DeviceSession.Connecting(endpoint, node),
+            DeviceSession.Discovering(endpoint, node),
+            DeviceSession.Linked(endpoint, nonce, node),
+        )
+        states.forEach { state ->
+            assertIs<DeviceSession.Recovering>(
+                ConnectionMachine.reduce(state, ConnectionEvent.BluetoothUnavailable),
+            )
+        }
+    }
 
-        assertIs<DeviceSession.Failed>(afterAvailable)
-        assertIs<DeviceSession.Failed>(afterUnavailable)
-        assertFalse(afterAvailable is DeviceSession.Recovering)
-        assertFalse(afterUnavailable is DeviceSession.Recovering)
-        assertEquals(DeviceSession.Offline, afterLost)
+    @Test
+    fun failedStateIgnoresLateLinkFacts() {
+        val failed: DeviceSession = DeviceSession.Failed(endpoint, LinkFailure.Platform("test"))
+        assertEquals(failed, ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothUnavailable))
+        assertEquals(failed, ConnectionMachine.reduce(failed, ConnectionEvent.LinkLost))
     }
 
     @Test
@@ -96,11 +97,11 @@ class ConnectionMachineTest {
             DeviceSession.Connecting(endpoint, node),
             DeviceSession.Discovering(endpoint, node),
             DeviceSession.Linked(endpoint, nonce, node),
-            DeviceSession.Authenticating(endpoint, challenge, node),
+            DeviceSession.Securing(endpoint, challenge, node),
             DeviceSession.Synchronizing(endpoint, auth, node),
             DeviceSession.Online(node, endpoint, auth),
             DeviceSession.Recovering(node, endpoint),
-            DeviceSession.Failed(endpoint, LinkFailure.Closed),
+            DeviceSession.Failed(endpoint, LinkFailure.Platform("test")),
         )
         states.forEach { state ->
             assertEquals(DeviceSession.Offline, ConnectionMachine.reduce(state, ConnectionEvent.Reset))
@@ -114,12 +115,11 @@ class ConnectionMachineTest {
             DeviceSession.Connecting(endpoint, node),
             DeviceSession.Discovering(endpoint, node),
             DeviceSession.Linked(endpoint, nonce, node),
-            DeviceSession.Commissioning(endpoint, challenge.copy(initialized = false), node),
-            DeviceSession.Authenticating(endpoint, challenge, node),
+            DeviceSession.Securing(endpoint, challenge, node),
             DeviceSession.Synchronizing(endpoint, auth, node),
             DeviceSession.Online(node, endpoint, auth),
             DeviceSession.Recovering(node, endpoint),
-            DeviceSession.Failed(endpoint, LinkFailure.Closed),
+            DeviceSession.Failed(endpoint, LinkFailure.Platform("test")),
         )
         val events = listOf<ConnectionEvent>(
             ConnectionEvent.ConnectRequested(endpoint, node),
@@ -128,12 +128,9 @@ class ConnectionMachineTest {
             ConnectionEvent.ChallengeReceived(challenge),
             ConnectionEvent.Authenticated(auth),
             ConnectionEvent.IdentityVerified(node),
-            ConnectionEvent.SetupCommitted,
             ConnectionEvent.LinkLost,
             ConnectionEvent.BluetoothUnavailable,
-            ConnectionEvent.BluetoothAvailable,
-            ConnectionEvent.AttemptTimedOut,
-            ConnectionEvent.Failed(LinkFailure.Unavailable),
+            ConnectionEvent.Failed(LinkFailure.Platform("test")),
             ConnectionEvent.Reset,
         )
 
@@ -144,9 +141,8 @@ class ConnectionMachineTest {
                 ++exercised
                 if (next is DeviceSession.Online && state !is DeviceSession.Online) {
                     assertTrue(
-                        event is ConnectionEvent.IdentityVerified &&
-                            state is DeviceSession.Synchronizing,
-                        "Online can only be entered by identity proof: state=$state event=$event",
+                        event is ConnectionEvent.IdentityVerified && state is DeviceSession.Synchronizing,
+                        "Online можно получить только после identity proof: state=$state event=$event",
                     )
                 }
             }
@@ -155,7 +151,7 @@ class ConnectionMachineTest {
     }
 
     @Test
-    fun staleOrImpossibleEventsAreIdempotent() {
+    fun impossibleEventsDoNotChangeOffline() {
         val offline = DeviceSession.Offline
         val events = listOf<ConnectionEvent>(
             ConnectionEvent.LinkConnected,
