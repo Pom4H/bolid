@@ -24,7 +24,6 @@ typedef struct {
 } dpls_deferred_snv_t;
 
 static dpls_deferred_snv_t deferred;
-static bool disconnect_requested;
 
 static uint8 physical_write(osalSnvId_t id, osalSnvLen_t len, void *data)
 {
@@ -44,16 +43,13 @@ bool dpls_phy6252_snv_pending(void)
 
 bool dpls_phy6252_snv_disconnect_requested(void)
 {
-    return disconnect_requested;
+    return deferred.pending && dpls_phy6252_link_active();
 }
 
 bool dpls_phy6252_snv_flush_deferred(void)
 {
     if (dpls_phy6252_link_active()) return false;
-    if (!deferred.pending) {
-        disconnect_requested = false;
-        return true;
-    }
+    if (!deferred.pending) return true;
 
     if (physical_write(deferred.id, deferred.len, deferred.data) != SUCCESS) {
         LOG("DPLS SNV deferred commit failed id=0x%02x\n", (unsigned)deferred.id);
@@ -63,7 +59,6 @@ bool dpls_phy6252_snv_flush_deferred(void)
     memset(deferred.data, 0, deferred.len);
     deferred.pending = false;
     deferred.len = 0u;
-    disconnect_requested = false;
     return true;
 }
 
@@ -90,13 +85,12 @@ uint8 dpls_phy6252_snv_write_guarded(osalSnvId_t id, osalSnvLen_t len, void *dat
 
     if (!dpls_phy6252_link_active()) {
         if (deferred.pending && !dpls_phy6252_snv_flush_deferred()) return FAILURE;
-        return osal_snv_write(id, len, data);
+        return physical_write(id, len, data);
     }
 
     if (deferred.pending && deferred.id != id) {
         /* Never allocate a second RAM copy. The first commit already requests
          * a disconnect; the caller can retry the new operation after reconnect. */
-        disconnect_requested = true;
         LOG("DPLS SNV second active-link write rejected id=0x%02x pending=0x%02x\n",
             (unsigned)id, (unsigned)deferred.id);
         return FAILURE;
@@ -106,7 +100,6 @@ uint8 dpls_phy6252_snv_write_guarded(osalSnvId_t id, osalSnvLen_t len, void *dat
     deferred.id = id;
     deferred.len = len;
     memcpy(deferred.data, data, len);
-    disconnect_requested = true;
     LOG("DPLS SNV deferred id=0x%02x len=%u\n", (unsigned)id, (unsigned)len);
     return SUCCESS;
 }
