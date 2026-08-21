@@ -96,7 +96,8 @@ Linker window и реально записываемые bytes — разные 
 4. IRK/CSRK хранятся в BLE SNV;
 5. `HCI_EXT_SetBDADDRCmd()` вызывается до `GAPRole_StartDevice()`;
 6. после `GAPROLE_STARTED` запускается advertising;
-7. ошибка identity preparation не должна блокировать advertising.
+7. ошибка identity preparation не должна блокировать advertising;
+8. boot journal остаётся в RAM до первого idle tick после `GAPROLE_STARTED`.
 
 Boot path не читает произвольный project factory sector raw-доступом.
 
@@ -104,26 +105,23 @@ Boot path не читает произвольный project factory sector raw-
 
 Production build создаёт один Intel HEX. Прошивка выполняется штатной операцией `wh`.
 
-ROM-entry protocol, используемый programmer:
+ROM-entry protocol:
 
 ```text
 9600 baud
-reset/test-mode via control lines (если подключены)
 UXTDWU → cmd>>:
 переключение на рабочую baud rate
 flash erase/program
 ```
 
-Обычный wrapper не ждёт Enter:
+Один wrapper обслуживает оба режима:
 
 ```sh
+# Ручной вход: держать KEY1 и сделать reset/power-cycle, Enter не нужен.
 tools/flash_firmware.sh tmp/test-dpls.hex
+
+# Автоматический стенд: нужны физические RTS -> RST_N и DTR -> TM.
+tools/flash_firmware.sh tmp/test-dpls.hex --auto-rst
 ```
 
-Автоматический стенд с заведёнными RTS/DTR использует:
-
-```sh
-bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
-```
-
-Если reset/test-mode физически не управляются USB-UART/fixture, UART-команда сама по себе не может заменить аппаратный вход в ROM bootloader.
+`--auto-rst` не может заменить отсутствующую проводку. UART TX/RX сам по себе не способен сбросить уже работающую application в ROM monitor. Если `cmd>>:` не пришёл, wrapper завершится примерно через 10 секунд с явным диагнозом, а не будет ждать бесконечно.
