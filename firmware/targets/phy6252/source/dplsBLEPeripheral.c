@@ -5,6 +5,7 @@
 #include "gapgattserver.h"
 #include "gatt.h"
 #include "gattservapp.h"
+#include "linkdb.h"
 #include "peripheral.h"
 #include "ll.h"
 #include "ll_common.h"
