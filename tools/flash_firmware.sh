@@ -16,6 +16,7 @@ ERASE=0
 PORT="${PORT:-}"
 
 usage() {
+    local status="${1:-2}"
     cat >&2 <<'EOF'
 usage: tools/flash_firmware.sh [application.hex] [--auto-rst] [--erase] [--port /dev/...]
 
@@ -28,7 +29,7 @@ Modes:
   --auto-rst   RTS->RST_N + DTR->TM, KEY1 не нужен
   --erase      chip erase перед записью; стирает SNV/bonds
 EOF
-    exit 2
+    exit "$status"
 }
 
 detect_port() {
@@ -48,7 +49,7 @@ detect_port() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -h|--help) usage ;;
+        -h|--help) usage 0 ;;
         --auto-rst) AUTO_RST=1; shift ;;
         --erase) ERASE=1; shift ;;
         --port)
