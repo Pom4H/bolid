@@ -117,7 +117,11 @@ class DplsClientV2Test {
         transport.reply(DplsProtocol.Type.AUTH_CHALLENGE, challenge(false))
         client.setup("Test-DPLS-001", "12345678")
         val setup = transport.lastFrame()
-        transport.reply(DplsProtocol.Type.AUTH_RESULT, byteArrayOf(3, 0, 0), setup.sequence)
+        transport.reply(
+            DplsProtocol.Type.AUTH_RESULT,
+            byteArrayOf(3, 0, 0) + ByteArray(8),
+            setup.sequence,
+        )
         assertEquals(ConnectionPhase.RECONNECTING, client.uiState.value.phase)
         assertTrue(platform.hasVerifier("endpoint:ble-1"))
         assertFalse(platform.hasVerifier("node:4660"))
