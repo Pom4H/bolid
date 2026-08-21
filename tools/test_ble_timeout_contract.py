@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if BLE security/watchdog budgets can race each other again."""
+"""Fail if a second mobile BLE deadline or timeout race returns."""
 from pathlib import Path
 import re
 
@@ -11,37 +11,31 @@ FIRMWARE = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 
 def constant(path: Path, name: str) -> int:
     text = path.read_text(encoding="utf-8")
-    patterns = (
-        # Kotlin/C-style assignment: `const val NAME = 55_000L`.
+    for pattern in (
         rf"\b{name}\s*=\s*([0-9_]+)(?:[uUlL]*)\b",
-        # C preprocessor constant: `#define NAME 60000u`.
         rf"^[ \t]*#define[ \t]+{name}[ \t]+([0-9_]+)(?:[uUlL]*)\b",
-    )
-    for pattern in patterns:
+    ):
         match = re.search(pattern, text, flags=re.MULTILINE)
         if match is not None:
             return int(match.group(1).replace("_", ""))
     raise SystemExit(f"{path.relative_to(ROOT)}: constant {name} not found")
 
 
-pairing_ms = constant(ANDROID, "PAIRING_TIMEOUT_MS")
+android = ANDROID.read_text(encoding="utf-8")
+for forbidden in ("PAIRING_TIMEOUT_MS", "pairingTimeout"):
+    if forbidden in android:
+        raise SystemExit(f"Android transport must not own a second connection deadline: {forbidden}")
+
 connect_ms = constant(CLIENT, "CONNECT_TIMEOUT_MS")
 firmware_ms = constant(FIRMWARE, "DPLS_LINK_ENCRYPT_TIMEOUT_MS")
-
-if not pairing_ms < connect_ms < firmware_ms:
+if connect_ms >= firmware_ms or firmware_ms - connect_ms < 5_000:
     raise SystemExit(
-        "BLE timeout ordering broken: expected "
-        f"pairing < client < firmware, got {pairing_ms} < {connect_ms} < {firmware_ms}"
+        f"BLE timeout ordering broken: mobile={connect_ms}ms firmware={firmware_ms}ms"
     )
 
-# Keep enough separation that independently scheduled callbacks cannot win on
-# the same scheduler turn merely because of handler/coroutine jitter.
-if connect_ms - pairing_ms < 5_000:
-    raise SystemExit("BLE pairing/client timeout margin must be at least 5 s")
-if firmware_ms - connect_ms < 5_000:
-    raise SystemExit("BLE client/firmware timeout margin must be at least 5 s")
+client = CLIENT.read_text(encoding="utf-8")
+subscribed = client[client.index("override fun onSubscribed"):client.index("override fun onBytes")]
+if "armConnectTimeout()" not in subscribed:
+    raise SystemExit("DplsClient must restart its single deadline after CCCD subscription")
 
-print(
-    "BLE timeout contract: PASS "
-    f"pairing={pairing_ms}ms client={connect_ms}ms firmware={firmware_ms}ms"
-)
+print(f"BLE timeout contract: PASS mobile={connect_ms}ms firmware={firmware_ms}ms")
