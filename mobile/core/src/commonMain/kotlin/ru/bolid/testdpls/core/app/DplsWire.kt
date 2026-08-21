@@ -5,23 +5,16 @@ import ru.bolid.testdpls.core.protocol.decodeFrame
 import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.session.FrameSequencer
 
-/** Wire mechanics only: frame sequence, codec and correlation watermark. */
+/** Wire mechanics only: frame sequence and codec. */
 internal class DplsWire(
     private val transport: DplsTransport,
     private val fail: (String) -> Unit,
 ) {
     private val sequencer = FrameSequencer()
-    private var latestStateSequence: Int? = null
 
-    fun reset() {
-        sequencer.reset()
-        latestStateSequence = null
-    }
+    fun reset() = sequencer.reset()
 
     fun decode(bytes: ByteArray): DplsProtocol.DecodeResult = decodeFrame(bytes)
-
-    fun accepts(frame: DplsProtocol.Frame): Boolean =
-        frame.type != DplsProtocol.Type.STATE_REPORT || frame.sequence == latestStateSequence
 
     fun request(
         type: DplsProtocol.Type,
@@ -30,15 +23,12 @@ internal class DplsWire(
         flush: Boolean = false,
     ): Int? {
         val sequence = sequencer.next()
-        if (!send(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush)) return null
-        if (type == DplsProtocol.Type.STATE_GET) latestStateSequence = sequence
-        return sequence
+        return sequence.takeIf {
+            send(type, sequence, DplsProtocol.Flags.REQUEST, payload, priority, flush)
+        }
     }
 
-    fun oneWay(
-        type: DplsProtocol.Type,
-        payload: ByteArray = byteArrayOf(),
-    ) {
+    fun oneWay(type: DplsProtocol.Type, payload: ByteArray = byteArrayOf()) {
         send(type, sequencer.next(), 0, payload, priority = false, flush = false)
     }
 
