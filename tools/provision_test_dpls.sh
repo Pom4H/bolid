@@ -1,18 +1,18 @@
 #!/bin/bash
-# Первичное provisioning Test-DPLS: application HEX + обязательная factory identity.
+# Первичное provisioning Test-DPLS: application HEX + factory identity → один HEX.
 #
-#   tools/provision_test_dpls.sh <firmware.hex> <serial>
+#   tools/provision_test_dpls.sh <application.hex> <serial>
 #
-# Скрипт предназначен для НОВОЙ/СТЁРТОЙ платы. Factory identity содержит
-# постоянные IRK/CSRK; не запускайте provisioning повторно на серийном приборе
-# без осознанной замены его factory identity.
+# Runtime-прошивка не содержит legacy/migration logic. Этот скрипт создаёт или
+# переиспользует factory identity и прошивает application + factory sector одним
+# заходом в ROM bootloader.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HEX="${1:?usage: provision_test_dpls.sh <firmware.hex> <serial>}"
-SERIAL="${2:?usage: provision_test_dpls.sh <firmware.hex> <serial>}"
+APP_HEX="${1:?usage: provision_test_dpls.sh <application.hex> <serial>}"
+SERIAL="${2:?usage: provision_test_dpls.sh <application.hex> <serial>}"
 
-[ -f "$HEX" ] || { echo "Firmware HEX не найден: $HEX" >&2; exit 1; }
+[ -f "$APP_HEX" ] || { echo "Application HEX не найден: $APP_HEX" >&2; exit 1; }
 case "$SERIAL" in
   ''|*[!0-9]*) echo "serial должен быть целым числом 1..4294967294" >&2; exit 2 ;;
 esac
@@ -25,41 +25,68 @@ PORT="${PORT:-$(ls /dev/cu.wchusbserial* 2>/dev/null | head -1)}"
 [ -n "$PORT" ] || { echo "USB-UART адаптер (CH340) не найден" >&2; exit 1; }
 export PORT
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-dpls-provision.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
-umask 077
-FACTORY_BIN="$TMP_DIR/factory.bin"
-FACTORY_META="$TMP_DIR/factory.json"
+APP_DIR="$(cd "$(dirname "$APP_HEX")" && pwd)"
+APP_NAME="$(basename "$APP_HEX")"
+STEM="${APP_NAME%.hex}"
+FACTORY_BIN="${DPLS_FACTORY_BIN:-$APP_DIR/$STEM.serial-$SERIAL.factory.bin}"
+FACTORY_META="$APP_DIR/$STEM.serial-$SERIAL.identity.json"
+FLASH_READY="$APP_DIR/$STEM.serial-$SERIAL.flash-ready.hex"
 
-python3 "$ROOT/tools/make_factory_identity.py" \
-  --serial "$SERIAL" \
-  --hw-revision 2 \
-  --binary-output "$FACTORY_BIN" \
+umask 077
+ARGS=(
+  --binary-output "$FACTORY_BIN"
+  --merge-app-hex "$APP_HEX"
+  --flash-ready-output "$FLASH_READY"
   --metadata "$FACTORY_META"
+)
+
+if [ -f "$FACTORY_BIN" ]; then
+  EXISTING_SERIAL=$(python3 - "$FACTORY_BIN" <<'PY'
+import struct, sys
+raw = open(sys.argv[1], 'rb').read()
+if len(raw) != 64:
+    raise SystemExit("existing factory BIN has wrong size")
+print(struct.unpack_from('<I', raw, 8)[0])
+PY
+)
+  if [ "$EXISTING_SERIAL" != "$SERIAL" ]; then
+    echo "ОТКАЗ: $FACTORY_BIN принадлежит serial=$EXISTING_SERIAL, а запрошен $SERIAL" >&2
+    exit 2
+  fi
+  ARGS+=(--record-input "$FACTORY_BIN")
+  IDENTITY_ACTION="переиспользуется существующая identity"
+else
+  ARGS+=(--serial "$SERIAL" --hw-revision 2)
+  IDENTITY_ACTION="создаётся новая identity"
+fi
+
+python3 "$ROOT/tools/make_factory_identity.py" "${ARGS[@]}"
 
 SUFFIX=$(printf '%04X' $((SERIAL & 0xffff)))
 cat <<EOF
 
-Первичное provisioning Test-DPLS
-  порт:       $PORT
-  firmware:   $HEX
-  serial:     $SERIAL
-  BLE name:   Test-DPLS-$SUFFIX
+Provisioning Test-DPLS
+  порт:        $PORT
+  application: $APP_HEX
+  serial:      $SERIAL
+  BLE name:    Test-DPLS-$SUFFIX
+  identity:    $IDENTITY_ACTION
+  flash-ready: $FLASH_READY
+  factory BIN: $FACTORY_BIN
 
-Будет ДВА входа в ROM bootloader: сначала application, затем factory identity.
-На каждом шаге зажмите KEY1 и отпустите, когда programmer напишет «Turn on the power».
+Factory BIN содержит постоянные IRK/CSRK. Сохраните его: при повторной сборке
+используйте тот же BIN, иначе Bluetooth identity изменится и старые bond'ы сломаются.
+
+Будет ОДИН вход в ROM bootloader.
+Зажмите KEY1 и отпустите, когда programmer напишет «Turn on the power».
 EOF
 
-printf '\n[1/2] Application firmware\n'
-"$ROOT/tools/flash_firmware.sh" "$HEX"
-
-printf '\n[2/2] Factory identity\n'
-"$ROOT/tools/flash_factory_identity.sh" "$FACTORY_BIN"
+"$ROOT/tools/flash_firmware.sh" "$FLASH_READY"
 
 cat <<EOF
 
 Provisioning завершён.
 1. Перезапустите плату обычным питанием, KEY1 не удерживайте.
 2. В приложении ищите: Test-DPLS-$SUFFIX
-3. Если устройство не появилось, НЕ делайте full erase: сначала проверьте UART/reset cause и factory identity.
+3. Не удаляйте: $FACTORY_BIN
 EOF
