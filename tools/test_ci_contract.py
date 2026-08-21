@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""Small guard for the release evidence matrix."""
+"""Small guard for the release evidence matrix and local firmware DX."""
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
+build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
+flash = (ROOT / "tools/flash_firmware.sh").read_text(encoding="utf-8")
+vcpkg = (ROOT / "firmware/targets/phy6252/vcpkg-configuration.json").read_text(encoding="utf-8")
+solution = (ROOT / "firmware/targets/phy6252/test-dpls.csolution.yml").read_text(encoding="utf-8")
+
+for script in (ROOT / "tools/build_firmware.sh", ROOT / "tools/flash_firmware.sh"):
+    subprocess.run(["bash", "-n", str(script)], check=True)
 
 for token in (
     'if [[ "$HEAD_REF" == release/* ]]',
@@ -41,4 +49,30 @@ for removed in (
     if removed in host:
         raise SystemExit(f"removed duplicate contract returned: {removed}")
 
-print("CI contract: PASS")
+for token in (
+    'VCPKG_VERSION="2026.04.27"',
+    "AC6_TOOLCHAIN_6_24_0",
+    "KEMDK-COM0",
+    "vcpkg\" activate",
+    "CMSIS-Toolbox 2.14.1",
+    "Arm Compiler 6.24.0",
+):
+    if token not in build:
+        raise SystemExit(f"zero-setup build contract missing: {token}")
+
+for token in ('"6.24.0"', '"2.14.1"'):
+    if token not in vcpkg:
+        raise SystemExit(f"pinned toolchain contract missing: {token}")
+
+for token in ("CMSIS-Toolbox@2.14.1", "AC6@6.24.0"):
+    if token not in solution:
+        raise SystemExit(f"solution toolchain contract missing: {token}")
+
+if "/Users/" in build or "/Users/" in flash:
+    raise SystemExit("local developer path leaked into firmware scripts")
+if (ROOT / "tools/flash_firmware_agent.sh").exists():
+    raise SystemExit("separate agent flasher returned")
+if "--auto-rst" not in flash:
+    raise SystemExit("single flasher lost --auto-rst")
+
+print("CI/DX contract: PASS")
