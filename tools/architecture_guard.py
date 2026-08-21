@@ -72,7 +72,13 @@ require_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\
 forbid_regex(SESSION, r"data\s+class\s+Online\s*\(\s*val\s+nodeId\s*:\s*NodeId\?", "Online may not contain unknown identity")
 require_text(CLIENT, "private var session: DeviceSession = DeviceSession.Offline", "DplsClient must own the single mutable lifecycle value")
 require_text(CLIENT, "session = ConnectionMachine.reduce(session, event)", "all lifecycle writes must pass through ConnectionMachine")
-forbid_regex(CLIENT, r"^\s*session\s*=\s*(?!ConnectionMachine\.reduce\()", "direct DeviceSession assignment outside reducer is forbidden")
+session_writes = [
+    line.strip()
+    for line in source(CLIENT).splitlines()
+    if re.match(r"^session\s*=", line.strip())
+]
+if session_writes != ["session = ConnectionMachine.reduce(session, event)"]:
+    fail(CLIENT, f"unexpected DeviceSession writes: {session_writes}")
 require_text(CONNECTION_MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer must stay explicit and pure")
 forbid_text(CLIENT, "ConnectionActor", "ConnectionActor wrapper must not return")
 legacy_actor = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt"
@@ -170,6 +176,19 @@ forbid_text(PHY_APP, "DPLS_BOND_DESYNC", "application auth may not own BLE bond 
 forbid_text(PHY_APP, "note_pre_auth_disconnect", "DPLS auth disconnects may not erase BLE bonds")
 forbid_text(PHY_APP, "erase_bonds_and_drop_link", "plaintext timeout may not erase bonds")
 
+# PHY6252 settings: только текущие durable slots, никаких migration paths.
+for legacy in (
+    "DPLS_LEGACY_SETTINGS_",
+    "dpls_legacy_settings_t",
+    "classify_legacy_settings",
+    "DPLS_SETTINGS_EMPTY_MARKER",
+):
+    forbid_text(PHY_APP, legacy, f"legacy settings migration is forbidden: {legacy}")
+require_text(PHY_APP, "DPLS_SETTINGS_SLOT_A_SNV_ID 0x85u", "durable settings slot A is required")
+require_text(PHY_APP, "DPLS_SETTINGS_SLOT_B_SNV_ID 0x86u", "durable settings slot B is required")
+require_text(PHY_APP, "settings_state = DPLS_SETTINGS_EMPTY;", "missing durable settings must start as empty")
+require_text(PHY_APP, "(void)load_durable_settings();", "boot must read only durable settings slots")
+
 # PHY6252: один OSAL dispatcher, отдельная safety policy и простой flash facade.
 require_text(PHY_TARGET, "uint16 SimpleBLEPeripheral_ProcessEvent", "PHY target must expose one OSAL event dispatcher")
 require_text(SAFETY, "dpls_safety_required_return", "dangerous-mode policy must stay in safety reducer")
@@ -248,5 +267,6 @@ print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
 print("  PHY app: one OSAL event dispatcher")
 print("  safety: dpls_safety owns dangerous mode")
+print("  settings: durable slots only, no migration path")
 print("  storage: real queues -> one flash facade, no actor state")
 print("  TX indication deadline != TX confirmation")
