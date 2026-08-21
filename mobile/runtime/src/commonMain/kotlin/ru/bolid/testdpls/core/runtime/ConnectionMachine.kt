@@ -145,8 +145,13 @@ object ConnectionMachine {
             else -> unchanged(state)
         }
 
-        ConnectionEvent.LinkLost -> lost(state, reconnect = shouldRecover(state))
-        ConnectionEvent.BluetoothUnavailable -> lost(state, reconnect = false)
+        ConnectionEvent.LinkLost -> if (shouldRecover(state)) {
+            recover(state, requestOpen = true)
+        } else {
+            ConnectionTransition(DeviceSession.Offline)
+        }
+
+        ConnectionEvent.BluetoothUnavailable -> recover(state, requestOpen = false)
 
         ConnectionEvent.BluetoothAvailable -> when (state) {
             is DeviceSession.Recovering -> ConnectionTransition(
@@ -197,14 +202,16 @@ object ConnectionMachine {
         )
     }
 
-    private fun lost(state: DeviceSession, reconnect: Boolean): ConnectionTransition {
+    private fun recover(state: DeviceSession, requestOpen: Boolean): ConnectionTransition {
         val endpoint = state.endpointOrNull ?: return ConnectionTransition(DeviceSession.Offline)
-        if (!reconnect) {
-            return ConnectionTransition(DeviceSession.Recovering(state.nodeIdOrNull, endpoint))
-        }
+        val recovering = DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
         return ConnectionTransition(
-            DeviceSession.Recovering(state.nodeIdOrNull, endpoint),
-            listOf(ConnectionEffect.OpenLink(endpoint, reconnect = true)),
+            recovering,
+            if (requestOpen) {
+                listOf(ConnectionEffect.OpenLink(endpoint, reconnect = true))
+            } else {
+                emptyList()
+            },
         )
     }
 
