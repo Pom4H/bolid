@@ -1,11 +1,10 @@
 package ru.bolid.testdpls.core.runtime
 
 /**
- * Pure lifecycle reducer for one Test-DPLS connection attempt.
+ * Facts accepted by the pure lifecycle reducer.
  *
- * Platform callbacks are facts, never commands. Product code dispatches a fact
- * here and executes only the returned [ConnectionEffect] values. This keeps the
- * legal state graph in one place and makes every state/event pair host-testable.
+ * Platform callbacks and decoded protocol milestones are events. They are never
+ * desired-state commands, so callers cannot bypass the legal lifecycle graph.
  */
 sealed interface ConnectionEvent {
     data class ConnectRequested(
@@ -34,132 +33,90 @@ sealed interface ConnectionEvent {
     data object Reset : ConnectionEvent
 }
 
-sealed interface ConnectionEffect {
-    data class OpenLink(val endpoint: LinkEndpoint, val reconnect: Boolean) : ConnectionEffect
-    data class SendHello(val clientNonce: ByteArray) : ConnectionEffect
-    data object RequestState : ConnectionEffect
-    data object AwaitSetupDisconnect : ConnectionEffect
-    data object CloseLink : ConnectionEffect
-}
-
-data class ConnectionTransition(
-    val state: DeviceSession,
-    val effects: List<ConnectionEffect> = emptyList(),
-)
-
+/**
+ * Total, side-effect-free lifecycle reducer.
+ *
+ * Link/protocol work remains in DplsClient/transport. The reducer owns only the
+ * legal state graph, which keeps lifecycle truth singular and directly testable.
+ */
 object ConnectionMachine {
-    fun reduce(state: DeviceSession, event: ConnectionEvent): ConnectionTransition = when (event) {
-        is ConnectionEvent.ConnectRequested -> ConnectionTransition(
-            DeviceSession.Connecting(event.endpoint, event.candidateNodeId),
-            listOf(ConnectionEffect.OpenLink(event.endpoint, reconnect = false)),
-        )
+    fun reduce(state: DeviceSession, event: ConnectionEvent): DeviceSession = when (event) {
+        is ConnectionEvent.ConnectRequested ->
+            DeviceSession.Connecting(event.endpoint, event.candidateNodeId)
 
         ConnectionEvent.LinkConnected -> when (state) {
-            is DeviceSession.Connecting -> ConnectionTransition(
-                DeviceSession.Discovering(state.endpoint, state.candidateNodeId),
-            )
-            is DeviceSession.Recovering -> ConnectionTransition(
-                DeviceSession.Discovering(state.endpoint, state.nodeId),
-            )
-            else -> unchanged(state)
+            is DeviceSession.Connecting ->
+                DeviceSession.Discovering(state.endpoint, state.candidateNodeId)
+            is DeviceSession.Recovering ->
+                DeviceSession.Discovering(state.endpoint, state.nodeId)
+            else -> state
         }
 
         is ConnectionEvent.Subscribed -> when (state) {
-            is DeviceSession.Discovering -> {
-                val linked = DeviceSession.Linked(
-                    state.endpoint,
-                    event.clientNonce.copyOf(),
-                    state.candidateNodeId,
-                )
-                ConnectionTransition(
-                    linked,
-                    if (event.sendHello) {
-                        listOf(ConnectionEffect.SendHello(linked.clientNonce.copyOf()))
-                    } else {
-                        emptyList()
-                    },
-                )
-            }
-            else -> unchanged(state)
+            is DeviceSession.Discovering -> DeviceSession.Linked(
+                state.endpoint,
+                event.clientNonce.copyOf(),
+                state.candidateNodeId,
+            )
+            else -> state
         }
 
         is ConnectionEvent.ChallengeReceived -> when (state) {
-            is DeviceSession.Linked -> challengeTransition(state, event.challenge)
-            is DeviceSession.Commissioning -> challengeTransition(state, event.challenge)
-            is DeviceSession.Authenticating -> challengeTransition(state, event.challenge)
-            else -> unchanged(state)
+            is DeviceSession.Linked,
+            is DeviceSession.Commissioning,
+            is DeviceSession.Authenticating,
+            -> challengeTransition(state, event.challenge)
+            else -> state
         }
 
         is ConnectionEvent.Authenticated -> when (state) {
-            is DeviceSession.Authenticating -> ConnectionTransition(
-                DeviceSession.Synchronizing(
-                    endpoint = state.endpoint,
-                    auth = event.auth,
-                    candidateNodeId = state.candidateNodeId,
-                ),
-                listOf(ConnectionEffect.RequestState),
+            is DeviceSession.Authenticating -> DeviceSession.Synchronizing(
+                endpoint = state.endpoint,
+                auth = event.auth,
+                candidateNodeId = state.candidateNodeId,
             )
-            else -> unchanged(state)
+            else -> state
         }
 
         is ConnectionEvent.IdentityVerified -> when (state) {
             is DeviceSession.Synchronizing -> {
                 val candidate = state.candidateNodeId
                 if (candidate != null && candidate != event.nodeId) {
-                    ConnectionTransition(
-                        DeviceSession.Failed(
-                            state.endpoint,
-                            LinkFailure.Protocol("device identity changed during connection"),
-                        ),
-                        listOf(ConnectionEffect.CloseLink),
+                    DeviceSession.Failed(
+                        state.endpoint,
+                        LinkFailure.Protocol("device identity changed during connection"),
                     )
                 } else {
-                    ConnectionTransition(
-                        DeviceSession.Online(event.nodeId, state.endpoint, state.auth),
-                    )
+                    DeviceSession.Online(event.nodeId, state.endpoint, state.auth)
                 }
             }
             is DeviceSession.Online -> if (state.nodeId == event.nodeId) {
-                unchanged(state)
+                state
             } else {
-                ConnectionTransition(
-                    DeviceSession.Failed(
-                        state.endpoint,
-                        LinkFailure.Protocol("device identity changed in active session"),
-                    ),
-                    listOf(ConnectionEffect.CloseLink),
+                DeviceSession.Failed(
+                    state.endpoint,
+                    LinkFailure.Protocol("device identity changed in active session"),
                 )
             }
-            else -> unchanged(state)
+            else -> state
         }
 
         ConnectionEvent.SetupCommitted -> when (state) {
             is DeviceSession.Commissioning,
             is DeviceSession.Authenticating,
             -> state.endpointOrNull?.let { endpoint ->
-                ConnectionTransition(
-                    DeviceSession.Recovering(state.nodeIdOrNull, endpoint),
-                    listOf(ConnectionEffect.AwaitSetupDisconnect),
-                )
-            } ?: unchanged(state)
-            else -> unchanged(state)
+                DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
+            } ?: state
+            else -> state
         }
 
-        ConnectionEvent.LinkLost -> if (shouldRecover(state)) {
-            recover(state, requestOpen = true)
-        } else {
-            ConnectionTransition(DeviceSession.Offline)
-        }
+        ConnectionEvent.LinkLost -> if (shouldRecover(state)) recover(state) else DeviceSession.Offline
 
-        ConnectionEvent.BluetoothUnavailable -> recover(state, requestOpen = false)
+        ConnectionEvent.BluetoothUnavailable -> recover(state)
 
-        ConnectionEvent.BluetoothAvailable -> when (state) {
-            is DeviceSession.Recovering -> ConnectionTransition(
-                state,
-                listOf(ConnectionEffect.OpenLink(state.endpoint, reconnect = true)),
-            )
-            else -> unchanged(state)
-        }
+        /* Radio availability is a fact used by the driver to retry the route;
+         * it does not invent a new lifecycle state by itself. */
+        ConnectionEvent.BluetoothAvailable -> state
 
         ConnectionEvent.AttemptTimedOut -> when (state) {
             is DeviceSession.Connecting,
@@ -169,50 +126,31 @@ object ConnectionMachine {
             is DeviceSession.Authenticating,
             is DeviceSession.Synchronizing,
             is DeviceSession.Recovering,
-            -> ConnectionTransition(
-                DeviceSession.Failed(state.endpointOrNull, LinkFailure.Unavailable),
-                listOf(ConnectionEffect.CloseLink),
-            )
-            else -> unchanged(state)
+            -> DeviceSession.Failed(state.endpointOrNull, LinkFailure.Unavailable)
+            else -> state
         }
 
-        is ConnectionEvent.Failed -> ConnectionTransition(
-            DeviceSession.Failed(state.endpointOrNull, event.failure),
-            listOf(ConnectionEffect.CloseLink),
-        )
+        is ConnectionEvent.Failed -> DeviceSession.Failed(state.endpointOrNull, event.failure)
 
-        ConnectionEvent.Reset -> ConnectionTransition(
-            DeviceSession.Offline,
-            if (state is DeviceSession.Offline) emptyList() else listOf(ConnectionEffect.CloseLink),
-        )
+        ConnectionEvent.Reset -> DeviceSession.Offline
     }
 
     private fun challengeTransition(
         state: DeviceSession,
         challenge: SessionChallenge,
-    ): ConnectionTransition {
-        val endpoint = state.endpointOrNull ?: return unchanged(state)
+    ): DeviceSession {
+        val endpoint = state.endpointOrNull ?: return state
         val candidate = state.candidateNodeIdOrNull
-        return ConnectionTransition(
-            if (challenge.initialized) {
-                DeviceSession.Authenticating(endpoint, challenge, candidate)
-            } else {
-                DeviceSession.Commissioning(endpoint, challenge, candidate)
-            },
-        )
+        return if (challenge.initialized) {
+            DeviceSession.Authenticating(endpoint, challenge, candidate)
+        } else {
+            DeviceSession.Commissioning(endpoint, challenge, candidate)
+        }
     }
 
-    private fun recover(state: DeviceSession, requestOpen: Boolean): ConnectionTransition {
-        val endpoint = state.endpointOrNull ?: return ConnectionTransition(DeviceSession.Offline)
-        val recovering = DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
-        return ConnectionTransition(
-            recovering,
-            if (requestOpen) {
-                listOf(ConnectionEffect.OpenLink(endpoint, reconnect = true))
-            } else {
-                emptyList()
-            },
-        )
+    private fun recover(state: DeviceSession): DeviceSession {
+        val endpoint = state.endpointOrNull ?: return DeviceSession.Offline
+        return DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
     }
 
     private fun shouldRecover(state: DeviceSession): Boolean = when (state) {
@@ -224,6 +162,4 @@ object ConnectionMachine {
         -> true
         else -> false
     }
-
-    private fun unchanged(state: DeviceSession) = ConnectionTransition(state)
 }
