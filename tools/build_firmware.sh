@@ -27,6 +27,56 @@ reject_warnings() {
     fi
 }
 
+check_hex_layout() {
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+upper = 0
+segment = 0
+snv_start = 0x1103C000
+snv_end = 0x11040000
+max_xip_end = 0
+
+for number, raw_line in enumerate(path.read_text(encoding="ascii").splitlines(), start=1):
+    line = raw_line.strip()
+    if not line:
+        continue
+    if not line.startswith(":"):
+        raise SystemExit(f"{path}: invalid Intel HEX line {number}")
+    record = bytes.fromhex(line[1:])
+    if len(record) < 5 or len(record) != record[0] + 5 or sum(record) & 0xFF:
+        raise SystemExit(f"{path}: invalid Intel HEX checksum/length at line {number}")
+    length = record[0]
+    offset = (record[1] << 8) | record[2]
+    kind = record[3]
+    data = record[4:4 + length]
+    if kind == 0x04:
+        if length != 2:
+            raise SystemExit(f"{path}: invalid extended linear address at line {number}")
+        upper = ((data[0] << 8) | data[1]) << 16
+        segment = 0
+    elif kind == 0x02:
+        if length != 2:
+            raise SystemExit(f"{path}: invalid extended segment address at line {number}")
+        segment = ((data[0] << 8) | data[1]) << 4
+        upper = 0
+    elif kind == 0x00:
+        start = upper + segment + offset
+        end = start + length
+        if start < snv_end and end > snv_start:
+            raise SystemExit(
+                f"{path}: application HEX overlaps SNV: 0x{start:08X}..0x{end - 1:08X}"
+            )
+        if 0x11020000 <= start < 0x11040000:
+            max_xip_end = max(max_xip_end, end)
+
+if max_xip_end:
+    print(f"XIP image end: 0x{max_xip_end:08X}; SNV starts: 0x{snv_start:08X}")
+PY
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage ;;
@@ -139,6 +189,7 @@ if [ ! -s "$OUT" ]; then
     echo "error: firmware build did not produce a non-empty HEX: $OUT" >&2
     exit 1
 fi
+check_hex_layout "$OUT"
 
 echo "hex: $OUT"
 echo "flash: tools/flash_firmware.sh $OUT"
