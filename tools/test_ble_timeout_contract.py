@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Fail if a second mobile BLE deadline or timeout race returns."""
+"""Fail if a second BLE deadline or timeout race returns."""
 from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
-FIRMWARE = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
+FIRMWARE = ROOT / "firmware/phy6252/dpls_phy6252_transport.c"
 
 
 def constant(path: Path, name: str) -> int:
-    text = path.read_text(encoding="utf-8")
+    src = path.read_text(encoding="utf-8")
     for pattern in (
         rf"\b{name}\s*=\s*([0-9_]+)(?:[uUlL]*)\b",
         rf"^[ \t]*#define[ \t]+{name}[ \t]+([0-9_]+)(?:[uUlL]*)\b",
     ):
-        match = re.search(pattern, text, flags=re.MULTILINE)
+        match = re.search(pattern, src, flags=re.MULTILINE)
         if match is not None:
             return int(match.group(1).replace("_", ""))
     raise SystemExit(f"{path.relative_to(ROOT)}: constant {name} not found")

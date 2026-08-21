@@ -22,6 +22,7 @@ project:
         - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/DevInfo
         - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/SimpleProfile
         - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/Roles
+        - ../../sdk/PHY62XX_SDK_3.1.2/components/profiles/GATT
         - ../../sdk/PHY62XX_SDK_3.1.2/components/libraries/crc16
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/watchdog
         - ../../sdk/PHY62XX_SDK_3.1.2/components/driver/clock
@@ -195,9 +196,16 @@ project:
         - file: ../../src/dpls_safety.c
         - file: ../../src/dpls_led.c
         - file: ../../src/dpls_calib.c
+        - file: ../../src/dpls_durable_settings.c
         - file: ../../phy6252/dpls_gatt_service.c
-        - file: ../../phy6252/dpls_phy6252_app.c
         - file: ../../phy6252/dpls_ble_identity.c
+        - file: ../../phy6252/dpls_phy6252_auth.c
+        - file: ../../phy6252/dpls_phy6252_measurements.c
+        - file: ../../phy6252/dpls_phy6252_outputs.c
+        - file: ../../phy6252/dpls_phy6252_runtime.c
+        - file: ../../phy6252/dpls_phy6252_storage.c
+        - file: ../../phy6252/dpls_phy6252_supervisor.c
+        - file: ../../phy6252/dpls_phy6252_transport.c
 
   components:
     - component: ARM::CMSIS:CORE

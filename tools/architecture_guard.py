@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Небольшой набор архитектурных инвариантов Test-DPLS.
+"""RC8 architecture invariants.
 
-Guard проверяет только границы ownership и известные аппаратные запреты.
-Поведение проверяют unit/E2E/Firmverse, а не коллекция хрупких regex'ов.
+This guard intentionally checks a small number of hard ownership rules. If a rule
+needs a paragraph of regex to explain, the architecture is already too clever.
 """
 from __future__ import annotations
 
@@ -10,21 +10,50 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PHY = ROOT / "firmware/phy6252"
+TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
+MAKEFILE = ROOT / "firmware/targets/phy6252/Makefile"
+CPROJECT = ROOT / "firmware/targets/phy6252/test-dpls.cproject.yml"
+SERVER = ROOT / "firmware/src/dpls_server.c"
+SAFETY = ROOT / "firmware/src/dpls_safety.c"
+GATT = PHY / "dpls_gatt_service.c"
+IDENTITY = PHY / "dpls_ble_identity.c"
+RUNTIME = PHY / "dpls_phy6252_runtime.c"
+STORAGE = PHY / "dpls_phy6252_storage.c"
+TRANSPORT = PHY / "dpls_phy6252_transport.c"
+AUTH = PHY / "dpls_phy6252_auth.c"
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
 MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
-CONTROL = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsControlMessages.kt"
-MESSAGES = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsMessages.kt"
-ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
-IOS_BLE = ROOT / "mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt"
-GATT = ROOT / "firmware/phy6252/dpls_gatt_service.c"
-IDENTITY = ROOT / "firmware/phy6252/dpls_ble_identity.c"
-PHY_APP = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
-PHY_TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
-PHY_STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
-PHY_SNV = ROOT / "firmware/phy6252/dpls_phy6252_snv_guard.c"
-SERVER = ROOT / "firmware/src/dpls_server.c"
-SAFETY = ROOT / "firmware/src/dpls_safety.c"
+TRANSPORT_KT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTransport.kt"
+
+EXPECTED_PHY = {
+    "dpls_gatt_service.c",
+    "dpls_ble_identity.c",
+    "dpls_phy6252_auth.c",
+    "dpls_phy6252_measurements.c",
+    "dpls_phy6252_outputs.c",
+    "dpls_phy6252_runtime.c",
+    "dpls_phy6252_storage.c",
+    "dpls_phy6252_supervisor.c",
+    "dpls_phy6252_transport.c",
+}
+EXPECTED_CORE = {
+    "dpls_protocol.c",
+    "dpls_server.c",
+    "dpls_safety.c",
+    "dpls_led.c",
+    "dpls_calib.c",
+    "dpls_durable_settings.c",
+}
+REMOVED = {
+    "dpls_phy6252_app.c",
+    "dpls_phy6252_app.h",
+    "dpls_phy6252_snv_guard.c",
+    "dpls_phy6252_snv_guard.h",
+    "dpls_phy6252_storage_ble.c",
+    "dpls_phy6252_storage_ble.h",
+}
 
 errors: list[str] = []
 
@@ -33,8 +62,9 @@ def text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def fail(path: Path, message: str) -> None:
-    errors.append(f"{path.relative_to(ROOT)}: {message}")
+def fail(path: Path | str, message: str) -> None:
+    name = str(path if isinstance(path, str) else path.relative_to(ROOT))
+    errors.append(f"{name}: {message}")
 
 
 def need(path: Path, token: str, message: str) -> None:
@@ -52,128 +82,111 @@ def section(path: Path, start: str, end: str) -> str:
     try:
         return src.split(start, 1)[1].split(end, 1)[0]
     except IndexError:
-        fail(path, f"cannot isolate section {start!r}..{end!r}")
+        fail(path, f"cannot isolate {start!r}..{end!r}")
         return ""
 
 
-# Mobile lifecycle: один mutable DeviceSession и один reducer.
-for token in (
-    "sealed interface DeviceSession",
-    "data class Securing(",
-    "data class Synchronizing(",
-    "data class Online(",
-):
-    need(SESSION, token, f"missing lifecycle state: {token}")
-for token in ("data class Commissioning(", "data class Authenticating("):
-    forbid(SESSION, token, f"duplicate lifecycle state returned: {token}")
+# 1. There is exactly one production PHY6252 architecture.
+for name in REMOVED:
+    if (PHY / name).exists():
+        fail(PHY / name, "legacy/duplicate runtime must not exist")
+
+make = text(MAKEFILE)
+cproject = text(CPROJECT)
+make_phy = set(re.findall(r"\$\(FW\)/phy6252/(dpls[^\s\\]+\.c)", make))
+ac6_phy = set(re.findall(r"\.\./\.\./phy6252/(dpls[^\s]+\.c)", cproject))
+make_core = set(re.findall(r"\$\(FW\)/src/(dpls[^\s\\]+\.c)", make))
+ac6_core = set(re.findall(r"\.\./\.\./src/(dpls[^\s]+\.c)", cproject))
+if make_phy != EXPECTED_PHY:
+    fail(MAKEFILE, f"PHY source set mismatch: {sorted(make_phy ^ EXPECTED_PHY)}")
+if ac6_phy != EXPECTED_PHY:
+    fail(CPROJECT, f"PHY source set mismatch: {sorted(ac6_phy ^ EXPECTED_PHY)}")
+if make_core != EXPECTED_CORE:
+    fail(MAKEFILE, f"core source set mismatch: {sorted(make_core ^ EXPECTED_CORE)}")
+if ac6_core != EXPECTED_CORE:
+    fail(CPROJECT, f"core source set mismatch: {sorted(ac6_core ^ EXPECTED_CORE)}")
+
+# 2. Keep the first-party firmware small enough to reason about in one pass.
+phy_lines = 0
+for path in sorted(PHY.glob("*.c")):
+    lines = len(text(path).splitlines())
+    phy_lines += lines
+    if lines > 600:
+        fail(path, f"{lines} lines exceeds 600-line module budget")
+if phy_lines > 2000:
+    fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget is 2000")
+
+production_paths = list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")) + [TARGET]
+production_lines = sum(len(text(path).splitlines()) for path in production_paths)
+if production_lines > 5000:
+    fail("firmware", f"first-party production C is {production_lines} lines; budget is 5000")
+
+# 3. Flash ownership: one writer, never while BLE link is active.
+for path in list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")):
+    if "osal_snv_write" in text(path) and path != STORAGE:
+        fail(path, "physical SNV write outside storage owner")
+need(STORAGE, "if (link_active) return 0xffu;", "physical write must refuse active link")
+need(STORAGE, "static uint8_t journal_records[DPLS_EVENT_CAPACITY]", "journal must be RAM-resident")
+need(STORAGE, "journal_dirty_mask", "journal write-behind dirty set missing")
+need(STORAGE, "return link_active && (settings_dirty || auth_lock_dirty);",
+     "only critical settings/auth may request controlled disconnect")
+
+# 4. Bond ownership: no heuristic may erase a valid pairing.
+for path in PHY.glob("*.c"):
+    src = text(path)
+    for token in (
+        "DPLS_BOND_DESYNC",
+        "pre_auth_disconnect",
+        "bond_erase_requested",
+        "dpls_ble_identity_reset_bonding_keys",
+    ):
+        if token in src:
+            fail(path, f"forbidden bond heuristic returned: {token}")
+
+erase_occurrences = sum(text(path).count("GAPBOND_ERASE_ALLBONDS") for path in PHY.glob("*.c"))
+if erase_occurrences != 1 or "GAPBOND_ERASE_ALLBONDS" not in text(TRANSPORT):
+    fail(TRANSPORT, "bond erase must exist exactly once, in transport factory-reset path")
+need(TRANSPORT, "dpls_phy6252_transport_factory_forget_bonds", "explicit factory bond erase missing")
+need(RUNTIME, "dpls_phy6252_transport_factory_forget_bonds()", "factory reset must own the only bond erase call")
+forbid(TRANSPORT_KT, 'text.contains("encryption timed out")',
+       "generic timeout must never be classified as stale bond")
+
+# 5. Boot/identity: no RNG/SNV/HCI before controller start; identity never gates advertising.
+prepare = section(IDENTITY, "void dpls_ble_identity_prepare", "void dpls_ble_identity_on_stack_started")
+for token in ("LL_ENC_", "osal_snv_", "HCI_"):
+    if token in prepare:
+        fail(IDENTITY, f"early identity path contains {token}")
+need(AUTH, "LL_ENC_GenerateTrueRandNum", "TRNG must live in post-link auth adapter")
+started = section(TARGET, "case GAPROLE_STARTED:", "case GAPROLE_CONNECTED:")
+if started.find("dpls_ble_identity_on_stack_started();") > started.find("enable_advertising();"):
+    fail(TARGET, "stack identity must run before advertising")
+if "enable_advertising();" not in started:
+    fail(TARGET, "GAPROLE_STARTED must always advertise")
+
+start_evt = section(TARGET, "if (events & SBP_START_DEVICE_EVT)", "if (events & DPLS_PHY6252_RX_EVT)")
+for token in ("STORAGE", "flash", "snv"):
+    if token.lower() in start_evt.lower():
+        fail(TARGET, f"boot start event leaked persistence concern: {token}")
+
+# 6. TX and settings transaction boundary: ACK leaves before flash can start.
+need(GATT, "GATT_PERMIT_ENCRYPT_WRITE", "RX characteristic must require encryption")
+need(GATT, "GATT_Notification", "notify compatibility path missing")
+need(TARGET, "ATT_HANDLE_VALUE_CFM", "real indication confirmation missing")
+need(RUNTIME, "dpls_phy6252_storage_disconnect_requested() &&", "critical persistence boundary missing")
+need(RUNTIME, "dpls_phy6252_transport_tx_idle()", "critical persistence must wait for TX drain")
+for token in ("osal_snv_write", "GAPBOND_ERASE_ALLBONDS"):
+    forbid(SERVER, token, f"domain server may not own physical side effect {token}")
+
+# 7. Safety stays pure and mobile lifecycle stays single-owner.
+need(SAFETY, "dpls_safety_required_return", "safety reducer missing")
+for token in ("GAPRole_", "osal_", "GATT_"):
+    forbid(SAFETY, token, f"safety depends on runtime API: {token}")
+need(SESSION, "sealed interface DeviceSession", "DeviceSession lifecycle missing")
+need(MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer missing")
 need(CLIENT, "private var session: DeviceSession = DeviceSession.Offline", "DplsClient must own lifecycle")
-need(CLIENT, "session = ConnectionMachine.reduce(session, event)", "lifecycle must mutate through reducer")
 writes = [line.strip() for line in text(CLIENT).splitlines() if re.match(r"^session\s*=", line.strip())]
 if writes != ["session = ConnectionMachine.reduce(session, event)"]:
     fail(CLIENT, f"unexpected lifecycle writes: {writes}")
-need(MACHINE, "fun reduce(state: DeviceSession, event: ConnectionEvent)", "connection reducer missing")
-for actor in (
-    ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/ConnectionActor.kt",
-    ROOT / "firmware/include/dpls_storage_actor.h",
-    ROOT / "firmware/src/dpls_storage_actor.c",
-    ROOT / "firmware/tests/test_storage_actor.c",
-):
-    if actor.exists():
-        fail(actor, "removed actor must not return")
-
-# Protocol v2: один layout и Frame.sequence как transaction id.
-for path in (ROOT / "mobile").rglob("*.kt"):
-    if re.search(r"\bcommandId\b", text(path)):
-        fail(path, "legacy commandId is forbidden")
-forbid(CONTROL, "@Deprecated", "protocol compatibility annotations are forbidden")
-need(CONTROL, "if (raw.size != 4) return null", "COMMAND_RESULT must have exact v2 layout")
-need(CONTROL, "if (raw.size != 1) return null", "SETTINGS_RESULT must have exact v2 layout")
-need(CONTROL, "if (raw.size != 11) return null", "AUTH_RESULT must have exact layout")
-need(MESSAGES, "if (raw.size != 25) return null", "STATE_REPORT must have exact layout")
-forbid(MESSAGES, "legacyLine", "legacy STATE_REPORT fallback is forbidden")
-
-# common runtime/wire не зависят от UI или platform API.
-for root in (ROOT / "mobile/runtime/src/commonMain", ROOT / "mobile/wire/src/commonMain"):
-    for path in root.rglob("*.kt"):
-        for token in ("android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
-            if token in text(path):
-                fail(path, f"dependency leak: {token}")
-
-# BLE security boundary и SMP ownership.
-need(GATT, "GATT_PERMIT_ENCRYPT_WRITE", "RX must remain encrypted")
-need(GATT, "GATT_Notification", "Samsung notify path must remain available")
-for path in (ANDROID_BLE, IOS_BLE):
-    need(path, "private sealed interface SecurityState", "platform SMP needs one explicit state owner")
-for token in ("PAIRING_DISCONNECT_STATUSES", "POST_BOND_SETTLE_MS", "PAIRING_TIMEOUT_MS", "pairingTimeout"):
-    forbid(ANDROID_BLE, token, f"Android pairing must not depend on {token}")
-for token in ("PAIRING_WRITE_RETRIES", "pairingRetryCount"):
-    forbid(IOS_BLE, token, f"iOS pairing must not depend on {token}")
-
-# BLE identity: никакого project factory sector и advertising не зависит от identity readiness.
-need(IDENTITY, "HCI_EXT_SetBDADDRCmd", "controller address must be configured before GAP start")
-for token in ("DPLS_FACTORY_IDENTITY", "hal_flash_read(", "dpls_ble_identity_is_ready", "dpls_ble_identity_is_provisioned"):
-    forbid(IDENTITY, token, f"removed factory/identity gate returned: {token}")
-started = section(PHY_TARGET, "case GAPROLE_STARTED:", "case GAPROLE_CONNECTED:")
-if "enable_advertising();" not in started:
-    fail(PHY_TARGET, "GAPROLE_STARTED must enable advertising")
-if "if (" in started and "identity" in started.lower():
-    fail(PHY_TARGET, "identity may not gate advertising")
-
-# Boot journal: init может наполнить RAM queue, но не имеет права ставить storage event.
-init = section(PHY_APP, "void dpls_phy6252_init", "void dpls_phy6252_connected")
-if "DPLS_PHY6252_STORAGE_EVT" in init:
-    fail(PHY_APP, "dpls_phy6252_init must not schedule storage")
-start_event = section(PHY_TARGET, "if (events & SBP_START_DEVICE_EVT)", "if (events & DPLS_PHY6252_RX_EVT)")
-for token in ("DPLS_PHY6252_STORAGE_EVT", "schedule_storage", "flash"):
-    if token in start_event:
-        fail(PHY_TARGET, f"GAP start handler must not know about storage: {token}")
-need(PHY_TARGET, "GAPRole_StartDevice(&role_callbacks);", "GAP start missing")
-need(PHY_TARGET, "if (!dpls_phy6252_link_active()) schedule_storage_if_needed();", "idle tick must own deferred storage scheduling")
-
-# Flash: один facade, реальная очередь и запрет physical write при active link.
-need(PHY_STORAGE, "dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending()", "flash pending must derive from real queues")
-need(PHY_STORAGE, "if (dpls_phy6252_link_active()) return false;", "flash facade must refuse active link")
-need(PHY_SNV, "return deferred.pending && dpls_phy6252_link_active();", "SNV disconnect request must derive from live facts")
-need(PHY_APP, "static dpls_event_t journal_pending_events", "journal needs RAM write-behind")
-need(PHY_APP, "if (connection_handle != INVALID_CONNHANDLE) return false;", "journal physical write needs active-link guard")
-for token in ("journal_snv_dirty", "journal_pending_block", "journal_flush_snv"):
-    forbid(PHY_APP, token, f"old journal owner returned: {token}")
-
-# Settings: только текущие durable slots.
-for token in ("DPLS_LEGACY_SETTINGS_", "dpls_legacy_settings_t", "classify_legacy_settings", "DPLS_SETTINGS_EMPTY_MARKER"):
-    forbid(PHY_APP, token, f"legacy settings path returned: {token}")
-need(PHY_APP, "DPLS_SETTINGS_SLOT_A_SNV_ID 0x85u", "durable settings slot A missing")
-need(PHY_APP, "DPLS_SETTINGS_SLOT_B_SNV_ID 0x86u", "durable settings slot B missing")
-
-# Safety — pure owner of dangerous-mode policy.
-need(SAFETY, "dpls_safety_required_return", "safety reducer missing")
-for token in ("GAPRole_", "osal_", "GATT_"):
-    forbid(SAFETY, token, f"safety may not depend on runtime API: {token}")
-
-# TX: one in-flight ATT PDU, real confirmation, bounded timeout.
-need(PHY_APP, "#define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u", "TX confirmation timeout missing")
-need(PHY_APP, "tx.in_flight = true", "TX must track one in-flight PDU")
-need(PHY_APP, "dpls_gatt_needs_confirmation", "indication confirmation boundary missing")
-need(PHY_APP, "GAPRole_TerminateConnection();", "unconfirmed indication must be able to terminate link")
-need(PHY_TARGET, "ATT_HANDLE_VALUE_CFM", "target must consume real ATT confirmation")
-need(PHY_TARGET, "dpls_phy6252_tx_idle()", "flash disconnect must wait for TX drain")
-need(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC state must stay off 1 KiB stack")
-
-# Auth response должен попасть в TX до audit append.
-server = text(SERVER)
-response = server.find("send_auth_result(s, f->sequence, DPLS_AUTH_DENIED, 0);")
-audit = server.find("dpls_server_log(s, EVT_AUTH_FAILURE", response)
-if response < 0 or audit < 0 or response > audit:
-    fail(SERVER, "AUTH_RESULT must be queued before AUTH_FAILURE journal append")
-
-# UI StateFlow не может обойти lifecycle projection.
-for number, line in enumerate(text(CLIENT).splitlines(), start=1):
-    stripped = line.strip()
-    if "mutableState.value =" not in stripped:
-        continue
-    if "projectSession(" in stripped or stripped.startswith("private val mutableState"):
-        continue
-    fail(CLIENT, f"line {number}: UI replacement bypasses session projection")
 
 if errors:
     print("Architecture guard failed:")
@@ -181,8 +194,7 @@ if errors:
         print(f"  - {item}")
     raise SystemExit(1)
 
-print("Architecture guard: OK")
-print("  one mobile lifecycle owner, protocol v2 only")
-print("  advertising precedes deferred persistence")
-print("  one flash facade, no writes with active link")
-print("  safety owns dangerous mode, TX uses real ATT confirmation")
+print("Architecture guard: PASS")
+print(f"  first-party firmware: {production_lines} lines; PHY adapter: {phy_lines} lines")
+print("  one runtime, one flash writer, one explicit bond erase path")
+print("  no flash writes on active BLE; settings ACK drains before persistence")

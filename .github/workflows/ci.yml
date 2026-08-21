@@ -67,14 +67,14 @@ jobs:
       - name: Verify revision 2 pinout contract
         run: |
           grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'hal.hardware.port2_voltage_mv = dpls_phy6252_measurements_port2_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'hal.hardware.port_t_voltage_mv = dpls_phy6252_measurements_port_t_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_measurements.c
           grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
@@ -105,13 +105,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/android
-          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc7-debug.apk
-          sha256sum tmp/android/TestDPLS-1.4.2-rc7-debug.apk > tmp/android/TestDPLS-1.4.2-rc7-debug.apk.sha256
-          printf 'version=1.4.2\nrc=7\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc8-debug.apk
+          sha256sum tmp/android/TestDPLS-1.4.2-rc8-debug.apk > tmp/android/TestDPLS-1.4.2-rc8-debug.apk.sha256
+          printf 'version=1.4.2\nrc=8\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
       - uses: actions/upload-artifact@v6
         if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         with:
-          name: test-dpls-android-1.4.2-rc7
+          name: test-dpls-android-1.4.2-rc8
           path: tmp/android
           if-no-files-found: error
           retention-days: 7
@@ -199,10 +199,10 @@ jobs:
           mkdir -p tmp/gcc
           bash tools/build_firmware.sh gcc tmp/gcc/test-dpls-gcc.hex 2>&1 | tee tmp/gcc/gcc-build.log
           sha256sum tmp/gcc/test-dpls-gcc.hex > tmp/gcc/test-dpls-gcc.hex.sha256
-          printf 'version=1.4.2\nrc=7\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
+          printf 'version=1.4.2\nrc=8\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-gcc
+          name: test-dpls-phy6252-gcc-1.4.2-rc8
           path: |
             tmp/gcc
             firmware/targets/phy6252/build/test-dpls.elf
@@ -236,14 +236,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp/keil
-          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc7.hex 2>&1 | tee tmp/keil/keil-build.log
+          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc8.hex 2>&1 | tee tmp/keil/keil-build.log
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/keil/test-dpls.axf
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/keil/test-dpls.map
-          sha256sum tmp/keil/TestDPLS-1.4.2-rc7.hex > tmp/keil/TestDPLS-1.4.2-rc7.hex.sha256
-          printf 'version=1.4.2\nrc=7\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
+          sha256sum tmp/keil/TestDPLS-1.4.2-rc8.hex > tmp/keil/TestDPLS-1.4.2-rc8.hex.sha256
+          printf 'version=1.4.2\nrc=8\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-keil-1.4.2-rc7
+          name: test-dpls-phy6252-keil-1.4.2-rc8
           path: tmp/keil
           if-no-files-found: error
           retention-days: 7

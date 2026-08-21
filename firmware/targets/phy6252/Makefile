@@ -1,9 +1,6 @@
 # PHY6252 Test-DPLS — GNU Arm (gcc-arm-none-eabi).
-# Production image is still the Keil/AC6 build; this target is the same sources
-# and the same memory map for people without Arm Compiler 6.
-#
-#   make -C firmware/targets/phy6252
-#   tools/build_firmware.sh gcc tmp/test-dpls.hex
+# AC6 остаётся production build; GCC обязан собирать те же DPLS sources и ту же
+# карту памяти, чтобы CI не мог проверять архитектуру, которой нет в бинарнике.
 
 SHELL := /bin/bash
 CROSS ?= arm-none-eabi-
@@ -54,9 +51,6 @@ DEFS := \
 	-DBROADCASTER_CFG=0x01 -DOBSERVER_CFG=0x02 \
 	-DPERIPHERAL_CFG=0x04 -DCENTRAL_CFG=0x08
 
-# SDK headers are -isystem so unused static prototypes in adc.h (and friends)
-# do not fail the app objects under -Werror. Those warnings fire at end of TU,
-# after a local diagnostic pragma around the include has already been popped.
 APP_INCLUDES := \
 	-Isource \
 	-I$(FW)/include \
@@ -94,10 +88,6 @@ SDK_INCLUDES := \
 	-isystem $(SDK)/components/libraries/tinycrypt-0.2.8/lib/include
 INCLUDES := $(APP_INCLUDES) $(SDK_INCLUDES)
 
-# Keep the target surface to drivers actually owned by this application or
-# required by the vendor BLE runtime. key.c/pwm/led_light are example baggage;
-# key.h remains because the vendor OSAL sample includes it transitively through
-# halPeripheral.h. DPLS owns button polling and LED scene state itself.
 SDK_SOURCES := \
 	$(SDK)/example/ble_peripheral/simpleBlePeripheral/main.c \
 	$(SDK)/components/driver/uart/uart.c \
@@ -123,6 +113,7 @@ SDK_SOURCES := \
 	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c \
 	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/utils.c
 
+# Канонический production surface RC8. architecture_guard.py сравнивает его с AC6.
 APP_SOURCES := \
 	source/dplsBLEPeripheral.c \
 	$(FW)/src/dpls_protocol.c \
@@ -130,9 +121,16 @@ APP_SOURCES := \
 	$(FW)/src/dpls_safety.c \
 	$(FW)/src/dpls_led.c \
 	$(FW)/src/dpls_calib.c \
+	$(FW)/src/dpls_durable_settings.c \
 	$(FW)/phy6252/dpls_gatt_service.c \
-	$(FW)/phy6252/dpls_phy6252_app.c \
 	$(FW)/phy6252/dpls_ble_identity.c \
+	$(FW)/phy6252/dpls_phy6252_auth.c \
+	$(FW)/phy6252/dpls_phy6252_measurements.c \
+	$(FW)/phy6252/dpls_phy6252_outputs.c \
+	$(FW)/phy6252/dpls_phy6252_runtime.c \
+	$(FW)/phy6252/dpls_phy6252_storage.c \
+	$(FW)/phy6252/dpls_phy6252_supervisor.c \
+	$(FW)/phy6252/dpls_phy6252_transport.c \
 	system_gcc.c
 
 OBJECTS := $(addprefix $(BUILD)/,$(notdir $(SDK_SOURCES:.c=.o))) \
@@ -166,12 +164,6 @@ $(BUILD)/$(notdir $(1:.c=.o)): $(1) | $(BUILD)
 endef
 $(foreach src,$(APP_SOURCES),$(eval $(call COMPILE_APP,$(src))))
 
-# Vendor adc.h declares static helpers that are defined in adc.c; GCC still
-# emits -Wunused-function at end of this TU even with -isystem.
-$(BUILD)/dpls_phy6252_app.o: APP_CFLAGS += -Wno-unused-function
-# GCC recognizes the byte loop as a memset pattern even with -fno-builtin and
-# otherwise lowers memset() back into a call to itself. Disable that transform
-# for the freestanding libc shim so the emitted Cortex-M0 code remains a loop.
 $(BUILD)/system_gcc.o: APP_CFLAGS += -fno-builtin -fno-tree-loop-distribute-patterns
 
 $(BUILD)/startup_phy6252.o: startup_phy6252.S | $(BUILD)
@@ -183,9 +175,6 @@ $(RF_LIB): $(RF_LIB_SRC) $(FIX_AR) | $(BUILD)
 $(BLE_LIB): $(BLE_LIB_SRC) $(FIX_AR) | $(BUILD)
 	python3 $(FIX_AR) $< $@
 
-# MAIN is intentionally RWX: the vendor PHY6252 runtime executes SRAM code and
-# stores initialized data in the same fixed SRAM window. Suppress only GNU ld's
-# generic RWX program-segment diagnostic; compiler/linker warnings stay fatal.
 $(ELF): $(OBJECTS) $(ROM_LD) $(LDSCRIPT) $(RF_LIB) $(BLE_LIB)
 	$(CC) $(ARCH) -nostartfiles -nostdlib \
 		-Wl,-Map,$(MAP),--cref,--gc-sections,--undefined=jump_table_base,--undefined=global_config \

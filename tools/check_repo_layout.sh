@@ -27,10 +27,29 @@ test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" =
 test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
-# PHY6252 target — единственная реальная hardware implementation в этом repo.
-test -f firmware/phy6252/dpls_phy6252_app.c
-test -f firmware/targets/phy6252/Makefile
-test -f firmware/targets/phy6252/test-dpls.cproject.yml
+# PHY6252: только split runtime RC8. Монолит и промежуточные facade удалены физически.
+for path in \
+  firmware/phy6252/dpls_phy6252_runtime.c \
+  firmware/phy6252/dpls_phy6252_transport.c \
+  firmware/phy6252/dpls_phy6252_storage.c \
+  firmware/phy6252/dpls_phy6252_measurements.c \
+  firmware/phy6252/dpls_phy6252_outputs.c \
+  firmware/phy6252/dpls_phy6252_auth.c \
+  firmware/phy6252/dpls_phy6252_supervisor.c \
+  firmware/targets/phy6252/Makefile \
+  firmware/targets/phy6252/test-dpls.cproject.yml; do
+  test -f "$path" || { echo "missing RC8 production source: $path" >&2; exit 1; }
+done
+for path in \
+  firmware/phy6252/dpls_phy6252_app.c \
+  firmware/phy6252/dpls_phy6252_app.h \
+  firmware/phy6252/dpls_phy6252_snv_guard.c \
+  firmware/phy6252/dpls_phy6252_snv_guard.h \
+  firmware/phy6252/dpls_phy6252_storage_ble.c \
+  firmware/phy6252/dpls_phy6252_storage_ble.h; do
+  test ! -e "$path" || { echo "legacy PHY6252 layer returned: $path" >&2; exit 1; }
+done
+
 test ! -e .gitmodules
 test ! -e third_party/phy6252-emu
 test ! -e firmware/phy6252_emu
@@ -41,7 +60,7 @@ grep -q 'uses: Pom4H/firmverse@v1' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
 
-# Прошивка — один application image и один wrapper для manual/auto ROM entry.
+# Один application flasher; factory sector не трогается обычной прошивкой.
 test -f tools/flash_firmware.sh
 test ! -e tools/flash_firmware_agent.sh
 grep -q -- '--auto-rst' tools/flash_firmware.sh
