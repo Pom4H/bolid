@@ -62,14 +62,26 @@ app = text(APP)
 if app.index('#include "dpls_phy6252_app.h"') > app.index('#include "osal_snv.h"'):
     raise SystemExit("dpls_phy6252_app.c: SNV guard header must precede osal_snv.h")
 
-# The identity module owns exactly two vendor-key erases (IRK/CSRK). On normal
-# commissioning boot they execute before GAPRole_StartDevice; keep this narrow
-# exception explicit so no unrelated raw SNV writer can appear unnoticed.
+# Identity is the only boot-time exception to the runtime storage actor. It may
+# restore/generate only BLE IRK/CSRK before GAPRole_StartDevice, plus erase those
+# same keys during an explicit bond reset. No settings/journal ID may leak here.
 identity = text(IDENTITY)
-if identity.count("osal_snv_write(") != 2:
-    raise SystemExit("dpls_ble_identity.c: expected exactly two raw IRK/CSRK writes")
+if identity.count("osal_snv_write(") != 3:
+    raise SystemExit("dpls_ble_identity.c: unexpected raw SNV write surface")
+require(IDENTITY, "static bool write_key_snv(uint16_t snv_id")
+require(IDENTITY, "write_key_snv(BLE_NVID_IRK")
+require(IDENTITY, "write_key_snv(BLE_NVID_CSRK")
 require(IDENTITY, "osal_snv_write(BLE_NVID_IRK")
 require(IDENTITY, "osal_snv_write(BLE_NVID_CSRK")
+require(IDENTITY, "ensure_legacy_identity_keys")
+
+for forbidden in (
+    "DPLS_SETTINGS_SNV",
+    "DPLS_AUTH_LOCK",
+    "DPLS_JOURNAL",
+):
+    if forbidden in identity:
+        raise SystemExit(f"dpls_ble_identity.c: boot identity must not write {forbidden}")
 
 for path in (ROOT / "firmware/phy6252").glob("*.c"):
     if path in {APP, GUARD, IDENTITY}:
