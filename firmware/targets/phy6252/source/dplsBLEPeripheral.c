@@ -77,9 +77,7 @@ static void disconnect_for_flash_if_ready(void)
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
-    /* Diagnostic branch: intentionally bypass identity/storage readiness. The
-     * purpose is to prove whether the current image reaches a live GAP role on
-     * real PHY6252 hardware. Production RC6 keeps the strict gates. */
+    /* Diagnostic branch: intentionally bypass identity/storage readiness. */
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
@@ -104,8 +102,6 @@ static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED:
-        /* Diagnostic branch: advertise before touching the RC6 post-start
-         * identity/storage machinery. */
         (void)enable_advertising_if_ready();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
@@ -169,8 +165,8 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     (void)hal_pwrmgr_LowCurrentLdo_enable();
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
     if (!hal_fs_initialized()) (void)hal_fs_init(0x1103C000u, 3);
-    dpls_ble_identity_prepare();
-    apply_identity_to_adv();
+    /* Hardware bisect: do not touch the new RC6 factory sector before GAP is
+     * proven alive. The controller uses its vendor/default address for scan. */
     (void)LL_EXT_SetSCA(500);
     GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, 2);
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
@@ -232,7 +228,6 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & DPLS_PHY6252_STORAGE_EVT) {
-        /* Diagnostic branch: storage must not suppress radio visibility. */
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
