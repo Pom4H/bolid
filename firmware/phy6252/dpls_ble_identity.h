@@ -3,29 +3,16 @@
 
 #include "bcomdef.h"
 
-/* Factory identity occupies the last 4 KiB sector of the 256 KiB application
- * flash window. The linker deliberately excludes this sector from firmware. */
-#define DPLS_FACTORY_IDENTITY_FLASH_ADDR 0x1103F000u
-#define DPLS_FACTORY_IDENTITY_RECORD_SIZE 64u
-
-/* Must run before GAPRole_StartDevice(). A missing/invalid factory record leaves
- * identity not ready and the application must not enable BLE advertising. */
+/* Подготовка identity выполняется до GAPRole_StartDevice(). */
 void dpls_ble_identity_prepare(void);
 
-/* Sync the selected public/static identity address after GAP_DeviceInit. */
+/* После GAP_DeviceInit синхронизируем identity/RPA со стеком. */
 void dpls_ble_identity_on_stack_started(void);
 
-/* Clears runtime copies of BLE identity keys in SNV. Factory keys are not
- * touched and are restored from the mandatory factory record on reboot. */
+/* Сбрасывает bonding keys, MAC сохраняется. После вызова нужен reboot. */
 void dpls_ble_identity_reset_bonding_keys(void);
 
-/* Stable 32-bit production serial number from the factory record. */
+/* Стабильный 32-bit device id выводится из identity MAC. */
 uint32_t dpls_ble_identity_device_id(void);
-
-/* TRUE when the provisioned address and identity keys are applied successfully. */
-bool dpls_ble_identity_is_ready(void);
-
-/* TRUE only when a valid CRC-protected factory record was loaded. */
-bool dpls_ble_identity_is_provisioned(void);
 
 #endif
