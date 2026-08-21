@@ -5,10 +5,10 @@ import ru.bolid.testdpls.core.runtime.ConnectionMachine
 import ru.bolid.testdpls.core.runtime.DeviceSession
 
 /**
- * Mutable shell around the pure connection reducer.
+ * Единственный mutable owner DeviceSession.
  *
- * This is the only mutable owner of [DeviceSession]. Product code may change
- * lifecycle state only by dispatching semantic [ConnectionEvent] facts.
+ * Product-код меняет lifecycle только через semantic ConnectionEvent, а сам граф
+ * переходов остаётся чистым и тестируемым в ConnectionMachine.
  */
 internal class ConnectionActor(
     initial: DeviceSession = DeviceSession.Offline,

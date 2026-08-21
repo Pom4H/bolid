@@ -1,10 +1,10 @@
 package ru.bolid.testdpls.core.runtime
 
 /**
- * Facts accepted by the pure lifecycle reducer.
+ * Факты, которые принимает чистый reducer жизненного цикла соединения.
  *
- * Platform callbacks and decoded protocol milestones are events. They are never
- * desired-state commands, so callers cannot bypass the legal lifecycle graph.
+ * Platform callbacks и milestones протокола приходят только как события. Caller
+ * не передаёт желаемое следующее состояние и поэтому не может обойти граф переходов.
  */
 sealed interface ConnectionEvent {
     data class ConnectRequested(
@@ -34,10 +34,10 @@ sealed interface ConnectionEvent {
 }
 
 /**
- * Total, side-effect-free lifecycle reducer.
+ * Полный reducer без I/O и скрытых side effects.
  *
- * Link/protocol work remains in DplsClient/transport. The reducer owns only the
- * legal state graph, which keeps lifecycle truth singular and directly testable.
+ * BLE и protocol work остаются в DplsClient/transport. Здесь находится только
+ * допустимый граф состояний, поэтому lifecycle можно тестировать отдельно.
  */
 object ConnectionMachine {
     fun reduce(state: DeviceSession, event: ConnectionEvent): DeviceSession = when (event) {
@@ -122,8 +122,8 @@ object ConnectionMachine {
             state
         }
 
-        /* Radio availability is a fact used by the driver to retry the route;
-         * it does not invent a new lifecycle state by itself. */
+        /* Сам факт появления Bluetooth не создаёт новый product state.
+         * Transport использует его только как разрешение повторить известный route. */
         ConnectionEvent.BluetoothAvailable -> state
 
         ConnectionEvent.AttemptTimedOut -> when (state) {
