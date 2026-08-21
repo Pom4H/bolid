@@ -150,9 +150,8 @@ static bool configure_static_identity_addr(const uint8_t mac[B_ADDR_LEN])
 {
     uint8_t controller_addr[B_ADDR_LEN];
 
-    /* GAP_DeviceInit snapshots the local address used by the peripheral role.
-     * Static-random identity therefore has to be configured before
-     * GAPRole_StartDevice(), not after GAPROLE_STARTED. */
+    /* Static-random identity is a GAP initialization input. Public identity uses
+     * the hardware-proven 1.4.0 controller path instead. */
     display_to_controller_addr(mac, controller_addr);
     return GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, controller_addr) == SUCCESS;
 }
@@ -187,10 +186,15 @@ void dpls_ble_identity_prepare(void)
     if (!factory_identity_load(&factory)) return;
     if (!select_identity_address(&factory, mac, &addr_type)) return;
 
-    /* Static-random address selection is a GAP initialization input. The PHY6252
-     * role captures its local address during GAP_DeviceInit(), so configure it
-     * here while SimpleBLEPeripheral_Init() is still before GAPRole_StartDevice(). */
-    if (addr_type == ADDRTYPE_STATIC && !configure_static_identity_addr(mac)) return;
+    /* Keep the public-controller initialization order exactly as the
+     * hardware-proven 1.4.0 firmware: set the controller BD_ADDR before
+     * GAPRole_StartDevice(). The previous RC6 delay until GAPROLE_STARTED made
+     * identity_ready fail on real PHY6252 hardware and suppressed advertising. */
+    if (addr_type == ADDRTYPE_PUBLIC) {
+        if (!set_controller_public_addr(mac)) return;
+    } else if (!configure_static_identity_addr(mac)) {
+        return;
+    }
 
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_addr_type = addr_type;
@@ -211,13 +215,11 @@ void dpls_ble_identity_on_stack_started(void)
     if (!s_identity_mac_valid) dpls_ble_identity_prepare();
     if (!s_identity_mac_valid) return;
 
-    /* Public identity still needs the controller to be live: PHY6252 may reject
-     * HCI_EXT_SetBDADDRCmd before GAPROLE_STARTED. Static identity was already
-     * configured before GAP_DeviceInit and must not be changed here. */
-    if (s_identity_addr_type == ADDRTYPE_PUBLIC) {
-        if (!set_controller_public_addr(s_identity_mac)) return;
-        if (GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL) != SUCCESS) return;
-    }
+    /* 1.4.0 configured the GAP identity again after GAPROLE_STARTED using the
+     * same display-order address. Preserve that proven public path. Static
+     * identity remains an initialization-time GAP input. */
+    if (s_identity_addr_type == ADDRTYPE_PUBLIC &&
+        GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, s_identity_mac) != SUCCESS) return;
 
     GAPRole_GetParameter(GAPROLE_IRK, irk);
     if (key_is_invalid(irk)) return;
