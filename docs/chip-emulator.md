@@ -12,13 +12,13 @@ Bolid не хранит собственный PHY6252/ZMU emulator. В GitHub A
     strict: 'true'
 ```
 
-`@v1` — compatibility line Firmverse. Action сам подготавливает свой emulator backend и запускает firmware в deterministic single-node режиме.
+`@v1` — compatibility line Firmverse. Action сам подготавливает emulator backend и запускает firmware в deterministic single-node режиме.
 
 ## Что остаётся в Bolid
 
 | Путь | Назначение |
 |---|---|
-| `firmware/sim/` | быстрый продуктовый simulator для lab, replay и Soft-BLE; содержит только private ATT queue/pacing mock |
+| `firmware/sim/` | быстрый продуктовый simulator для lab, replay и Soft-BLE |
 | `tools/dpls-lab/` | host lab с тем же Compose UI |
 | `.github/workflows/ci.yml` | сборка production PHY6252 HEX и передача его в Firmverse |
 
@@ -39,6 +39,6 @@ Bolid не хранит собственный PHY6252/ZMU emulator. В GitHub A
 
 ## Граница проверки
 
-Production firmware требует factory identity record в `0x1103F000..0x1103FFFF`. Текущий Firmverse Action получает application HEX, но Bolid пока не передаёт ему отдельный factory record. Поэтому Firmverse проверяет загрузку и исполнение target image/CPU/MMIO contract, но CI не должен выдавать это за полноценную проверку production provisioning и BLE commissioning.
+Production firmware снова имеет **один application HEX**. Отдельного factory flash image больше нет, поэтому тот же artifact используется для GCC/Keil/Firmverse и для реальной платы через `wh`.
 
-Когда Firmverse получит поддерживаемый способ предварительно заполнить factory flash, этот сценарий надо добавить туда, а не возвращать локальный эмулятор в Bolid.
+Firmverse проверяет target image/CPU/MMIO execution contract, но не заменяет аппаратный acceptance на PB-03F. В частности, только реальная плата подтверждает vendor BLE stack, RF/advertising, SNV timing, pairing и поведение после power-cycle.
