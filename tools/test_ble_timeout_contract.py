@@ -11,10 +11,17 @@ FIRMWARE = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 
 def constant(path: Path, name: str) -> int:
     text = path.read_text(encoding="utf-8")
-    match = re.search(rf"\b{name}\s*=\s*([0-9_]+)(?:[Lu]*)\b", text)
-    if match is None:
-        raise SystemExit(f"{path.relative_to(ROOT)}: constant {name} not found")
-    return int(match.group(1).replace("_", ""))
+    patterns = (
+        # Kotlin/C-style assignment: `const val NAME = 55_000L`.
+        rf"\b{name}\s*=\s*([0-9_]+)(?:[uUlL]*)\b",
+        # C preprocessor constant: `#define NAME 60000u`.
+        rf"^[ \t]*#define[ \t]+{name}[ \t]+([0-9_]+)(?:[uUlL]*)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match is not None:
+            return int(match.group(1).replace("_", ""))
+    raise SystemExit(f"{path.relative_to(ROOT)}: constant {name} not found")
 
 
 pairing_ms = constant(ANDROID, "PAIRING_TIMEOUT_MS")
