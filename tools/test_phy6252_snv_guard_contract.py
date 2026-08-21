@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Static contract for PHY6252 radio-safe application SNV ownership."""
+"""Static contract for PHY6252 single-owner radio/flash persistence."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_H = ROOT / "firmware/phy6252/dpls_phy6252_app.h"
 APP = ROOT / "firmware/phy6252/dpls_phy6252_app.c"
 GUARD = ROOT / "firmware/phy6252/dpls_phy6252_snv_guard.c"
+STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
+ACTOR = ROOT / "firmware/src/dpls_storage_actor.c"
 IDENTITY = ROOT / "firmware/phy6252/dpls_ble_identity.c"
 TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 MAKEFILE = ROOT / "firmware/targets/phy6252/Makefile"
@@ -23,17 +25,36 @@ def require(path: Path, needle: str) -> None:
 
 require(APP_H, "#define osal_snv_read dpls_phy6252_snv_read_guarded")
 require(APP_H, "#define osal_snv_write dpls_phy6252_snv_write_guarded")
-require(GUARD, "if (!dpls_phy6252_link_active())")
-require(GUARD, "disconnect_requested = true;")
+require(GUARD, "DPLS_STORAGE_EVT_WRITE_REQUESTED")
+require(GUARD, "DPLS_STORAGE_DRAINING")
 require(GUARD, "bool dpls_phy6252_snv_flush_deferred(void)")
 require(GUARD, "if (dpls_phy6252_link_active()) return false;")
-require(MAKEFILE, "$(FW)/phy6252/dpls_phy6252_snv_guard.c")
-require(CPROJECT, "../../phy6252/dpls_phy6252_snv_guard.c")
-require(TARGET, '#include "dpls_phy6252_snv_guard.h"')
-require(TARGET, "return dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending();")
-require(TARGET, "dpls_phy6252_snv_pending() && !dpls_phy6252_snv_flush_deferred()")
-require(TARGET, "dpls_phy6252_snv_disconnect_requested()")
-require(TARGET, "if (!dpls_ble_identity_is_ready() || flash_work_pending()) return false;")
+require(ACTOR, "dpls_storage_actor_flash_allowed")
+require(ACTOR, "actor->phase == DPLS_STORAGE_FLASH")
+require(ACTOR, "!actor->link_active")
+require(STORAGE, "dpls_phy6252_snv_pending() || dpls_phy6252_storage_pending()")
+require(STORAGE, "dpls_phy6252_flash_process_one")
+require(MAKEFILE, "$(FW)/src/dpls_storage_actor.c")
+require(MAKEFILE, "$(FW)/phy6252/dpls_phy6252_storage.c")
+require(CPROJECT, "../../src/dpls_storage_actor.c")
+require(CPROJECT, "../../phy6252/dpls_phy6252_storage.c")
+require(TARGET, '#include "dpls_phy6252_storage.h"')
+require(TARGET, "dpls_phy6252_flash_work_pending()")
+require(TARGET, "dpls_phy6252_flash_disconnect_requested()")
+require(TARGET, "dpls_phy6252_flash_process_one()")
+require(TARGET, "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;")
+
+# The target is intentionally storage-agnostic. Re-introducing the SNV guard or
+# journal queue here would create a second owner of flash policy.
+target = text(TARGET)
+for forbidden in (
+    "dpls_phy6252_snv_pending()",
+    "dpls_phy6252_snv_flush_deferred()",
+    "dpls_phy6252_storage_pending()",
+    '#include "dpls_phy6252_snv_guard.h"',
+):
+    if forbidden in target:
+        raise SystemExit(f"dplsBLEPeripheral.c: target bypasses storage actor with {forbidden!r}")
 
 # The macro guard must be visible before the vendor SNV header in the only
 # application TU that owns settings/auth/journal SNV calls.
@@ -54,6 +75,6 @@ for path in (ROOT / "firmware/phy6252").glob("*.c"):
     if path in {APP, GUARD, IDENTITY}:
         continue
     if "osal_snv_write(" in text(path):
-        raise SystemExit(f"{path.relative_to(ROOT)}: raw osal_snv_write bypasses guard")
+        raise SystemExit(f"{path.relative_to(ROOT)}: raw osal_snv_write bypasses storage actor")
 
-print("PHY6252 deferred SNV contract: PASS")
+print("PHY6252 storage actor contract: PASS")
