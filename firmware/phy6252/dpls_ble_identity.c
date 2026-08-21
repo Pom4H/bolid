@@ -40,8 +40,8 @@ typedef struct {
     uint8_t csrk[KEYLEN];
 } dpls_factory_identity_t;
 
-/* PHY62XX SDK 3.1.2 defines this object in flash.c but omits the extern from
- * flash.h. Use the vendor decoder/state instead of depending on its raw format. */
+/* PHY62XX SDK 3.1.2 определяет объект в flash.c, но не объявляет extern в flash.h.
+ * Используем декодированное vendor-состояние, а не зависим от сырого формата flash. */
 extern chipMAddr_t g_chipMAddr;
 
 static uint8_t s_identity_mac[B_ADDR_LEN];
@@ -49,7 +49,6 @@ static uint8_t s_identity_addr_type = ADDRTYPE_PUBLIC;
 static uint32_t s_device_id;
 static bool s_identity_mac_valid;
 static bool s_identity_ready;
-static bool s_factory_provisioned;
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -120,8 +119,8 @@ static bool read_chip_factory_mac(uint8_t out[B_ADDR_LEN])
     check_chip_mAddr();
     if (g_chipMAddr.chipMAddrStatus != CHIP_ID_VALID) return false;
 
-    /* flash.c decodes the programmed words into controller B_ADDR byte order.
-     * DPLS keeps the identity in human/display order, so reverse it here. */
+    /* flash.c выдаёт адрес в controller B_ADDR order. В identity храним обычный
+     * отображаемый порядок, поэтому здесь разворачиваем байты. */
     for (i = 0; i < B_ADDR_LEN; ++i) {
         out[i] = g_chipMAddr.mAddr[B_ADDR_LEN - 1u - i];
     }
@@ -150,8 +149,8 @@ static bool configure_static_identity_addr(const uint8_t mac[B_ADDR_LEN])
 {
     uint8_t controller_addr[B_ADDR_LEN];
 
-    /* Static-random identity is a GAP initialization input. Public identity uses
-     * the hardware-proven 1.4.0 controller path instead. */
+    /* Static-random address задаётся как GAP initialization input. Public address
+     * идёт через controller path, проверенный на реальном PHY6252. */
     display_to_controller_addr(mac, controller_addr);
     return GAP_ConfigDeviceAddr(ADDRTYPE_STATIC, controller_addr) == SUCCESS;
 }
@@ -179,17 +178,14 @@ void dpls_ble_identity_prepare(void)
 
     s_identity_ready = false;
     s_identity_mac_valid = false;
-    s_factory_provisioned = false;
     s_device_id = 0u;
 
     memset(&factory, 0, sizeof(factory));
     if (!factory_identity_load(&factory)) return;
     if (!select_identity_address(&factory, mac, &addr_type)) return;
 
-    /* Keep the public-controller initialization order exactly as the
-     * hardware-proven 1.4.0 firmware: set the controller BD_ADDR before
-     * GAPRole_StartDevice(). The previous RC6 delay until GAPROLE_STARTED made
-     * identity_ready fail on real PHY6252 hardware and suppressed advertising. */
+    /* Public BD_ADDR должен попасть в controller до GAPRole_StartDevice().
+     * Перенос этой операции позже уже ломал advertising на реальной плате. */
     if (addr_type == ADDRTYPE_PUBLIC) {
         if (!set_controller_public_addr(mac)) return;
     } else if (!configure_static_identity_addr(mac)) {
@@ -199,7 +195,6 @@ void dpls_ble_identity_prepare(void)
     memcpy(s_identity_mac, mac, B_ADDR_LEN);
     s_identity_addr_type = addr_type;
     s_device_id = factory.serial_number;
-    s_factory_provisioned = true;
     s_identity_mac_valid = true;
     (void)GAPRole_SetParameter(GAPROLE_IRK, KEYLEN, factory.irk);
     (void)GAPRole_SetParameter(GAPROLE_SRK, KEYLEN, factory.csrk);
@@ -215,9 +210,8 @@ void dpls_ble_identity_on_stack_started(void)
     if (!s_identity_mac_valid) dpls_ble_identity_prepare();
     if (!s_identity_mac_valid) return;
 
-    /* 1.4.0 configured the GAP identity again after GAPROLE_STARTED using the
-     * same display-order address. Preserve that proven public path. Static
-     * identity remains an initialization-time GAP input. */
+    /* Public identity повторно задаётся после GAPROLE_STARTED: именно такой
+     * порядок стабильно работает на PHY6252. Static identity задаётся до старта. */
     if (s_identity_addr_type == ADDRTYPE_PUBLIC &&
         GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, s_identity_mac) != SUCCESS) return;
 
@@ -236,8 +230,8 @@ void dpls_ble_identity_reset_bonding_keys(void)
 {
     uint8_t erased[KEYLEN];
     memset(erased, 0xFF, sizeof(erased));
-    /* Clear stack runtime/SNV copies only. Factory IRK/CSRK are restored from
-     * the mandatory factory record on the next boot. */
+    /* Сбрасываем только runtime/SNV-копии стека. Factory IRK/CSRK снова
+     * загрузятся из обязательной factory record при следующем boot. */
     (void)osal_snv_write(BLE_NVID_IRK, KEYLEN, erased);
     (void)osal_snv_write(BLE_NVID_CSRK, KEYLEN, erased);
 }
@@ -254,5 +248,5 @@ bool dpls_ble_identity_is_ready(void)
 
 bool dpls_ble_identity_is_provisioned(void)
 {
-    return s_identity_mac_valid && s_factory_provisioned;
+    return s_identity_mac_valid;
 }
