@@ -39,8 +39,8 @@ fun parseLogHistogramReport(raw: ByteArray): LogHistogram? {
 fun parseDeviceInfoReport(raw: ByteArray): DeviceInfo? {
     if (raw.size < 12) return null
     val nameLen = raw[11].toInt() and 0xff
-    if (nameLen > raw.size - 12) return null
-    val name = if (nameLen == 0) "" else raw.copyOfRange(12, 12 + nameLen).decodeToString()
+    if (raw.size != 12 + nameLen) return null
+    val name = if (nameLen == 0) "" else raw.copyOfRange(12, raw.size).decodeToString()
     return DeviceInfo(
         deviceId = readU32(raw, 0),
         protocolVersion = raw[4].toInt() and 0xff,
@@ -52,15 +52,12 @@ fun parseDeviceInfoReport(raw: ByteArray): DeviceInfo? {
 }
 
 fun parseStateReport(raw: ByteArray, nowMillis: Long): DeviceState? {
-    if (raw.size < 16) return null
+    if (raw.size != 25) return null
     val mode = DplsMode.fromWire(raw[0].toInt() and 0xff) ?: return null
     val power = if ((raw[1].toInt() and 0xff) == 0) PowerSource.DPLS else PowerSource.RESERVE
-    val validity = raw.getOrNull(16)?.toInt()?.and(0xff) ?: 0
-    val extended = raw.size >= 25
-    val legacyLine = readU16(raw, 2)
+    val validity = raw[16].toInt() and 0xff
     fun measured(mask: Int, value: Int): Int? = value.takeIf { validity and mask != 0 }
 
-    val port1 = if (extended) readU16(raw, 17) else legacyLine
     return DeviceState(
         mode = mode,
         powerSource = power,
@@ -71,11 +68,11 @@ fun parseStateReport(raw: ByteArray, nowMillis: Long): DeviceState? {
         revision = readU32(raw, 12),
         receivedAtMillis = nowMillis,
         voltages = Voltages(
-            lineMv = measured(StateValidity.LINE, legacyLine),
-            port1Mv = measured(StateValidity.LINE, port1),
-            port2Mv = if (extended) measured(StateValidity.PORT_2, readU16(raw, 19)) else null,
-            branchMv = if (extended) measured(StateValidity.PORT_T, readU16(raw, 21)) else null,
-            reserveMv = if (extended) measured(StateValidity.RESERVE, readU16(raw, 23)) else null,
+            lineMv = measured(StateValidity.LINE, readU16(raw, 2)),
+            port1Mv = measured(StateValidity.LINE, readU16(raw, 17)),
+            port2Mv = measured(StateValidity.PORT_2, readU16(raw, 19)),
+            branchMv = measured(StateValidity.PORT_T, readU16(raw, 21)),
+            reserveMv = measured(StateValidity.RESERVE, readU16(raw, 23)),
         ),
         powerKnown = validity and StateValidity.POWER != 0,
         autoIsolationKnown = validity and StateValidity.AUTO_ISO != 0,

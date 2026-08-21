@@ -11,7 +11,7 @@ import ru.bolid.testdpls.core.domain.PowerSource
 
 class DplsMessagesTest {
     @Test
-    fun stateReportParsesExtendedVoltagesAndValidity() {
+    fun stateReportParsesCurrentVoltagesAndValidity() {
         val raw = ByteArray(25)
         raw[0] = DplsMode.SHORT_2.wire.toByte()
         raw[1] = 1
@@ -40,10 +40,21 @@ class DplsMessagesTest {
     }
 
     @Test
-    fun deviceInfoRejectsTruncatedName() {
-        val raw = ByteArray(12)
-        raw[11] = 5
-        assertNull(parseDeviceInfoReport(raw))
+    fun oldStateReportLayoutIsRejected() {
+        assertNull(parseStateReport(ByteArray(16), 999))
+        assertNull(parseStateReport(ByteArray(24), 999))
+        assertNull(parseStateReport(ByteArray(26), 999))
+    }
+
+    @Test
+    fun deviceInfoRejectsWrongLength() {
+        val truncated = ByteArray(12)
+        truncated[11] = 5
+        assertNull(parseDeviceInfoReport(truncated))
+
+        val extra = ByteArray(13)
+        extra[11] = 0
+        assertNull(parseDeviceInfoReport(extra))
     }
 
     @Test
