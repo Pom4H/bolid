@@ -6,6 +6,12 @@ tmp/
 pb03f-original-flash-2026-07-10.bin
 wch-driver/
 
+# Per-device factory identity artifacts contain persistent BLE IRK/CSRK.
+# Never commit personalized firmware or its factory sidecar.
+*.factory.bin
+*.identity.json
+*.flash-ready.hex
+
 **/.venv/
 third_party/phy62x2/.venv/
 
