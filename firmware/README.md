@@ -1,42 +1,34 @@
 # Firmware Test-DPLS
 
-PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. Быстрый host simulator живёт в `sim/`, а реальный target HEX исполняется внешним Firmverse.
+PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. `firmware/sim` — быстрый protocol/UI simulator; production HEX исполняется внешним Firmverse.
 
 ## Структура
 
 | Путь | Назначение |
 |---|---|
 | `src/`, `include/` | protocol, server, safety, LED, HMAC, calibration |
-| `sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE |
-| `tests/` | host behavioral/edge-case tests |
+| `sim/` | быстрый Test-DPLS simulator для lab/replay/Soft-BLE |
+| `tests/` | host behavioral/fault tests |
 | `phy6252/` | HAL/GATT/ADC/persistence/board mapping |
 | `targets/phy6252/` | Keil и GNU Arm target builds |
 | `sdk/phy6252-sdk.env` | pin PHY62XX SDK 3.1.2 |
 
-Полный vendor SDK не хранится в репозитории. Production target emulation выполняет [Firmverse](https://github.com/Pom4H/firmverse).
-
 ## Safety invariants
 
-- startup и BLE disconnect принудительно возвращают `NORMAL`;
-- опасные режимы имеют hard timeout;
-- session timeout возвращает `NORMAL`;
-- low reserve и real-short isolation имеют приоритет над requested mode;
+- startup/disconnect/error → `NORMAL`;
+- dangerous mode и authenticated session имеют hard timeout;
+- low reserve / real-short override requested mode;
 - силовые выходы переключаются break-before-make;
-- application auth lock переживает reconnect/reboot;
-- session token/nonces очищаются при reset link state;
-- TX сериализован: один ATT PDU in flight;
-- аппаратная ошибка применения режима переводит physical и logical state в `NORMAL`.
+- auth lock хранится durable;
+- один ATT PDU in flight;
+- hardware apply error переводит physical и logical state в `NORMAL`.
 
-## Boot invariants
-
-Аппаратно проверенная база — release 1.4.0. RC7 сохраняет её boot-critical порядок:
+## Boot / BLE
 
 ```text
 power/reset
   ↓
-RAM retention
-  ↓
-SNV filesystem mount
+RAM retention + SNV mount
   ↓
 BLE identity prepare
   ↓
@@ -51,80 +43,42 @@ advertising ON
 idle/deferred flash work
 ```
 
-Критические правила:
+Текущие правила:
 
-- application XIP linker window остаётся `0x11020000 + 0x20000`, как в рабочем 1.4.0;
-- BLE identity не читает отдельный raw factory sector;
-- advertising не зависит от `identity_ready` или journal/settings pending;
-- boot journal не пишет flash в окно старта GAP;
-- blocking flash выполняется только отдельным OSAL turn без active BLE link.
+- XIP linker window: `0x11020000 + 0x20000`;
+- фактический application HEX обязан заканчиваться до SNV `0x1103C000`;
+- identity использует factory PHY6252 MAC → SNV `0x82` → однократную генерацию;
+- `HCI_EXT_SetBDADDRCmd()` выполняется до `GAPRole_StartDevice()`;
+- ошибка identity не блокирует advertising;
+- blocking flash не выполняется при active BLE link.
 
-## BLE identity
-
-Identity использует простой путь 1.4.0:
-
-1. vendor `check_chip_mAddr()` / `g_chipMAddr` для заводского PHY6252 MAC;
-2. сохранённый MAC в SNV `0x82` как fallback;
-3. генерация и сохранение MAC, если первых двух источников нет;
-4. IRK/CSRK в стандартном BLE SNV;
-5. `HCI_EXT_SetBDADDRCmd()` до `GAPRole_StartDevice()`.
-
-Отдельного factory record, `.factory.bin`, `0x1103F000` и обязательного provisioning нет. Если identity не подготовилась, это не блокирует BLE advertising: имя остаётся `Test-DPLS-0000`.
-
-## Сборка и host tests
-
-```sh
-cmake -S firmware -B firmware/build
-cmake --build firmware/build
-ctest --test-dir firmware/build --output-on-failure
-bash tools/lint_firmware.sh
-bash tools/coverage_firmware.sh
-```
-
-Soft-BLE продуктовый сценарий:
-
-```sh
-bash tools/soft_ble_e2e.sh
-```
-
-## PHY6252 target builds
+## Build / flash
 
 ```sh
 tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
-```
 
-Сборка создаёт только один application HEX.
-
-## Прошивка
-
-```sh
 tools/flash_firmware.sh tmp/test-dpls.hex
 ```
 
-Это одна programmer operation `wh`. Никакой raw-записи отдельного factory sector нет.
+Сборка создаёт один application HEX, прошивка выполняет один `wh`.
 
-Полный erase при необходимости:
+Для полностью автоматического стенда с заведёнными control lines:
 
 ```sh
-tools/flash_firmware.sh tmp/test-dpls.hex --erase
+bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
 ```
 
-После erase SNV identity/bonds/settings создаются обычными runtime путями.
+## Проверки
 
-## Firmverse в CI
-
-Для release PR GitHub Actions собирает настоящий GCC Intel HEX и передаёт его в Firmverse:
-
-```yaml
-- uses: Pom4H/firmverse@v1
-  with:
-    firmware: tmp/test-dpls-firmverse.hex
-    board: pb03f-kit
-    strict: 'true'
+```sh
+bash tools/run_host_invariant_gate.sh
+bash tools/coverage_firmware.sh
+bash tools/lint_firmware.sh
+bash tools/soft_ble_e2e.sh
 ```
 
-`firmware/sim` остаётся быстрым продуктовым simulator и не считается PHY6252 hardware acceptance gate.
+Release CI отдельно собирает GCC и Keil/AC6 targets. Firmverse исполняет production HEX и обязан увидеть реальное включение BLE advertising, а не только факт старта CPU.
 
 ## BLE/GATT
 
@@ -134,22 +88,11 @@ tools/flash_firmware.sh tmp/test-dpls.hex --erase
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-CCCD доступен до SMP. Защищённая protocol boundary — RX с `GATT_PERMIT_ENCRYPT_WRITE`.
+CCCD доступен до SMP; encrypted RX — security boundary protocol layer.
 
-## Flash / SNV
+## Persistent data
 
-Рабочий 1.4.0 linker window намеренно не сужается:
-
-```text
-XIP linker window: 0x11020000 .. 0x1103FFFF  (0x20000)
-SNV filesystem:    0x1103C000 .. 0x1103EFFF  (3 × 4 KiB)
-```
-
-Это не означает, что application разрешено реально записывать SNV-диапазон: production HEX должен заканчиваться до `0x1103C000`. Проверять нужно фактический image, а не менять boot-visible linker geometry.
-
-### SNV allocation продукта
-
-| Record/range | Данные |
+| SNV | Данные |
 |---|---|
 | `0x20..0x5F` | BLE bonds/keys vendor stack |
 | `0x82` | fallback BLE MAC |
