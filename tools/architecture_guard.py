@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Проверки архитектурных, ownership- и safety-инвариантов репозитория.
 
-Проверяем только правила, которые можно надёжно выразить по исходному коду.
-Поведенческие детали по-прежнему должны подтверждаться обычными тестами.
+Здесь остаются только правила, которые надёжно проверяются по исходному коду.
+Поведение подтверждается обычными unit/integration тестами.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ CONNECTION_ACTOR = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/c
 CONNECTION_MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
 SESSION = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt"
 SEQUENCER = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt"
+CONTROL_MESSAGES = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsControlMessages.kt"
+MESSAGES = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsMessages.kt"
 ANDROID_BLE = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
 ANDROID_SECURITY = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidGattSecurityPolicy.kt"
 IOS_BLE = ROOT / "mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt"
@@ -59,7 +61,7 @@ def forbid_regex(path: Path, pattern: str, message: str) -> None:
         fail(path, message)
 
 
-# Lifecycle продукта и идентичность транзакций.
+# Lifecycle продукта: одно значение DeviceSession и один путь его мутации.
 require_text(SESSION, "sealed interface DeviceSession", "DeviceSession must define lifecycle state")
 require_text(SESSION, "data class SessionChallenge", "challenge material must live in DeviceSession")
 require_text(SESSION, "data class AuthSession", "authenticated wire material must live in DeviceSession")
@@ -96,18 +98,25 @@ for ui_truth in ("state.phase", "state.authenticated", "state.credentialsReady")
     forbid_text(CLIENT, ui_truth, f"controller must not branch on UI projection {ui_truth}")
 for field in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt", "authenticated"):
     forbid_regex(CLIENT, rf"^\s*private\s+(?:var|val)\s+{field}\b", f"independent lifecycle field forbidden: {field}")
+
+# Protocol v2: Frame.sequence — единственный transaction id. Старые layouts не поддерживаются.
 require_text(SEQUENCER, "class FrameSequencer", "wire helper must be sequence-only")
 for secret in ("sessionId", "sessionToken", "clientNonce", "deviceNonce", "authSalt"):
     forbid_text(SEQUENCER, secret, f"FrameSequencer must not own {secret}")
-legacy_command_id_paths = {"DplsControlMessages.kt", "DplsControlMessagesTest.kt"}
 for path in (ROOT / "mobile").rglob("*.kt"):
-    if path.name not in legacy_command_id_paths:
-        forbid_regex(path, r"\bcommandId\b", "second transaction id commandId is forbidden")
+    forbid_regex(path, r"\bcommandId\b", "legacy commandId is forbidden")
+forbid_text(CONTROL_MESSAGES, "@Deprecated", "protocol compatibility annotations are forbidden")
+forbid_regex(CONTROL_MESSAGES, r"raw\.size\s*==\s*8|raw\.size\s*==\s*5", "v1 response layouts are forbidden")
+require_text(CONTROL_MESSAGES, "if (raw.size != 4) return null", "COMMAND_RESULT must be v2-only")
+require_text(CONTROL_MESSAGES, "if (raw.size != 1) return null", "SETTINGS_RESULT must be v2-only")
+require_text(CONTROL_MESSAGES, "if (raw.size != 11) return null", "AUTH_RESULT must have one exact layout")
+require_text(MESSAGES, "if (raw.size != 25) return null", "STATE_REPORT must have one exact layout")
+forbid_text(MESSAGES, "legacyLine", "legacy STATE_REPORT fallback is forbidden")
 require_regex(CLIENT, r"generation\s*==\s*linkGeneration\s*&&\s*operation\?\.sequence\s*==\s*sequence", "operation timeout must check link epoch and request sequence")
 for generation in ("linkGeneration", "scanGeneration", "logTimeoutGeneration"):
     require_text(CLIENT, generation, f"missing stale-work generation: {generation}")
 
-# Runtime и wire не зависят от UI и платформенных BLE API.
+# Runtime и wire не зависят от UI и platform API.
 for path in (ROOT / "mobile/runtime/src/commonMain").rglob("*.kt"):
     for forbidden in ("android.", "androidx.compose", "platform.CoreBluetooth", ".core.domain.", ".core.app."):
         if forbidden in source(path):
@@ -117,13 +126,13 @@ for path in (ROOT / "mobile/wire/src/commonMain").rglob("*.kt"):
         if forbidden in source(path):
             fail(path, f"wire dependency leak: {forbidden}")
 
-# Общий BLE security contract для Android и iOS.
+# Общий BLE security contract.
 require_regex(GATT, r"dpls_rx_uuid\s*\}\s*,\s*GATT_PERMIT_WRITE\s*\|\s*GATT_PERMIT_ENCRYPT_WRITE", "RX must remain the encrypted security boundary")
 require_regex(GATT, r"clientCharCfgUUID\s*\}\s*,\s*GATT_PERMIT_READ\s*\|\s*GATT_PERMIT_WRITE", "CCCD must remain writable before encryption")
 require_text(GATT, "GATT_Notification", "Samsung notify path must remain available")
 require_text(ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt", "byteArrayOf(0x03, 0x00)", "Android CCCD must remain 0x03 for Samsung")
 
-# Android SMP имеет одного владельца состояния; GATT 5/15 — переход к pairing.
+# Android SMP: один SecurityState, GATT 5/15 запускает pairing.
 require_text(ANDROID_BLE, "private sealed interface SecurityState", "Android SMP needs one state owner")
 require_text(ANDROID_BLE, "data class Pairing(", "Android SMP must represent Pairing explicitly")
 require_text(ANDROID_BLE, "data class Resuming(", "blocked RX frame needs explicit resume state")
@@ -139,7 +148,7 @@ require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_AUTHENTICATION = 5", "GATT 5 m
 require_text(ANDROID_SECURITY, "GATT_INSUFFICIENT_ENCRYPTION = 15", "GATT 15 must be pairing-required")
 require_regex(ANDROID_SECURITY, r"requiresPairing\s*\(status\)\s*->\s*WriteDisposition\.PAIRING_REQUIRED", "security errors must not fall through to retry")
 
-# iOS pairing опирается на события и epoch, а не на фиксированное число попыток.
+# iOS SMP: поздняя работа защищена security epoch, фиксированного retry-count нет.
 require_text(IOS_BLE, "private sealed interface SecurityState", "iOS SMP needs one state owner")
 require_regex(IOS_BLE, r"SecurityState\.Pairing\s*\(\s*blocked\.copyOf\(\)\s*\)", "iOS must preserve exact blocked RX frame")
 require_text(IOS_BLE, "private var securityEpoch = 0L", "delayed iOS security work needs epoch identity")
@@ -148,7 +157,7 @@ forbid_text(IOS_BLE, "PAIRING_WRITE_RETRIES", "iOS pairing may not fail after a 
 forbid_text(IOS_BLE, "pairingRetryCount", "iOS pairing may not use retry count as security truth")
 forbid_text(IOS_BLE, "looksLikeStaleBondError(error.localizedDescription)", "localized text may not decide bond validity")
 
-# Ошибка SMP закрывает link, но не стирает все сохранённые bonds.
+# Ошибка SMP закрывает link, но не стирает все bonds.
 require_regex(PHY_TARGET, r"uint8\s+bond_fail\s*=\s*GAPBOND_FAIL_TERMINATE_LINK\s*;", "pairing failure must not erase bonds")
 forbid_text(PHY_TARGET, "GAPBOND_FAIL_TERMINATE_ERASE_BONDS", "generic SMP failure must not erase bonds")
 forbid_regex(PHY_TARGET, r"bond_pair_state_cb\s*\([^}]+GAPBondMgr_SetParameter", "pair callback must not mutate bond persistence")
@@ -199,14 +208,13 @@ require_text(PHY_APP, "static struct tc_hmac_state_struct hmac;", "HMAC must sta
 require_regex(PHY_APP_H, r"bool\s+dpls_phy6252_tx_idle\s*\(\s*void\s*\)\s*;", "target needs an explicit TX-drained predicate before flash disconnect")
 require_regex(PHY_TARGET, r"dpls_phy6252_flash_disconnect_requested\s*\(\s*\)\s*&&\s*dpls_phy6252_tx_idle\s*\(\s*\)", "flash disconnect must wait for TX drain")
 
-# Симулятор сохраняет порядок turns, на котором уже ловились реальные регрессии.
+# Симулятор сохраняет порядок OSAL turns, на котором ловились реальные регрессии.
 require_text(ROOT / "firmware/sim/dpls_sim_transport.c", "pace_ms = dpls_sim_transport_cccd_notify(transport)", "simulator must preserve ATT pacing")
 require_regex(ROOT / "firmware/sim/dpls_sim_board.c", r"phy6252_emu_tick\s*\([^;]+;\s*dpls_sim_board_process_tx\s*\(", "simulator timer/TX turns must remain separate")
 if (ROOT / "firmware/phy6252_emu").exists():
     fail(ROOT / "firmware/phy6252_emu", "standalone PHY6252 emulator is forbidden; production HEX belongs to Firmverse")
 
-# Ответ на неверный пароль должен попасть в TX раньше записи audit event.
-# RX turn может лишь проверить, пора ли безопасно закрыть link ради flash.
+# Ответ auth должен попасть в TX раньше audit write; RX не прокачивает TX самостоятельно.
 require_regex(SERVER, r"send_auth_result\s*\(\s*s\s*,\s*f->sequence\s*,\s*DPLS_AUTH_DENIED\s*,\s*0\s*\)\s*;\s*\(void\)\s*dpls_server_log\s*\(\s*s\s*,\s*EVT_AUTH_FAILURE", "AUTH_RESULT must be queued before AUTH_FAILURE journal append")
 require_regex(PHY_TARGET, r"dpls_phy6252_process_rx\s*\(\s*\)\s*;\s*disconnect_for_flash_if_ready\s*\(\s*\)\s*;\s*schedule_led_if_needed\s*\(\s*\)\s*;\s*return\s+events\s*\^\s*DPLS_PHY6252_RX_EVT", "RX turn may only check connection quiescence after domain RX")
 forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]*dpls_phy6252_process_tx\s*\(", "RX turn must not pump TX")
@@ -214,7 +222,7 @@ forbid_regex(PHY_TARGET, r"if\s*\(events\s*&\s*DPLS_PHY6252_RX_EVT\s*\)\s*\{[^}]
 forbid_text(PHY_TARGET, "~DPLS_PHY6252_TX_EVT", "RX handler may not clear TX event")
 require_regex(PHY_TARGET, r"uint8\s+update_enabled\s*=\s*FALSE", "slave conn-param update must stay disabled")
 
-# Прямое присваивание StateFlow обязано повторно наложить lifecycle projection.
+# UI StateFlow не может обойти lifecycle projection.
 for number, line in enumerate(source(CLIENT).splitlines(), start=1):
     stripped = line.strip()
     if "mutableState.value =" not in stripped:
@@ -231,11 +239,10 @@ if violations:
 
 print("Architecture guard: OK")
 print("  mobile lifecycle: BLE driver -> ConnectionActor -> ConnectionMachine -> DeviceSession")
-print("  lifecycle mutations: semantic ConnectionEvent only")
-print("  transaction identity: Frame.sequence + generation")
+print("  protocol: v2 only, Frame.sequence is the only transaction id")
 print("  GATT security boundary: plaintext CCCD -> encrypted RX")
 print("  Android/iOS SMP: explicit state + event/epoch transitions")
 print("  PHY app: one OSAL event dispatcher")
-print("  safety: dpls_safety reducer owns dangerous mode")
+print("  safety: dpls_safety owns dangerous mode")
 print("  storage: real queues -> one flash facade, no actor state")
 print("  TX indication deadline != TX confirmation")
