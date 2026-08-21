@@ -1,38 +1,44 @@
 #!/usr/bin/env python3
-"""PHY6252 flash wrappers stay simple and non-interactive."""
+"""PHY6252 flasher остаётся одним, простым и неинтерактивным."""
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-HUMAN = ROOT / "tools/flash_firmware.sh"
-AGENT = ROOT / "tools/flash_firmware_agent.sh"
+FLASH = ROOT / "tools/flash_firmware.sh"
+OLD_AGENT = ROOT / "tools/flash_firmware_agent.sh"
 PROGRAMMER = ROOT / "third_party/phy62x2/Utils/rdwr_phy62x2.py"
 
 
 def main() -> int:
-    human = HUMAN.read_text(encoding="utf-8")
-    agent = AGENT.read_text(encoding="utf-8")
+    flash = FLASH.read_text(encoding="utf-8")
     programmer = PROGRAMMER.read_text(encoding="utf-8")
 
-    for source in (human, agent):
-        assert 'ARGS=(-p "$PORT" -r wh "$HEX")' in source
-        assert "factory.bin" not in source.lower()
-        assert "0x3F000" not in source
-        assert " -r we " not in source
-        assert "read -r" not in source
+    subprocess.run(["bash", "-n", str(FLASH)], check=True)
 
-    assert "DPLS_NO_FLASH_PROMPT" not in human
-    assert "UXTDWU" in human
-    assert "UXTDWU" in agent
-    assert "9600" in agent
+    assert not OLD_AGENT.exists()
+    assert "--auto-rst" in flash
+    assert 'HEX="$ROOT/tmp/test-dpls.hex"' in flash
+    assert 'ARGS=(-p "$PORT" -r)' in flash
+    assert 'ARGS+=(wh "$HEX")' in flash
+    assert "read -r" not in flash
+    assert "ls /dev/" not in flash
+    assert "factory.bin" not in flash.lower()
+    assert "0x3F000" not in flash
+    assert "pyserial==3.5" in flash
 
-    # The actual ROM-entry sequence belongs to the vendored PHY62x2 programmer.
+    # Manual mode запускает тот же vendor programmer, но глушит только RTS/DTR.
+    assert "connect_without_control_lines" in flash
+    assert "self._port.setRTS = lambda _value: None" in flash
+    assert "self._port.setDTR = lambda _value: None" in flash
+
+    # Auto-RST остаётся штатной последовательностью PHY62x2 programmer.
     assert "START_BAUD = 9600" in programmer
     assert "self._port.setRTS(True)" in programmer
     assert "self._port.setDTR(True)" in programmer
     assert "pkt = 'UXTDWU'" in programmer
     assert "read == b'cmd>>:'" in programmer
 
-    print("PHY6252 flash wrappers: PASS")
+    print("PHY6252 flasher: PASS")
     return 0
 
 
