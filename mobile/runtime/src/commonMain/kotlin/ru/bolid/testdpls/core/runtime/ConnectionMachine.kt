@@ -1,11 +1,6 @@
 package ru.bolid.testdpls.core.runtime
 
-/**
- * Факты, которые принимает чистый reducer жизненного цикла соединения.
- *
- * Platform callbacks и milestones протокола приходят только как события. Caller
- * не передаёт желаемое следующее состояние и поэтому не может обойти граф переходов.
- */
+/** Факты, которые могут изменить lifecycle соединения. */
 sealed interface ConnectionEvent {
     data class ConnectRequested(
         val endpoint: LinkEndpoint,
@@ -14,30 +9,24 @@ sealed interface ConnectionEvent {
 
     data object LinkConnected : ConnectionEvent
 
-    data class Subscribed(
-        val clientNonce: ByteArray,
-        val sendHello: Boolean = true,
-    ) : ConnectionEvent {
+    data class Subscribed(val clientNonce: ByteArray) : ConnectionEvent {
         init { require(clientNonce.size == 16) }
     }
 
     data class ChallengeReceived(val challenge: SessionChallenge) : ConnectionEvent
     data class Authenticated(val auth: AuthSession) : ConnectionEvent
     data class IdentityVerified(val nodeId: NodeId) : ConnectionEvent
-    data object SetupCommitted : ConnectionEvent
     data object LinkLost : ConnectionEvent
     data object BluetoothUnavailable : ConnectionEvent
-    data object BluetoothAvailable : ConnectionEvent
-    data object AttemptTimedOut : ConnectionEvent
     data class Failed(val failure: LinkFailure) : ConnectionEvent
     data object Reset : ConnectionEvent
 }
 
 /**
- * Полный reducer без I/O и скрытых side effects.
+ * Чистый граф переходов без I/O и таймеров.
  *
- * BLE и protocol work остаются в DplsClient/transport. Здесь находится только
- * допустимый граф состояний, поэтому lifecycle можно тестировать отдельно.
+ * DplsClient сообщает только случившийся факт. Следующее состояние выбирается
+ * здесь, поэтому product-код не может перескочить через auth или проверку identity.
  */
 object ConnectionMachine {
     fun reduce(state: DeviceSession, event: ConnectionEvent): DeviceSession = when (event) {
@@ -62,19 +51,29 @@ object ConnectionMachine {
         }
 
         is ConnectionEvent.ChallengeReceived -> when (state) {
-            is DeviceSession.Linked,
-            is DeviceSession.Commissioning,
-            is DeviceSession.Authenticating,
-            -> challengeTransition(state, event.challenge)
+            is DeviceSession.Linked -> DeviceSession.Securing(
+                state.endpoint,
+                event.challenge,
+                state.candidateNodeId,
+            )
+            is DeviceSession.Securing -> DeviceSession.Securing(
+                state.endpoint,
+                event.challenge,
+                state.candidateNodeId,
+            )
             else -> state
         }
 
         is ConnectionEvent.Authenticated -> when (state) {
-            is DeviceSession.Authenticating -> DeviceSession.Synchronizing(
-                endpoint = state.endpoint,
-                auth = event.auth,
-                candidateNodeId = state.candidateNodeId,
-            )
+            is DeviceSession.Securing -> if (state.challenge.initialized) {
+                DeviceSession.Synchronizing(
+                    endpoint = state.endpoint,
+                    auth = event.auth,
+                    candidateNodeId = state.candidateNodeId,
+                )
+            } else {
+                state
+            }
             else -> state
         }
 
@@ -84,7 +83,7 @@ object ConnectionMachine {
                 if (candidate != null && candidate != event.nodeId) {
                     DeviceSession.Failed(
                         state.endpoint,
-                        LinkFailure.Protocol("device identity changed during connection"),
+                        LinkFailure.Protocol("Идентификатор устройства изменился во время подключения"),
                     )
                 } else {
                     DeviceSession.Online(event.nodeId, state.endpoint, state.auth)
@@ -95,47 +94,27 @@ object ConnectionMachine {
             } else {
                 DeviceSession.Failed(
                     state.endpoint,
-                    LinkFailure.Protocol("device identity changed in active session"),
+                    LinkFailure.Protocol("Устройство сменило идентификатор в активной сессии"),
                 )
             }
             else -> state
         }
 
-        ConnectionEvent.SetupCommitted -> when (state) {
-            is DeviceSession.Commissioning,
-            is DeviceSession.Authenticating,
-            -> state.endpointOrNull?.let { endpoint ->
-                DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
-            } ?: state
-            else -> state
-        }
-
-        ConnectionEvent.LinkLost -> if (shouldRecoverAfterLinkLoss(state)) {
-            recover(state)
-        } else {
-            DeviceSession.Offline
-        }
-
-        ConnectionEvent.BluetoothUnavailable -> if (shouldRecoverAfterRadioLoss(state)) {
-            recover(state)
-        } else {
-            state
-        }
-
-        /* Сам факт появления Bluetooth не создаёт новый product state.
-         * Transport использует его только как разрешение повторить известный route. */
-        ConnectionEvent.BluetoothAvailable -> state
-
-        ConnectionEvent.AttemptTimedOut -> when (state) {
-            is DeviceSession.Connecting,
-            is DeviceSession.Discovering,
-            is DeviceSession.Linked,
-            is DeviceSession.Commissioning,
-            is DeviceSession.Authenticating,
+        ConnectionEvent.LinkLost -> when (state) {
+            is DeviceSession.Securing,
             is DeviceSession.Synchronizing,
+            is DeviceSession.Online,
             is DeviceSession.Recovering,
-            -> DeviceSession.Failed(state.endpointOrNull, LinkFailure.Unavailable)
-            else -> state
+            -> recover(state)
+            is DeviceSession.Failed -> state
+            else -> DeviceSession.Offline
+        }
+
+        ConnectionEvent.BluetoothUnavailable -> when (state) {
+            DeviceSession.Offline,
+            is DeviceSession.Failed,
+            -> state
+            else -> recover(state)
         }
 
         is ConnectionEvent.Failed -> DeviceSession.Failed(state.endpointOrNull, event.failure)
@@ -143,46 +122,8 @@ object ConnectionMachine {
         ConnectionEvent.Reset -> DeviceSession.Offline
     }
 
-    private fun challengeTransition(
-        state: DeviceSession,
-        challenge: SessionChallenge,
-    ): DeviceSession {
-        val endpoint = state.endpointOrNull ?: return state
-        val candidate = state.candidateNodeIdOrNull
-        return if (challenge.initialized) {
-            DeviceSession.Authenticating(endpoint, challenge, candidate)
-        } else {
-            DeviceSession.Commissioning(endpoint, challenge, candidate)
-        }
-    }
-
     private fun recover(state: DeviceSession): DeviceSession {
         val endpoint = state.endpointOrNull ?: return DeviceSession.Offline
         return DeviceSession.Recovering(state.nodeIdOrNull, endpoint)
-    }
-
-    private fun shouldRecoverAfterLinkLoss(state: DeviceSession): Boolean = when (state) {
-        is DeviceSession.Commissioning,
-        is DeviceSession.Authenticating,
-        is DeviceSession.Synchronizing,
-        is DeviceSession.Online,
-        is DeviceSession.Recovering,
-        -> true
-        else -> false
-    }
-
-    private fun shouldRecoverAfterRadioLoss(state: DeviceSession): Boolean = when (state) {
-        is DeviceSession.Connecting,
-        is DeviceSession.Discovering,
-        is DeviceSession.Linked,
-        is DeviceSession.Commissioning,
-        is DeviceSession.Authenticating,
-        is DeviceSession.Synchronizing,
-        is DeviceSession.Online,
-        is DeviceSession.Recovering,
-        -> true
-        DeviceSession.Offline,
-        is DeviceSession.Failed,
-        -> false
     }
 }
