@@ -74,17 +74,13 @@ static void disconnect_for_flash_if_ready(void)
     }
 }
 
-static bool enable_advertising_if_ready(void)
+static void enable_advertising(void)
 {
     uint8 enabled = TRUE;
-    /* Flash work may temporarily own the radio, identity may not. A failed
-     * identity preparation must never make a live board permanently invisible. */
-    if (dpls_phy6252_flash_work_pending()) return false;
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     set_advertising_enabled(enabled);
-    return true;
 }
 
 static void schedule_storage_if_needed(void)
@@ -105,12 +101,8 @@ static void state_changed(gaprole_States_t state)
     switch (state) {
     case GAPROLE_STARTED:
         dpls_ble_identity_on_stack_started();
-        if (dpls_phy6252_flash_work_pending()) {
-            set_advertising_enabled(FALSE);
-            schedule_storage_if_needed();
-        } else {
-            (void)enable_advertising_if_ready();
-        }
+        /* Boot должен стать видимым раньше любых deferred flash writes. */
+        enable_advertising();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
@@ -129,7 +121,7 @@ static void state_changed(gaprole_States_t state)
             set_advertising_enabled(FALSE);
             schedule_storage_if_needed();
         } else {
-            (void)enable_advertising_if_ready();
+            enable_advertising();
         }
         break;
     default:
@@ -232,7 +224,9 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
     if (events & SBP_START_DEVICE_EVT) {
         GAPRole_StartDevice(&role_callbacks);
         GAPBondMgr_Register(&bond_callbacks);
-        return events ^ SBP_START_DEVICE_EVT;
+        /* dpls_phy6252_init() может поставить boot journal STORAGE_EVT. Не даём
+         * ему писать flash в окно запуска GAP; idle tick поставит его заново. */
+        return (events ^ SBP_START_DEVICE_EVT) & (uint16)~DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_process_rx();
@@ -246,7 +240,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         if (!dpls_phy6252_flash_process_one()) {
             osal_start_timerEx(app_task_id, DPLS_PHY6252_STORAGE_EVT, DPLS_STORAGE_RETRY_MS);
         } else {
-            (void)enable_advertising_if_ready();
+            enable_advertising();
         }
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
@@ -254,6 +248,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         dpls_phy6252_tick();
         disconnect_for_flash_if_ready();
         schedule_led_if_needed();
+        if (!dpls_phy6252_link_active()) schedule_storage_if_needed();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
                            dpls_phy6252_link_active() ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
         return events ^ SBP_DPLS_TICK_EVT;
