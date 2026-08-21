@@ -4,8 +4,9 @@
 AC6 bootstrap has one owner: GitHub Actions. build_firmware.sh only consumes an
 already activated toolchain; it must not grow a second installer/license path.
 """
-from pathlib import Path
+import json
 import subprocess
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -13,7 +14,7 @@ dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
 build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
 flash = (ROOT / "tools/flash_firmware.sh").read_text(encoding="utf-8")
-vcpkg = (ROOT / "firmware/targets/phy6252/vcpkg-configuration.json").read_text(encoding="utf-8")
+vcpkg = json.loads((ROOT / "firmware/targets/phy6252/vcpkg-configuration.json").read_text(encoding="utf-8"))
 solution = (ROOT / "firmware/targets/phy6252/test-dpls.csolution.yml").read_text(encoding="utf-8")
 
 for script in (ROOT / "tools/build_firmware.sh", ROOT / "tools/flash_firmware.sh"):
@@ -76,13 +77,22 @@ for forbidden in (
     if forbidden in build:
         raise SystemExit(f"second AC6 bootstrap path leaked into build_firmware.sh: {forbidden}")
 
-for token in ('"6.24.0"', '"2.14.1"'):
-    if token not in vcpkg:
-        raise SystemExit(f"pinned toolchain contract missing: {token}")
+# Toolchain versions are exact facts, not semver ranges. A future registry update
+# must not silently change the compiler or CMSIS Toolbox used for release binaries.
+requires = vcpkg.get("requires", {})
+expected = {
+    "arm:tools/kitware/cmake": "3.31.12",
+    "arm:tools/ninja-build/ninja": "1.13.2",
+    "arm:compilers/arm/armclang": "6.24.0",
+    "arm:tools/open-cmsis-pack/cmsis-toolbox": "2.14.1",
+}
+for package, version in expected.items():
+    actual = requires.get(package)
+    if actual != version:
+        raise SystemExit(f"toolchain pin mismatch for {package}: expected {version}, got {actual!r}")
 
-for token in ("CMSIS-Toolbox@2.14.1", "AC6@6.24.0"):
-    if token not in solution:
-        raise SystemExit(f"solution toolchain contract missing: {token}")
+if "created-for: CMSIS-Toolbox@2.14.1" not in solution or "compiler: AC6" not in solution:
+    raise SystemExit("solution toolchain contract must be CMSIS-Toolbox 2.14.1 + AC6")
 
 if "/Users/" in build or "/Users/" in flash:
     raise SystemExit("local developer path leaked into firmware scripts")
@@ -92,4 +102,4 @@ if "--auto-rst" not in flash:
     raise SystemExit("single flasher lost --auto-rst")
 
 print("CI/DX contract: PASS")
-print("  one AC6 6.24 + Community license bootstrap: GitHub Actions")
+print("  one exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")

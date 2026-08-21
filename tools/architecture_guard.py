@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """RC8 architecture invariants.
 
-This guard intentionally checks a small number of hard ownership rules. If a rule
-needs a paragraph of regex to explain, the architecture is already too clever.
+The guard protects ownership, bounded queues and code size. If an invariant needs
+complex pattern matching to explain, the production architecture is already too clever.
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ if make_core != EXPECTED_CORE:
 if ac6_core != EXPECTED_CORE:
     fail(CPROJECT, f"core source set mismatch: {sorted(ac6_core ^ EXPECTED_CORE)}")
 
-# 2. Keep the first-party firmware small enough to reason about in one pass.
+# 2. Keep first-party firmware small enough to read in one pass.
 phy_lines = 0
 for path in sorted(PHY.glob("*.c")):
     lines = len(text(path).splitlines())
@@ -121,17 +121,24 @@ production_lines = sum(len(text(path).splitlines()) for path in production_paths
 if production_lines > 5000:
     fail("firmware", f"first-party production C is {production_lines} lines; budget is 5000")
 
-# 3. Flash ownership: one writer, never while BLE link is active.
+# 3. BLE queues are bounded backpressure, not hidden work storage.
+need(TRANSPORT, "#define DPLS_RX_QUEUE_DEPTH 2u", "RX queue must stay at two slots")
+need(TRANSPORT, "#define DPLS_TX_QUEUE_DEPTH 2u", "TX queue must stay at two slots")
+
+# 4. Flash ownership: one writer, never while BLE link is active.
 for path in list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")):
     if "osal_snv_write" in text(path) and path != STORAGE:
         fail(path, "physical SNV write outside storage owner")
 need(STORAGE, "if (link_active) return 0xffu;", "physical write must refuse active link")
-need(STORAGE, "static uint8_t journal_records[DPLS_EVENT_CAPACITY]", "journal must be RAM-resident")
+need(STORAGE, "static uint32_t journal_timestamp[DPLS_EVENT_CAPACITY]", "compact RAM journal missing")
+need(STORAGE, "static uint8_t journal_type[DPLS_EVENT_CAPACITY]", "journal type facts missing")
+need(STORAGE, "static uint8_t journal_parameter[DPLS_EVENT_CAPACITY]", "journal parameter facts missing")
+forbid(STORAGE, "journal_records[DPLS_EVENT_CAPACITY]", "flash record representation leaked into RAM")
 need(STORAGE, "journal_dirty_mask", "journal write-behind dirty set missing")
 need(STORAGE, "return link_active && (settings_dirty || auth_lock_dirty);",
      "only critical settings/auth may request controlled disconnect")
 
-# 4. Bond ownership: no heuristic may erase a valid pairing.
+# 5. Bond ownership: no heuristic may erase a valid pairing.
 for path in PHY.glob("*.c"):
     src = text(path)
     for token in (
@@ -151,7 +158,7 @@ need(RUNTIME, "dpls_phy6252_transport_factory_forget_bonds()", "factory reset mu
 forbid(TRANSPORT_KT, 'text.contains("encryption timed out")',
        "generic timeout must never be classified as stale bond")
 
-# 5. Boot/identity: no RNG/SNV/HCI before controller start; identity never gates advertising.
+# 6. Boot/identity: no RNG/SNV/HCI before controller start; identity never gates advertising.
 prepare = section(IDENTITY, "void dpls_ble_identity_prepare", "void dpls_ble_identity_on_stack_started")
 for token in ("LL_ENC_", "osal_snv_", "HCI_"):
     if token in prepare:
@@ -168,16 +175,16 @@ for token in ("STORAGE", "flash", "snv"):
     if token.lower() in start_evt.lower():
         fail(TARGET, f"boot start event leaked persistence concern: {token}")
 
-# 6. TX and settings transaction boundary: ACK leaves before flash can start.
+# 7. TX and settings transaction boundary: ACK leaves before flash can start.
 need(GATT, "GATT_PERMIT_ENCRYPT_WRITE", "RX characteristic must require encryption")
 need(GATT, "GATT_Notification", "notify compatibility path missing")
 need(TARGET, "ATT_HANDLE_VALUE_CFM", "real indication confirmation missing")
 need(RUNTIME, "dpls_phy6252_storage_disconnect_requested() &&", "critical persistence boundary missing")
 need(RUNTIME, "dpls_phy6252_transport_tx_idle()", "critical persistence must wait for TX drain")
-for token in ("osal_snv_write", "GAPBOND_ERASE_ALLBONDS"):
+for token in ("osal_snv_write", "GAPBOND_ERASE_ALLBONDS", "GAPRole_TerminateConnection"):
     forbid(SERVER, token, f"domain server may not own physical side effect {token}")
 
-# 7. Safety stays pure and mobile lifecycle stays single-owner.
+# 8. Safety stays pure and mobile lifecycle stays single-owner.
 need(SAFETY, "dpls_safety_required_return", "safety reducer missing")
 for token in ("GAPRole_", "osal_", "GATT_"):
     forbid(SAFETY, token, f"safety depends on runtime API: {token}")
@@ -197,4 +204,4 @@ if errors:
 print("Architecture guard: PASS")
 print(f"  first-party firmware: {production_lines} lines; PHY adapter: {phy_lines} lines")
 print("  one runtime, one flash writer, one explicit bond erase path")
-print("  no flash writes on active BLE; settings ACK drains before persistence")
+print("  bounded 2-slot RX/TX backpressure; no flash writes on active BLE")

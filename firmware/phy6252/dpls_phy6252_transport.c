@@ -11,9 +11,12 @@
 #include "peripheral.h"
 #include <string.h>
 
-#define DPLS_RX_QUEUE_DEPTH 6u
+/* Protocol v2 is request/response. Two slots are intentional: one transaction
+ * may wait for ATT confirmation while exactly one next frame is buffered.
+ * Larger queues only hide backpressure and create stale work after link loss. */
+#define DPLS_RX_QUEUE_DEPTH 2u
 #define DPLS_RX_SLOT_SIZE 96u
-#define DPLS_TX_QUEUE_DEPTH 4u
+#define DPLS_TX_QUEUE_DEPTH 2u
 #define DPLS_TX_SLOT_SIZE 168u
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
 #define DPLS_TX_NOTIFY_PACE_MS 80u
