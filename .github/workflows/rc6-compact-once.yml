@@ -37,3 +37,4 @@ jobs:
             .github/workflows/rc6-compact-once.yml
           git commit -m "rc6: compact connection and flash ownership [rc6-compact]"
           git push origin HEAD:release/1.4.2-rc6
+# trigger after workflow exists on branch
