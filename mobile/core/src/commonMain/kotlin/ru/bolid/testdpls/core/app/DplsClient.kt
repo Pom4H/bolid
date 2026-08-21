@@ -36,13 +36,13 @@ import ru.bolid.testdpls.core.protocol.putU16
 import ru.bolid.testdpls.core.protocol.putU32
 import ru.bolid.testdpls.core.runtime.AuthSession
 import ru.bolid.testdpls.core.runtime.ConnectionEvent
+import ru.bolid.testdpls.core.runtime.ConnectionMachine
 import ru.bolid.testdpls.core.runtime.DeviceSession
 import ru.bolid.testdpls.core.runtime.LinkEndpoint
 import ru.bolid.testdpls.core.runtime.LinkFailure
 import ru.bolid.testdpls.core.runtime.NodeId
 import ru.bolid.testdpls.core.runtime.SessionChallenge
 import ru.bolid.testdpls.core.runtime.authOrNull
-import ru.bolid.testdpls.core.runtime.candidateNodeIdOrNull
 import ru.bolid.testdpls.core.runtime.challengeOrNull
 import ru.bolid.testdpls.core.runtime.credentialsReady
 import ru.bolid.testdpls.core.runtime.endpointOrNull
@@ -50,11 +50,10 @@ import ru.bolid.testdpls.core.runtime.isAuthenticated
 import ru.bolid.testdpls.core.runtime.nodeIdOrNull
 
 /**
- * Product orchestration for one Test-DPLS device.
+ * Product orchestration одного Test-DPLS.
  *
- * Platform callbacks are translated to [ConnectionEvent] facts before lifecycle
- * state changes. [ConnectionActor] is the only mutable lifecycle owner; UI state
- * is a projection and protocol helpers never own connection/auth state.
+ * session — единственное mutable lifecycle-состояние. Все его изменения проходят
+ * через dispatchConnection() и чистый ConnectionMachine. UI остаётся проекцией.
  */
 class DplsClient(
     private val transport: DplsTransport,
@@ -92,9 +91,7 @@ class DplsClient(
     private val journal = JournalMachine()
     private var pendingVerifier: ByteArray? = null
 
-    private val connection = ConnectionActor()
-    private val session: DeviceSession
-        get() = connection.state
+    private var session: DeviceSession = DeviceSession.Offline
     private var identify = Identify()
     private var operation: Operation? = null
     private var timeSyncAttempted = false
@@ -102,7 +99,7 @@ class DplsClient(
     private var drainLog = false
     private var timeAnchors: List<JournalTimeAnchor> = emptyList()
 
-    /** Invalidates delayed work belonging to an older physical link attempt. */
+    /** Делает безвредной отложенную работу от предыдущей попытки соединения. */
     private var linkGeneration = 0L
     private var scanGeneration = 0L
     private var logTimeoutGeneration = 0L
@@ -602,7 +599,7 @@ class DplsClient(
 
     override fun onBluetoothAvailable() {
         if (session is DeviceSession.Recovering && !transport.hasConnection()) {
-            if (scheduleReconnect(ConnectionEvent.BluetoothAvailable)) return
+            if (scheduleReconnect()) return
         }
         if ((state.scanning || state.browsingDevices) && transport.startScan()) {
             armScanDeadline(session.isAuthenticated)
@@ -684,8 +681,7 @@ class DplsClient(
         }
         when (session) {
             is DeviceSession.Linked,
-            is DeviceSession.Commissioning,
-            is DeviceSession.Authenticating,
+            is DeviceSession.Securing,
             is DeviceSession.Synchronizing,
             is DeviceSession.Online,
             -> return
@@ -693,7 +689,7 @@ class DplsClient(
         }
         if (session !is DeviceSession.Discovering) return fail("BLE подписка получена вне discovery")
         val clientNonce = platform.secureRandomBytes(DplsAuth.NONCE_SIZE)
-        dispatchConnection(ConnectionEvent.Subscribed(clientNonce, sendHello = false))
+        dispatchConnection(ConnectionEvent.Subscribed(clientNonce))
         armConnectTimeout()
         scheduleRssiPoll()
         if (identify.afterConnect) {
@@ -718,7 +714,8 @@ class DplsClient(
 
     override fun onWriteComplete(errorCode: Long?) {
         if (errorCode == null) return
-        if (!scheduleReconnect(ConnectionEvent.LinkLost)) {
+        dispatchConnection(ConnectionEvent.LinkLost)
+        if (!scheduleReconnect()) {
             fail("Ошибка передачи BLE: $errorCode")
         }
     }
@@ -748,7 +745,8 @@ class DplsClient(
             fail(error ?: "Связь с платой оборвалась до идентификации")
             return
         }
-        if (scheduleReconnect(ConnectionEvent.LinkLost)) return
+        dispatchConnection(ConnectionEvent.LinkLost)
+        if (scheduleReconnect()) return
 
         cancelLinkJobs()
         clearOperation()
@@ -830,8 +828,7 @@ class DplsClient(
         val current = session
         val clientNonce = when (current) {
             is DeviceSession.Linked -> current.clientNonce
-            is DeviceSession.Authenticating -> current.challenge.clientNonce
-            is DeviceSession.Commissioning -> current.challenge.clientNonce
+            is DeviceSession.Securing -> current.challenge.clientNonce
             else -> return fail("AUTH_CHALLENGE получен вне ожидаемого состояния")
         }
         val challenge = SessionChallenge(
@@ -872,7 +869,7 @@ class DplsClient(
         if (result.status == 3) {
             commitPendingVerifier()
             persistCachedVerifier()
-            dispatchConnection(ConnectionEvent.SetupCommitted)
+            dispatchConnection(ConnectionEvent.LinkLost)
             if (session !is DeviceSession.Recovering) {
                 return fail("Некорректный переход после первичной настройки")
             }
@@ -973,26 +970,15 @@ class DplsClient(
             ?.let(::NodeId)
             ?: return fail("Устройство прислало некорректный ID")
 
-        when (val current = session) {
-            is DeviceSession.Synchronizing -> {
-                val candidate = current.candidateNodeId
-                if (candidate != null && candidate != nodeId) {
-                    fail("Идентификатор устройства изменился во время подключения")
-                    return
-                }
-                dispatchConnection(ConnectionEvent.IdentityVerified(nodeId))
-            }
-            is DeviceSession.Online -> {
-                if (current.nodeId != nodeId) {
-                    fail("Устройство сменило идентификатор в активной сессии")
-                    return
-                }
-                dispatchConnection(ConnectionEvent.IdentityVerified(nodeId))
-            }
-            else -> {
-                fail("DEVICE_INFO получен вне активной сессии")
-                return
-            }
+        if (session !is DeviceSession.Synchronizing && session !is DeviceSession.Online) {
+            return fail("DEVICE_INFO получен вне активной сессии")
+        }
+        dispatchConnection(ConnectionEvent.IdentityVerified(nodeId))
+        if (session is DeviceSession.Failed) {
+            val message = ((session as DeviceSession.Failed).failure as? LinkFailure.Protocol)?.detail
+                ?: "Не удалось подтвердить идентификатор устройства"
+            fail(message)
+            return
         }
 
         updateState {
@@ -1354,20 +1340,13 @@ class DplsClient(
         }
     }
 
-    /**
-     * Translate a physical-link fact to the reducer first. Only a reducer result
-     * of Recovering is allowed to schedule another transport attempt.
-     */
-    private fun scheduleReconnect(event: ConnectionEvent): Boolean {
-        val current = session
-        val endpoint = current.endpointOrNull
-        val reconnectImmediately = current is DeviceSession.Recovering &&
-            current.nodeId == null &&
+    /** Повторное соединение разрешено только из состояния Recovering. */
+    private fun scheduleReconnect(): Boolean {
+        val current = session as? DeviceSession.Recovering ?: return false
+        val endpoint = current.endpoint
+        val reconnectImmediately = current.nodeId == null &&
             credentials.available &&
             state.state == null
-
-        dispatchConnection(event)
-        if (session !is DeviceSession.Recovering || endpoint == null) return false
         if (reconnectJob?.isActive == true) return true
 
         cancelLinkJobs()
@@ -1501,9 +1480,8 @@ class DplsClient(
         cancelLogTimeout()
         clearOperation()
         journal.fail()
-        /* Reset before calling the platform: Android/soft-BLE may deliver the
-         * disconnect callback synchronously, and it must never schedule recovery
-         * for an operator-requested disconnect. */
+        /* Сначала сбрасываем lifecycle: Android/soft-BLE может синхронно прислать
+         * callback disconnect, и он не должен запустить reconnect после команды оператора. */
         dispatchConnection(ConnectionEvent.Reset)
         transport.disconnect(clearSelection)
         platform.keepConnectionAlive(false)
@@ -1593,7 +1571,9 @@ class DplsClient(
         logLoadPending = false
         drainLog = false
         platform.keepConnectionAlive(false)
-        dispatchConnection(ConnectionEvent.Failed(LinkFailure.Platform(message)))
+        if (session !is DeviceSession.Failed) {
+            dispatchConnection(ConnectionEvent.Failed(LinkFailure.Platform(message)))
+        }
         clearPendingVerifier()
         updateState {
             it.copy(
@@ -1611,14 +1591,13 @@ class DplsClient(
     }
 
     private fun dispatchConnection(event: ConnectionEvent) {
-        connection.dispatch(event)
+        session = ConnectionMachine.reduce(session, event)
         mutableState.value = projectSession(mutableState.value)
     }
 
     private fun projectSession(ui: DplsUiState): DplsUiState {
-        val initialized = when (session) {
-            is DeviceSession.Commissioning -> false
-            is DeviceSession.Authenticating,
+        val initialized = when (val current = session) {
+            is DeviceSession.Securing -> current.challenge.initialized
             is DeviceSession.Synchronizing,
             is DeviceSession.Online,
             -> true
@@ -1637,8 +1616,7 @@ class DplsClient(
         is DeviceSession.Connecting -> ConnectionPhase.CONNECTING
         is DeviceSession.Discovering -> ConnectionPhase.DISCOVERING
         is DeviceSession.Linked,
-        is DeviceSession.Commissioning,
-        is DeviceSession.Authenticating,
+        is DeviceSession.Securing,
         -> ConnectionPhase.AUTHENTICATING
         is DeviceSession.Synchronizing -> ConnectionPhase.SYNCHRONIZING
         is DeviceSession.Online -> ConnectionPhase.READY
