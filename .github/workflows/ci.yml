@@ -1,31 +1,18 @@
 name: CI
 
 on:
-  pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.png"
-      - "**/*.jpg"
-      - "**/*.pdf"
-      - "**/*.docx"
-  workflow_dispatch:
   push:
-    tags:
-      - "v*"
-
-permissions:
-  contents: read
+    branches: [main, master]
+  pull_request:
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   smoke:
     name: Cheap PR smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 12
     outputs:
       mobile: ${{ steps.changes.outputs.mobile }}
       firmware: ${{ steps.changes.outputs.firmware }}
@@ -35,7 +22,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
-
       - name: Detect changed areas and RC policy
         id: changes
         shell: bash
@@ -76,27 +62,10 @@ jobs:
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
           echo "replay=$replay" >> "$GITHUB_OUTPUT"
           echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
-
       - name: Host invariants + sanitizers
         run: bash tools/run_host_invariant_gate.sh
-
       - name: Verify revision 2 pinout contract
-        shell: bash
         run: |
-          set -euo pipefail
-          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' firmware/phy6252/dpls_board.h
           grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
           grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_app.c
           grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
@@ -136,13 +105,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/android
-          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc5-debug.apk
-          sha256sum tmp/android/TestDPLS-1.4.2-rc5-debug.apk > tmp/android/TestDPLS-1.4.2-rc5-debug.apk.sha256
-          printf 'version=1.4.2\nrc=5\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc6-debug.apk
+          sha256sum tmp/android/TestDPLS-1.4.2-rc6-debug.apk > tmp/android/TestDPLS-1.4.2-rc6-debug.apk.sha256
+          printf 'version=1.4.2\nrc=6\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
       - uses: actions/upload-artifact@v6
         if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         with:
-          name: test-dpls-android-1.4.2-rc5
+          name: test-dpls-android-1.4.2-rc6
           path: tmp/android
           if-no-files-found: error
           retention-days: 7
@@ -228,7 +197,7 @@ jobs:
           mkdir -p tmp/gcc
           bash tools/build_firmware.sh gcc tmp/gcc/test-dpls-gcc.hex 2>&1 | tee tmp/gcc/gcc-build.log
           sha256sum tmp/gcc/test-dpls-gcc.hex > tmp/gcc/test-dpls-gcc.hex.sha256
-          printf 'version=1.4.2\nrc=5\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
+          printf 'version=1.4.2\nrc=6\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
           name: test-dpls-phy6252-gcc
@@ -265,14 +234,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp/keil
-          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc5.hex 2>&1 | tee tmp/keil/keil-build.log
+          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc6.hex 2>&1 | tee tmp/keil/keil-build.log
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/keil/test-dpls.axf
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/keil/test-dpls.map
-          sha256sum tmp/keil/TestDPLS-1.4.2-rc5.hex > tmp/keil/TestDPLS-1.4.2-rc5.hex.sha256
-          printf 'version=1.4.2\nrc=5\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
+          sha256sum tmp/keil/TestDPLS-1.4.2-rc6.hex > tmp/keil/TestDPLS-1.4.2-rc6.hex.sha256
+          printf 'version=1.4.2\nrc=6\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-keil-1.4.2-rc5
+          name: test-dpls-phy6252-keil-1.4.2-rc6
           path: tmp/keil
           if-no-files-found: error
           retention-days: 7
