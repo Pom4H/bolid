@@ -14,6 +14,7 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 2. **Kotlin `commonMain` владеет общим поведением Android/iOS.** Здесь находятся `DplsClient`, protocol/crypto/domain/session и Compose UI.
 3. **Platform-код только адаптирует OS API.** Android/iOS не содержат вторых controllers, protocol codecs или независимых UI.
 4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный PHY6252/ZMU emulator.
+5. **Boot не зависит от provisioning sidecar.** Плата должна запустить GAP и advertising из одного application HEX.
 
 Подробнее: [docs/architecture.md](docs/architecture.md).
 
@@ -27,34 +28,26 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 | `mobile/android/` | Android shell и debug E2E |
 | `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
 | `mobile/web/` | тот же Compose UI поверх `LabBleTransport` |
-| `docs/` | архитектура, production identity, bring-up и технические reference |
+| `docs/` | архитектура, bring-up и технические reference |
 | `tools/` | build/flash/check/lab/session utilities |
 
 Production PHY62XX SDK не vendored: точная версия **3.1.2** закреплена в `firmware/sdk/phy6252-sdk.env`.
 
-## Серийная identity
+## BLE identity
 
-Новая схема не поддерживает legacy identity прототипов.
+Boot path возвращён к аппаратно проверенной модели release 1.4.0:
 
-Каждая плата до запуска BLE должна иметь валидный factory record:
+1. firmware спрашивает заводской MAC PHY6252 через vendor `check_chip_mAddr()`;
+2. если заводского MAC нет, используется сохранённый SNV MAC;
+3. если и его нет, один раз генерируется MAC и сохраняется в SNV;
+4. IRK/CSRK аналогично живут в BLE SNV;
+5. public BD_ADDR задаётся через `HCI_EXT_SetBDADDRCmd()` **до** `GAPRole_StartDevice()`.
 
-- `serial_number` — полный 32-битный `device_id`;
-- IRK/CSRK;
-- источник BLE address: заводской public MAC PHY6252 либо provisioned static-random address;
-- hardware revision;
-- CRC.
+Отдельного factory record в `0x1103F000` больше нет. Он не нужен для запуска BLE и не участвует в build/flash path.
 
-Factory record хранится отдельно в `0x1103F000..0x1103FFFF`. Без него firmware **не начинает advertising**.
+Имя в эфире — `Test-DPLS-XXXX`, где `XXXX` берётся из identity MAC. Это discovery hint, не authoritative `NodeId`. Полный device identity подтверждается через `DEVICE_INFO_REPORT` после аутентификации.
 
-В эфире остаются только:
-
-- BLE flags;
-- фирменный 128-bit Service UUID;
-- имя `Test-DPLS-XXXX`, где `XXXX` — младшие 16 бит serial.
-
-Полный serial, firmware version, hardware revision, capabilities и пользовательское имя приходят только через `DEVICE_INFO_REPORT`. Суффикс `XXXX` не считается полным `NodeId`.
-
-Подробно: [docs/factory-identity.md](docs/factory-identity.md).
+Если identity по какой-либо причине не подготовилась, это **не блокирует advertising**: плата остаётся видимой как `Test-DPLS-0000` вместо того, чтобы молча исчезнуть из эфира.
 
 ## Mobile architecture
 
@@ -150,28 +143,47 @@ tools/build_firmware.sh keil tmp/test-dpls.hex
 tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
 ```
 
-## Provisioning и прошивка платы
+## Прошивка платы
 
-Для новой платы сначала создаётся индивидуальный factory record:
-
-```sh
-python3 tools/make_factory_identity.py \
-  --serial 12874 \
-  --hw-revision 2 \
-  --binary-output tmp/factory-00012874.bin \
-  --metadata tmp/factory-00012874.json
-```
-
-Затем:
+Один application HEX, одна programmer operation:
 
 ```sh
 tools/flash_firmware.sh tmp/test-dpls.hex
-tools/flash_factory_identity.sh tmp/factory-00012874.bin
 ```
 
-Factory record пишется raw-командой в offset `0x3F000`. Не использовать application `wh` для отдельного factory HEX.
+Скрипт использует штатный PHY62x2 `wh`. Никакой `.factory.bin`, `--serial` или raw-записи `0x3F000` больше нет.
 
-Полный chip erase стирает и factory identity, поэтому `tools/flash_firmware.sh --erase` требует явного `DPLS_ALLOW_FACTORY_ERASE=1` и после такого erase плата должна пройти provisioning заново.
+Полный chip erase доступен явно:
+
+```sh
+tools/flash_firmware.sh tmp/test-dpls.hex --erase
+```
+
+Он стирает SNV/bonds, поэтому после erase BLE identity и ключи будут созданы заново обычным boot path.
+
+## Boot order PHY6252
+
+Boot-critical порядок намеренно простой:
+
+```text
+power/reset
+  ↓
+RAM retention + FS mount
+  ↓
+BLE identity prepare
+  ↓
+DPLS init
+  ↓
+GAPRole_StartDevice
+  ↓
+GAPROLE_STARTED
+  ↓
+advertising ON
+  ↓
+только потом idle/deferred flash work
+```
+
+Boot journal не имеет права задерживать GAP/advertising. Если после старта накопилась deferred flash work, она обслуживается отдельным idle OSAL turn без active BLE link.
 
 ## BLE/GATT
 
@@ -181,7 +193,7 @@ Factory record пишется raw-командой в offset `0x3F000`. Не и�
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-CCCD требует encrypted write. Manufacturer Specific Data в текущем контракте нет.
+CCCD доступен до SMP, а защищённая protocol boundary — encrypted RX characteristic.
 
 ## Hardware revision 2
 
