@@ -1,147 +1,121 @@
-# Runtime-архитектура RC7
+# Runtime-архитектура RC8
 
-RC7 хранит состояние там, где существует реальный факт. Не создаём второй state ради абстракции.
+RC8 специально уменьшает количество мест, где может находиться истина. Production-код должен читаться сверху вниз за один проход.
 
-## Общая схема
+## Карта кода
 
 ```text
-Телефон
-  ↓ BLE callbacks
-Android / iOS transport
-  ↓ ConnectionEvent
-DplsClient.dispatchConnection()
+mobile/runtime
+  DeviceSession.kt          — тип состояния соединения
+  ConnectionMachine.kt      — единственный reducer lifecycle
+
+mobile/core/app
+  DplsClient.kt             — orchestration продукта
+  DplsTransport.kt          — platform boundary
+  AndroidBleTransport.kt    — Android Core BLE
+  IosBleTransport.kt        — iOS CoreBluetooth
+
+firmware/src
+  dpls_protocol.c            — wire format / CRC
+  dpls_server.c              — domain session/auth/commands/journal API
+  dpls_safety.c              — pure safety policy
+  dpls_led.c                 — pure LED scenes
+  dpls_calib.c               — calibration math
+  dpls_durable_settings.c    — byte-defined dual-slot settings record
+
+firmware/phy6252
+  dpls_ble_identity.c        — chip public MAC + optional DID1 serial
+  dpls_gatt_service.c        — RX/TX characteristics + CCCD
+  dpls_phy6252_auth.c        — TRNG/HMAC
+  dpls_phy6252_transport.c   — BLE link + RX/TX queues
+  dpls_phy6252_storage.c     — единственный app-owned SNV writer
+  dpls_phy6252_measurements.c— ADC / power facts
+  dpls_phy6252_outputs.c     — GPIO / LED / safe output state
+  dpls_phy6252_supervisor.c  — watchdog boundary
+  dpls_phy6252_runtime.c     — OSAL orchestration, без business logic
+
+firmware/targets/phy6252/source/dplsBLEPeripheral.c
+  — тонкий vendor GAP/OSAL shell
+```
+
+Старого `dpls_phy6252_app.c` нет. Второго storage facade нет. Второго BLE lifecycle нет.
+
+## Главный поток
+
+```text
+GATT write callback
+  ↓ copy to RX queue
+DPLS_PHY6252_RX_EVT
   ↓
-ConnectionMachine.reduce(oldState, event)
+dpls_phy6252_runtime_process_rx
   ↓
-DeviceSession
-  ↓ projection
-DplsUiState
-
-================ BLE ================
-
-PHY6252 OSAL event loop
-  ├─ RX → dpls_server
-  ├─ TX → GATT
-  ├─ ADC
-  ├─ LED
-  └─ STORAGE → RAM queues → SNV/flash только без active link
+dpls_server_receive
+  ↓
+RAM state / response enqueue
+  ↓
+DPLS_PHY6252_TX_EVT
+  ↓
+notify/indication
+  ↓
+TX drain
+  ↓ (только если settings/auth dirty)
+controlled disconnect
+  ↓
+DPLS_PHY6252_STORAGE_EVT
+  ↓
+одна SNV write за OSAL turn
+  ↓
+advertising
 ```
 
-## Mobile: один lifecycle
+## Flash invariant
 
-`DplsClient.session: DeviceSession` — единственное mutable lifecycle-значение. Записывать его можно только так:
+`osal_snv_write()` разрешён только в `dpls_phy6252_storage.c`.
 
-```kotlin
-session = ConnectionMachine.reduce(session, event)
-```
-
-Нормальный путь:
+Во время active BLE link он физически отвергается. Поэтому rename/setup/password работают так:
 
 ```text
-Offline
-  ↓ ConnectRequested
-Connecting
-  ↓ LinkConnected
-Discovering
-  ↓ Subscribed
-Linked
-  ↓ ChallengeReceived
-Securing
-  ↓ Authenticated
-Synchronizing
-  ↓ IdentityVerified
-Online
+command → RAM stage → SETTINGS/AUTH response → TX drain → disconnect → commit → advertise
 ```
 
-`Securing.challenge.initialized` уже говорит, нужна первичная настройка или обычная аутентификация. Поэтому отдельные `Commissioning` и `Authenticating` удалены.
+Journal проще: все 200 записей (2400 bytes) находятся в RAM во время работы. Append/read никогда не обращаются к flash. Dirty 120-byte blocks сохраняются после естественного disconnect. Journal сам рабочую сессию не рвёт.
 
-`Online` всегда содержит подтверждённый `NodeId`. Успешная аутентификация сама по себе ещё не переводит устройство в `Online`.
+## Bond invariant
 
-UI-поля `phase`, `authenticated`, `initialized` и `credentialsReady` — только проекция `DeviceSession`.
+Никаких выводов о bond по RSSI, timeout, количеству reconnect или отсутствию DPLS-auth.
 
-Поздняя работа защищена identity своей попытки:
+`GAPBOND_ERASE_ALLBONDS` существует в first-party firmware ровно один раз: `dpls_phy6252_transport_factory_forget_bonds()`. Единственный caller — завершённый физический factory reset после удержания кнопки 5 секунд, teardown link и commit settings.
 
-- protocol response — `Frame.sequence`;
-- operation timeout — `sequence + linkGeneration`;
-- reconnect / RSSI / telemetry — `linkGeneration`;
-- scan deadline — `scanGeneration`;
-- journal timeout — `logTimeoutGeneration`.
+## Identity invariant
 
-## Protocol
+До `GAPROLE_STARTED` identity path делает только read-only операции: chip MAC и optional DID1 serial. Нет TRNG, SNV write или HCI.
 
-Protocol v2 имеет один transaction id — `Frame.sequence`. Старые `commandId` и v1 layouts удалены.
+После `GAPROLE_STARTED` public controller address синхронизируется с chip MAC. Ошибка identity никогда не блокирует advertising.
 
-## Firmware safety
+DID1 больше не владеет BLE bond identity: его serial используется как product `device_id`, а pairing привязан к стабильному silicon public MAC.
 
-`dpls_safety` единолично владеет опасным режимом, deadline и forced return.
+## Safety
 
-Возврат в `NORMAL` обязателен при:
+`dpls_safety.c` не знает про OSAL/GATT/GPIO и единолично решает, когда опасный режим обязан вернуться в NORMAL.
 
-- disconnect;
-- отсутствии authenticated activity;
-- timeout режима;
-- low reserve;
-- real short;
-- ошибке применения силового режима.
+`dpls_phy6252_outputs.c` единолично применяет физические выходы и всегда использует break-before-make.
 
-Переключение выходов остаётся break-before-make.
+## Build invariant
 
-## Firmware storage: без второго state machine
+GNU Arm GCC и Arm Compiler 6.24 содержат один и тот же first-party source set. `architecture_guard.py` сравнивает оба списка и падает при расхождении.
 
-Истина берётся из реальных очередей:
+Scatter не перечисляет каждый DPLS object вручную: `dpls*.o(+RO)` убирает третий независимый source list.
 
-```text
-staged SNV?        → dpls_phy6252_snv_pending()
-journal writeback? → dpls_phy6252_storage_pending()
-BLE link?          → dpls_phy6252_link_active()
-```
+## Budget
 
-`dpls_phy6252_storage.c` только объединяет эти факты:
+Architecture guard ограничивает:
 
-```text
-flash_work_pending = SNV pending || journal pending
-```
+- каждый PHY adapter `.c` — максимум 600 строк;
+- весь PHY adapter — максимум 2000 строк;
+- весь first-party production C firmware — максимум 5000 строк.
 
-Порядок записи:
+Это не метрика красоты. Это запрет снова превратить адаптер платы в файл, который невозможно удержать в голове.
 
-```text
-active BLE link
-    ↓
-TX idle
-    ↓
-disconnect
-    ↓
-advertising off
-    ↓
-одна flash operation за OSAL turn
-    ↓
-ещё есть работа? → следующий STORAGE event
-нет работы?      → advertising on
-```
+## Правило для нового кода
 
-SNV во время active link держит одну staged-транзакцию в RAM. Повторная запись того же record обновляет её; другой record до flush отклоняется.
-
-## PHY6252 workaround'ы, которые не являются legacy
-
-Не удалять подтверждённые ограничения платформы:
-
-- RX, TX, ADC и flash выполняются отдельными OSAL turns;
-- HMAC state не кладётся на 1 KiB OSAL stack;
-- ADC channels запускаются последовательно;
-- одновременно in-flight только один ATT PDU;
-- indication завершается только после ATT confirmation;
-- Samsung notify path сохраняется;
-- blocking SNV временно расширяет watchdog и возвращает `WDG_2S`;
-- slave connection parameter update выключен;
-- CCCD доступен до encryption, защищённой границей остаётся RX characteristic.
-
-## Правило дальнейшего рефакторинга
-
-Новая сущность допустима только если она:
-
-1. удаляет mutable state;
-2. делает недопустимое состояние непредставимым;
-3. изолирует реальную platform boundary; или
-4. позволяет тестировать важную policy как pure function.
-
-Если сущность просто копирует `pending`, `connected`, `phase` или другой существующий факт — её не добавляем.
+Новая сущность допустима только если она владеет реальным ресурсом/state либо удаляет недопустимое состояние. Нельзя добавлять второй `connected`, второй `pending`, второй lifecycle, второй source list или эвристику, которая меняет durable state по косвенному сигналу.
