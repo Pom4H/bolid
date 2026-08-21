@@ -1,0 +1,1 @@
+This branch intentionally replaces only the production BLE identity implementation with the hardware-proven 1.4.0 implementation for a one-variable PB-03F boot/advertising bisect. Do not merge.
