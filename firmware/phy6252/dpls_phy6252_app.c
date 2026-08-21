@@ -27,11 +27,7 @@
 #include <stddef.h>
 #include <string.h>
 
-/* 0x80/0x81 are the legacy single-copy format. They remain read-only migration
- * inputs. V2 writes alternate 0x85/0x86 records with generation + CRC. */
-#define DPLS_LEGACY_SETTINGS_MAGIC 0x534C5044u
-#define DPLS_LEGACY_SETTINGS_SNV_ID 0x80u
-#define DPLS_LEGACY_SETTINGS_STATE_SNV_ID 0x81u
+/* Настройки хранятся только в двух durable-слотах с generation + CRC. */
 #define DPLS_SETTINGS_SLOT_A_SNV_ID 0x85u
 #define DPLS_SETTINGS_SLOT_B_SNV_ID 0x86u
 #define DPLS_CALIB_MAGIC 0x434C5044u
@@ -46,7 +42,6 @@
 #define DPLS_PENDING_EVENT_CAPACITY 24u
 #define DPLS_NAME_SIZE 32u
 #define DPLS_HW_REVISION 2u
-#define DPLS_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_FACTORY_RESET_PIN DPLS_PIN_FACTORY_RESET
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
 #define DPLS_LED_TICK_MIN_MS 10u
@@ -68,14 +63,6 @@
 #define DPLS_AUTOISO_TRIP_MV 3000u
 #define DPLS_AUTOISO_CLEAR_MV 4500u
 #define DPLS_LINK_ENCRYPT_TIMEOUT_MS 60000u
-
-typedef struct {
-    uint32_t magic;
-    char name[DPLS_NAME_SIZE];
-    uint8_t salt[DPLS_AUTH_SALT_SIZE];
-    uint8_t verifier[DPLS_AUTH_PROOF_SIZE];
-    uint16_t crc;
-} dpls_legacy_settings_t;
 
 typedef struct {
     char name[DPLS_NAME_SIZE];
@@ -212,40 +199,13 @@ static bool load_durable_settings(void)
     return true;
 }
 
-static void classify_legacy_settings(void)
-{
-    dpls_legacy_settings_t legacy;
-    uint16_t expected_crc;
-    uint8 marker = 0u;
-    memset(&legacy, 0, sizeof(legacy));
-    if (osal_snv_read(DPLS_LEGACY_SETTINGS_SNV_ID, sizeof(legacy), &legacy) != SUCCESS) {
-        settings_state = DPLS_SETTINGS_EMPTY;
-        return;
-    }
-    expected_crc = dpls_crc16((const uint8_t *)&legacy, offsetof(dpls_legacy_settings_t, crc));
-    if (legacy.magic == DPLS_LEGACY_SETTINGS_MAGIC && legacy.crc == expected_crc) {
-        memset(&settings, 0, sizeof(settings));
-        memcpy(settings.name, legacy.name, sizeof(settings.name));
-        memcpy(settings.salt, legacy.salt, sizeof(settings.salt));
-        memcpy(settings.verifier, legacy.verifier, sizeof(settings.verifier));
-        settings_state = DPLS_SETTINGS_VALID;
-        return;
-    }
-    if (osal_snv_read(DPLS_LEGACY_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) == SUCCESS &&
-        marker == DPLS_SETTINGS_EMPTY_MARKER) {
-        settings_state = DPLS_SETTINGS_EMPTY;
-        return;
-    }
-    settings_state = DPLS_SETTINGS_CORRUPT;
-    memset(&settings, 0, sizeof(settings));
-}
-
 static void classify_settings(void)
 {
     settings_active_slot = 0xffu;
     settings_generation = 0u;
+    settings_state = DPLS_SETTINGS_EMPTY;
     memset(&settings, 0, sizeof(settings));
-    if (!load_durable_settings()) classify_legacy_settings();
+    (void)load_durable_settings();
 }
 
 static bool durable_record_matches(const dpls_durable_settings_t *left,
@@ -352,7 +312,7 @@ static bool settings_set_password(void *context, const uint8_t salt[16], const u
     return persist_settings_candidate(&candidate, DPLS_DURABLE_SETTINGS_VALID);
 }
 
-/* ---------------- journal ---------------- */
+/* ---------------- журнал ---------------- */
 
 static uint32_t journal_rd32(const uint8_t *p)
 {
@@ -534,7 +494,7 @@ void dpls_phy6252_process_storage(void)
 static bool link_encrypted(void *context)
 { (void)context; return dpls_phy6252_link_active() && linkDB_Encrypted(connection_handle); }
 
-/* ---------------- outputs + measurements ---------------- */
+/* ---------------- выходы и измерения ---------------- */
 
 static void mode_outputs_off(void)
 {
@@ -731,7 +691,7 @@ static uint8_t measurement_validity(void *context)
 
 static void identify_led(void *c, bool enabled) { (void)c; identify_led_active = enabled; }
 
-/* ---------------- auth + TX ---------------- */
+/* ---------------- auth и TX ---------------- */
 
 static bool random_bytes(void *context, uint8_t *out, size_t length)
 {
@@ -862,9 +822,8 @@ static uint8 receive_frame(const uint8 *data, uint16 length)
 
 static void clear_settings_and_bonds(void)
 {
-    /* An EMPTY generation is a durable tombstone. If power disappears after
-     * this write but before bond erase/reset, the next boot still selects EMPTY
-     * and completes the bond cleanup. */
+    /* EMPTY generation — durable tombstone. Если питание пропадёт после этой
+     * записи, следующий boot всё равно выберет EMPTY и завершит очистку bonds. */
     if (!persist_settings_candidate(NULL, DPLS_DURABLE_SETTINGS_EMPTY)) {
         LOG("DPLS factory reset settings commit failed\n");
         return;
@@ -1008,7 +967,7 @@ void dpls_phy6252_tick(void)
 {
     uint32_t now = now_ms();
     tick_link_security(now); tick_factory_reset(now); tick_measurements(); dpls_server_tick(&server, now); tick_tx(now);
-    /* Journal flash is never serviced from a connected tick. */
+    /* Journal flash не обслуживается из connected tick. */
 }
 
 uint32 dpls_phy6252_led_tick(void)
