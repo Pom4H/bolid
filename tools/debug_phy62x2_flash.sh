@@ -15,7 +15,7 @@ if [[ -z "$PORT" ]]; then
       break
     fi
   done
-done
+fi
 
 if [[ -z "$PORT" ]]; then
   echo "error: UART port not found"
@@ -31,14 +31,11 @@ echo "PHY62x2 debug flash"
 echo "port: $PORT"
 echo "hex:  $HEX"
 echo
-
 echo "ROM handshake debug:"
 echo "  baud: 9600"
 echo "  magic: UXTDWU"
 echo
 
-# В rdwr_phy62x2.py первый positional argument после options — это операция.
-# Раньше HEX ошибочно передавался как operation.
 PYTHONUNBUFFERED=1 python3 "$ROOT_DIR/third_party/phy62x2/Utils/rdwr_phy62x2.py" \
   -p "$PORT" \
   --debug \
