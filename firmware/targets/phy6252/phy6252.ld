@@ -6,7 +6,8 @@ MEMORY
     GC   (rwx) : ORIGIN = 0x1fff0400, LENGTH = 0x400
     MAIN (rwx) : ORIGIN = 0x1fff1838, LENGTH = 0x77c8
     RAM2 (rwx) : ORIGIN = 0x1fffc000, LENGTH = 0x4000
-    XIP  (rx)  : ORIGIN = 0x11020000, LENGTH = 0x20000
+    /* 0x1103C000..0x1103FFFF is persistent flash and is not application XIP. */
+    XIP  (rx)  : ORIGIN = 0x11020000, LENGTH = 0x1c000
 }
 
 SECTIONS
