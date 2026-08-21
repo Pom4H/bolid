@@ -15,8 +15,10 @@ on:
 
 jobs:
   fresh-clone-macos:
-    name: Fresh clone → AC6 build (macOS)
-    runs-on: macos-latest
+    name: Fresh clone → AC6 build (macOS 15 ARM64)
+    # AC6 6.24 macOS artifact is x86_64. macOS 15 ARM64 + Rosetta is the
+    # stable Apple-Silicon environment we support and exercise from a clean clone.
+    runs-on: macos-15
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
