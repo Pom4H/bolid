@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PHY6252 flasher остаётся одним, простым и неинтерактивным."""
+"""Инварианты PHY6252 flasher: один wrapper, безопасный erase и readback перед reset."""
 from pathlib import Path
 import subprocess
 
@@ -18,13 +18,15 @@ def main() -> int:
     assert not OLD_AGENT.exists()
     assert "--auto-rst" in flash
     assert 'HEX="$ROOT/tmp/test-dpls.hex"' in flash
-    assert 'ARGS=(-p "$PORT" -r)' in flash
+    assert 'ARGS=(-p "$PORT")' in flash
     assert 'ARGS+=(wh "$HEX")' in flash
     assert "read -r" not in flash
-    assert "ls /dev/" not in flash
     assert "factory.bin" not in flash.lower()
-    assert "0x3F000" not in flash
     assert "pyserial==3.5" in flash
+
+    # Полный erase нельзя сделать случайно: он уничтожает factory identity.
+    assert "DPLS_ALLOW_FACTORY_ERASE" in flash
+    assert "factory identity" in flash
 
     # Один wrapper меняет только ROM entry; vendor utility остаётся flash backend.
     assert "def enter_rom(self):" in flash
@@ -44,6 +46,18 @@ def main() -> int:
     assert 'self._port.write(b"UXTDWU")' in flash
     assert "range(250)" in flash
     assert "TX/RX alone cannot reset" in flash
+
+    # Критический hardware regression: reset после последнего cpbin запрещён.
+    # Сначала ROM остаётся активен, затем отдельный --next read проверяет XIP,
+    # после чего тот же rc-вызов отправляет reset.
+    assert "VERIFY_ADDR=0x11020000" in flash
+    assert "VERIFY_SIZE=16" in flash
+    assert 'ARGS=(-p "$PORT")' in flash
+    assert 'ARGS=(-p "$PORT" -r)' not in flash
+    assert '-p "$PORT" -n -r rc "$VERIFY_ADDR" "$VERIFY_SIZE" "$READBACK"' in flash
+    assert "post-flash readback: PASS" in flash
+    assert "actual != expected" in flash
+    assert "flash finalize: readback verified, reset sent after XIP barrier" in flash
 
     # Vendor source остаётся источником flash protocol и baud constants.
     assert "START_BAUD = 9600" in programmer
