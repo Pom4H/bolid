@@ -1,0 +1,33 @@
+name: RC6 actorize once
+
+on:
+  push:
+    branches:
+      - release/1.4.2-rc6
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: ${{ !contains(github.event.head_commit.message, '[rc6-actorized]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: release/1.4.2-rc6
+          fetch-depth: 1
+      - name: Route DplsClient state through ConnectionActor
+        run: python3 tools/rc6_actorize_client.py
+      - name: Commit exact migration
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt; then
+            echo "migration already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          git commit -m "rc6: make ConnectionActor the lifecycle owner [rc6-actorized]"
+          git push origin HEAD:release/1.4.2-rc6
