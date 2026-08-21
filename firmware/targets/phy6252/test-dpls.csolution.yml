@@ -1,6 +1,6 @@
 solution:
-  created-for: CMSIS-Toolbox@2.12.0
-  compiler: AC6
+  created-for: CMSIS-Toolbox@2.14.1
+  compiler: AC6@6.24.0
   target-types:
     - type: Target_1
       device: ARMCM0
