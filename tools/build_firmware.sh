@@ -133,6 +133,22 @@ keil_tools_ready() {
     armclang --version 2>/dev/null | grep -q '6\.24'
 }
 
+ensure_macos_rosetta() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ "$(uname -m)" = "arm64" ] || return 0
+
+    # AC6 6.24 для macOS поставляется Arm как Intel/x86_64 binary.
+    if /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "==> Installing Rosetta 2 for Arm Compiler 6"
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license || {
+        echo "error: Rosetta 2 is required to run Arm Compiler 6.24.0 on Apple Silicon" >&2
+        exit 1
+    }
+}
+
 bootstrap_vcpkg() {
     local dir="$ROOT/.toolchains/vcpkg-$VCPKG_VERSION"
     if [ ! -x "$dir/vcpkg" ]; then
@@ -231,6 +247,8 @@ ensure_keil_environment() {
     if ! keil_tools_ready; then
         activate_vcpkg_keil
     fi
+
+    ensure_macos_rosetta
 
     # CMSIS-Toolbox выбирает AC6 по versioned environment variable.
     if [ -z "${AC6_TOOLCHAIN_6_24_0:-}" ]; then
