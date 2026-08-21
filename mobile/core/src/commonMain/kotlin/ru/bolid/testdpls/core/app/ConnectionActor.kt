@@ -1,6 +1,5 @@
 package ru.bolid.testdpls.core.app
 
-import ru.bolid.testdpls.core.runtime.ConnectionEffect
 import ru.bolid.testdpls.core.runtime.ConnectionEvent
 import ru.bolid.testdpls.core.runtime.ConnectionMachine
 import ru.bolid.testdpls.core.runtime.DeviceSession
@@ -17,9 +16,7 @@ internal class ConnectionActor(
     var state: DeviceSession = initial
         private set
 
-    fun dispatch(event: ConnectionEvent): List<ConnectionEffect> {
-        val transition = ConnectionMachine.reduce(state, event)
-        state = transition.state
-        return transition.effects
+    fun dispatch(event: ConnectionEvent) {
+        state = ConnectionMachine.reduce(state, event)
     }
 }
