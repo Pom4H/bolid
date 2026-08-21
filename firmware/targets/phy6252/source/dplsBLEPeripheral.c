@@ -77,8 +77,9 @@ static void disconnect_for_flash_if_ready(void)
 static bool enable_advertising_if_ready(void)
 {
     uint8 enabled = TRUE;
-    /* The storage actor owns the entire radio/flash exclusion window. */
-    if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;
+    /* Diagnostic branch: intentionally bypass identity/storage readiness. The
+     * purpose is to prove whether the current image reaches a live GAP role on
+     * real PHY6252 hardware. Production RC6 keeps the strict gates. */
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
@@ -103,13 +104,9 @@ static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED:
-        dpls_ble_identity_on_stack_started();
-        if (dpls_phy6252_flash_work_pending()) {
-            set_advertising_enabled(FALSE);
-            schedule_storage_if_needed();
-        } else {
-            (void)enable_advertising_if_ready();
-        }
+        /* Diagnostic branch: advertise before touching the RC6 post-start
+         * identity/storage machinery. */
+        (void)enable_advertising_if_ready();
         osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
         schedule_led_if_needed();
         break;
@@ -124,12 +121,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         dpls_phy6252_disconnected();
         schedule_led_if_needed();
-        if (dpls_phy6252_flash_work_pending()) {
-            set_advertising_enabled(FALSE);
-            schedule_storage_if_needed();
-        } else {
-            (void)enable_advertising_if_ready();
-        }
+        (void)enable_advertising_if_ready();
         break;
     default:
         break;
@@ -143,8 +135,6 @@ static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
     (void)conn_handle;
     (void)state;
     (void)status;
-    /* Pairing failure may be user cancellation or timing; it never proves that
-     * every bond is stale. Only the physical factory-reset path erases all. */
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -242,20 +232,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         return events ^ DPLS_PHY6252_RX_EVT;
     }
     if (events & DPLS_PHY6252_STORAGE_EVT) {
-        if (dpls_phy6252_link_active()) return events ^ DPLS_PHY6252_STORAGE_EVT;
-        set_advertising_enabled(FALSE);
-        if (!dpls_phy6252_flash_process_one()) {
-            osal_start_timerEx(app_task_id, DPLS_PHY6252_STORAGE_EVT, DPLS_STORAGE_RETRY_MS);
-        } else {
-            (void)enable_advertising_if_ready();
-        }
+        /* Diagnostic branch: storage must not suppress radio visibility. */
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
     if (events & SBP_DPLS_TICK_EVT) {
-        if (!dpls_phy6252_link_active() && !dpls_ble_identity_is_ready()) {
-            dpls_ble_identity_on_stack_started();
-            (void)enable_advertising_if_ready();
-        }
         dpls_phy6252_tick();
         disconnect_for_flash_if_ready();
         schedule_led_if_needed();
