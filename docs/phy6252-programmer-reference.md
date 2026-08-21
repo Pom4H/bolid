@@ -1,24 +1,10 @@
 # PHY6252 / BUMBee M0: programmer reference
 
-Рабочий low-level reference для Test-DPLS. Здесь зафиксированы только свойства PHY6252, на которые реально опираются target, linker, firmware и hardware bring-up.
+Low-level reference для Test-DPLS. Здесь зафиксированы только текущие свойства PHY6252, на которые опираются target, linker, firmware и hardware bring-up.
 
-## 1. CPU
+## CPU / SDK
 
-Для компилятора PHY6252 в этом проекте является **ARMv6-M / Cortex-M0 software target**.
-
-Основание в закреплённом vendor SDK 3.1.2:
-
-- target `MCU_BUMBEE_M0`;
-- `core_bumbee_m0.h` описывает Cortex-M0 processor/core peripherals;
-- CMSIS wrapper использует `core_cm0.h` и `system_ARMCM0.h`;
-- `__NVIC_PRIO_BITS = 2`;
-- Test-DPLS собирается как M0 и использует ROM symbol map `bb_rom_sym_m0.txt`.
-
-Это подтверждает ISA/CMSIS/ABI-совместимость программного target, но не происхождение RTL.
-
-## 2. Закреплённый SDK
-
-Production target использует **PHY62XX SDK 3.1.2**.
+Production target — ARMv6-M / Cortex-M0 software target из **PHY62XX SDK 3.1.2**.
 
 Source of truth: [`firmware/sdk/phy6252-sdk.env`](../firmware/sdk/phy6252-sdk.env).
 
@@ -28,25 +14,13 @@ commit:     b7202ee56e8d316ea3451dd61266f609e6a676e8
 directory:  firmware/sdk/PHY62XX_SDK_3.1.2
 ```
 
-Обновление SDK — отдельная миграция: могут измениться ROM ABI, BLE/RF libraries, jump table, flash/ADC/power behavior и linker assumptions.
+Target использует SDK ROM symbol map `bb_rom_sym_m0.txt`. Не смешивать ROM map, prebuilt BLE/RF libraries и jump table разных SDK revisions.
 
-## 3. ISA baseline
+## ISA baseline
 
-Codegen: ARMv6-M, Thumb, Cortex-M0.
+Codegen: ARMv6-M, Thumb, Cortex-M0. Baseline включает стандартные integer/load-store/branch/system инструкции M0. Не предполагать hardware divide, DSP, FPU, `BASEPRI` или ARMv7-M exclusive access.
 
-Можно рассчитывать на стандартный M0 subset: integer arithmetic, shifts, multiply, loads/stores, `PUSH/POP`, branches, `BL/BX`, `SVC/BKPT`, `MRS/MSR`, barriers и `WFI/WFE/SEV`.
-
-Не считать baseline возможностями M3/M4+: hardware divide, DSP, FPU, `BASEPRI`, ARMv7-M exclusive-access assumptions.
-
-## 4. Core/IRQ
-
-Programmer model: `R0..R15`, MSP/PSP, xPSR, PRIMASK, CONTROL. SDK использует стандартные NMI, HardFault, SVCall, PendSV, SysTick.
-
-`__NVIC_PRIO_BITS = 2`.
-
-Ключевые external IRQ: BB=4, RTC=6, WDT=10, UART0=11, GPIO=16, SPIF=18, DMAC=19, TIMER1..6=20..25, AES=28, ADCC=29, RNG=31.
-
-## 5. Память и linker
+## Memory map
 
 Visible SRAM:
 
@@ -54,7 +28,7 @@ Visible SRAM:
 0x1FFF0000 .. 0x1FFFFFFF   64 KiB
 ```
 
-Актуальные project regions:
+Текущие project regions:
 
 | Region | Start | Size |
 |---|---:|---:|
@@ -65,20 +39,9 @@ Visible SRAM:
 | XIP linker window | `0x11020000` | `0x20000` |
 | SNV filesystem | `0x1103C000` | `0x3000` |
 
-Почему linker window снова `0x20000`: это геометрия реально работающего release 1.4.0. Сужение до `0x1C000` было частью RC6 boot regression и больше не используется.
+Linker window и реально записываемые bytes — разные ограничения. `tools/build_firmware.sh` валидирует готовый Intel HEX и отклоняет любой data record, пересекающий `0x1103C000..0x1103FFFF`.
 
-При этом **фактический application HEX не имеет права занимать SNV**. `tools/build_firmware.sh` разбирает готовый Intel HEX и падает, если data record пересекает `0x1103C000..0x1103FFFF`.
-
-То есть разделены два понятия:
-
-- linker geometry, от которой зависит boot/image layout;
-- реальные записываемые bytes, которые обязаны заканчиваться до SNV.
-
-Отдельного project factory sector в конце flash нет.
-
-## 6. Peripheral bases
-
-Выбранные bases из vendor headers:
+## Peripheral bases
 
 | Peripheral | Base |
 |---|---:|
@@ -94,16 +57,14 @@ Visible SRAM:
 | DMAC | `0x40010000` |
 | ADCC | `0x40050000` |
 
-## 7. Power/sleep integration
+## Power / sleep
 
-Проверенные условия SDK 3.1.2:
+- `hal_pwrmgr_RAM_retention(RET_SRAM0|RET_SRAM1|RET_SRAM2)` нужен текущему layout;
+- при `USE_FS=1` SNV монтируется через `hal_fs_init(0x1103C000, 3)`;
+- `hal_pwrmgr_lock(MOD_USR1)` удерживается во время активного силового test mode;
+- `CFG_HCLK_DYNAMIC_CHANGE=0` — часть target configuration.
 
-1. `hal_pwrmgr_RAM_retention(RET_SRAM0|RET_SRAM1|RET_SRAM2)` обязателен для текущего layout.
-2. При `USE_FS=1` filesystem монтируется через `hal_fs_init(0x1103C000, 3)` до SNV access.
-3. `hal_pwrmgr_lock(MOD_USR1)` удерживается только во время активного силового test mode.
-4. `CFG_HCLK_DYNAMIC_CHANGE=0` меняется только вместе с новой hardware validation.
-
-## 8. ADC revision 2
+## ADC revision 2
 
 | Измерение | Pin | SDK enum |
 |---|---|---|
@@ -112,9 +73,9 @@ Visible SRAM:
 | +Т | P24 | `ADC_CH2N_P24` |
 | reserve | P23 | `ADC_CH1P_P23` |
 
-Target использует `hal_adc_start(INTERRUPT_MODE)`. Каналы запускаются последовательно, чтобы не зависеть от starvation внутри vendor ADC interrupt path.
+Каналы запускаются последовательно через `hal_adc_start(INTERRUPT_MODE)`.
 
-## 9. GPIO revision 2
+## GPIO revision 2
 
 | Pin | Signal | Назначение |
 |---|---|---|
@@ -127,39 +88,42 @@ Target использует `hal_adc_start(INTERRUPT_MODE)`. Каналы зап
 | P07 / P11 / P18 | RGB | red / green / blue |
 | P34 | `FACTORY_RESET` | physical reset input |
 
-## 10. BLE identity
+## BLE identity / boot
 
-Используется аппаратно проверенный путь release 1.4.0:
+1. `check_chip_mAddr()` / `g_chipMAddr` читают заводской PHY6252 MAC;
+2. fallback MAC хранится в SNV `0x82`;
+3. если MAC отсутствует, он генерируется один раз и сохраняется;
+4. IRK/CSRK хранятся в BLE SNV;
+5. `HCI_EXT_SetBDADDRCmd()` вызывается до `GAPRole_StartDevice()`;
+6. после `GAPROLE_STARTED` запускается advertising;
+7. ошибка identity preparation не должна блокировать advertising.
 
-1. `check_chip_mAddr()` / `g_chipMAddr` читают заводской PHY6252 MAC через vendor decoder;
-2. если заводского MAC нет — читается SNV `0x82`;
-3. если SNV пуст — MAC генерируется один раз и сохраняется;
-4. IRK/CSRK читаются/создаются в BLE SNV;
-5. `HCI_EXT_SetBDADDRCmd()` вызывается **до** `GAPRole_StartDevice()`;
-6. после `GAPROLE_STARTED` identity синхронизируется с GAP/resolving list.
+Boot path не читает произвольный project factory sector raw-доступом.
 
-Firmware не делает raw `hal_flash_read()` произвольного project factory sector в boot path.
+## ROM UART programmer
 
-Advertising не зависит от успешности отдельного provisioning. При сбое identity preparation устройство остаётся видимым как `Test-DPLS-0000`, что позволяет диагностировать живую плату.
+Production build создаёт один Intel HEX. Прошивка выполняется штатной операцией `wh`.
 
-## 11. Flash/programmer
-
-Production build создаёт один Intel HEX.
-
-Прошивка:
+ROM-entry protocol, используемый programmer:
 
 ```text
-rdwr_phy62x2.py ... wh application.hex
+9600 baud
+reset/test-mode via control lines (если подключены)
+UXTDWU → cmd>>:
+переключение на рабочую baud rate
+flash erase/program
 ```
 
-Отдельных `.factory.bin`, `we 0x3F000`, merge factory HEX и персонализированных build artifacts нет.
+Обычный wrapper не ждёт Enter:
 
-Полный chip erase стирает SNV, после чего runtime заново создаёт fallback BLE identity/keys/settings state по обычным правилам.
+```sh
+tools/flash_firmware.sh tmp/test-dpls.hex
+```
 
-## 12. ROM ABI
+Автоматический стенд с заведёнными RTS/DTR использует:
 
-PHY6252 зависит не только от ARMv6-M ISA, но и от фиксированного ROM ABI.
+```sh
+bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
+```
 
-Target линкует SDK-specific `misc/bb_rom_sym_m0.txt`, где определены absolute ROM symbols: crypto, division helpers, string/memory helpers, BLE LL/HCI и ROM handlers.
-
-Практическое правило: **не смешивать** ROM symbol map, prebuilt BLE/RF libraries и jump table разных SDK revisions без отдельной migration review.
+Если reset/test-mode физически не управляются USB-UART/fixture, UART-команда сама по себе не может заменить аппаратный вход в ROM bootloader.
