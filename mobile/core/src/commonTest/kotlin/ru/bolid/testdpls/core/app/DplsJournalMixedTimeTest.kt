@@ -29,7 +29,7 @@ class DplsJournalMixedTimeTest {
     }
 
     @Test
-    fun legacyUtcWithoutAnchorStillUsesRelativeUnixDelta() {
+    fun legacyUtcWithoutAnchorKeepsContinuityWithoutInventingMissingTime() {
         val records = listOf(
             EventRecord(4, 1_777_000_120L, 4, 0),
             EventRecord(3, 1_777_000_090L, 2, 0),
@@ -38,7 +38,10 @@ class DplsJournalMixedTimeTest {
         )
         val timeline = buildJournalTimeline(records)
 
-        assertEquals(120L, timeline.span)
+        /* Без boot anchor неизвестно, сколько прошло между uptime=30 и первым UTC.
+         * Выравниваем шкалы в точке синхронизации и сохраняем известную UTC-разницу. */
+        assertEquals(listOf(60L, 30L, 30L, 0L), timeline.seconds)
+        assertEquals(60L, timeline.span)
         assertTrue(timeline.newest < 1_000L)
     }
 }
