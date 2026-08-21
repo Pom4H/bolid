@@ -1,181 +1,98 @@
 #!/usr/bin/env python3
-"""Offline contract for strict runtime identity and build-time personalization."""
+"""Контракт BLE identity, зафиксированный по рабочей PB-03F release 1.4.0."""
 
-import struct
 from pathlib import Path
-
-import make_factory_identity as factory
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def assert_hex_checksums(text: str) -> None:
-    for line in text.strip().splitlines():
-        assert line.startswith(":")
-        raw = bytes.fromhex(line[1:])
-        assert len(raw) == raw[0] + 5
-        assert sum(raw) & 0xFF == 0
+def text(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
 
 
-def assert_source_contract() -> None:
-    identity = (ROOT / "firmware/phy6252/dpls_ble_identity.c").read_text(encoding="utf-8")
-    peripheral = (ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c").read_text(encoding="utf-8")
-    gatt = (ROOT / "firmware/phy6252/dpls_gatt_service.c").read_text(encoding="utf-8")
-    scatter = (ROOT / "firmware/targets/phy6252/scatter_load.sct").read_text(encoding="utf-8")
-    gcc_ld = (ROOT / "firmware/targets/phy6252/phy6252.ld").read_text(encoding="utf-8")
-    flash_factory = (ROOT / "tools/flash_factory_identity.sh").read_text(encoding="utf-8")
-    flash_firmware = (ROOT / "tools/flash_firmware.sh").read_text(encoding="utf-8")
-    build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
-    provision = (ROOT / "tools/provision_test_dpls.sh").read_text(encoding="utf-8")
-    maker = (ROOT / "tools/make_factory_identity.py").read_text(encoding="utf-8")
-    mobile_ble = (ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt").read_text(encoding="utf-8")
-    credentials = (ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsCredentials.kt").read_text(encoding="utf-8")
-    android_ble = (ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt").read_text(encoding="utf-8")
-    ios_ble = (ROOT / "mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt").read_text(encoding="utf-8")
-    advertisement = (ROOT / "mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsAdvertisement.kt").read_text(encoding="utf-8")
-    lab_ble = (ROOT / "tools/dpls-lab/native/DplsBle.swift").read_text(encoding="utf-8")
+def main() -> int:
+    identity = text("firmware/phy6252/dpls_ble_identity.c")
+    header = text("firmware/phy6252/dpls_ble_identity.h")
+    peripheral = text("firmware/targets/phy6252/source/dplsBLEPeripheral.c")
+    scatter = text("firmware/targets/phy6252/scatter_load.sct")
+    gcc_ld = text("firmware/targets/phy6252/phy6252.ld")
+    flash = text("tools/flash_firmware.sh")
+    build = text("tools/build_firmware.sh")
+    gatt = text("firmware/phy6252/dpls_gatt_service.c")
 
-    # Runtime has one identity truth only: the factory record. Migration,
-    # random-key generation and legacy SNV recovery belong to tooling, not MCU code.
+    # В раннем boot запрещён отдельный raw factory sector. Эта схема появилась
+    # после 1.4.0 и на реальной PB-03F дала no-start regression.
     for forbidden in (
-        "DPLS_LEGACY_BLE_MAC",
-        "read_legacy_mac_snv",
-        "legacy_device_id_from_mac",
-        "LL_ENC_GenerateTrueRandNum",
-        "read_key_snv",
-        "write_key_snv",
+        "DPLS_FACTORY_IDENTITY_FLASH_ADDR",
+        "DPLS_FACTORY_IDENTITY_RECORD_SIZE",
+        "factory_identity_load",
+        "hal_flash_read",
+        "dpls_ble_identity_is_ready",
+        "dpls_ble_identity_is_provisioned",
+        "0x1103F000",
     ):
         assert forbidden not in identity
-    assert "factory_identity_load(&factory)" in identity
-    assert "if (!factory_identity_load(&factory)) return;" in identity
-    assert "s_device_id = factory.serial_number" in identity
-    assert "s_factory_provisioned = true" in identity
+        assert forbidden not in header
 
-    # Build/provision boundary: application image stays byte-for-byte in the
-    # programmer's `wh` domain. Factory identity is a 64-byte sidecar and is
-    # written separately through raw `we 0x3F000`. The two must never be merged.
-    assert "--serial" in build
-    assert "--factory-bin" in build
-    assert "output.factory.bin" in build
-    assert "Factory data is never appended here" in build
-    assert "--merge-app-hex" not in build
-    assert "--flash-ready-output" not in build
-    assert "merge_factory_into_hex" not in maker
-    assert "--merge-app-hex" not in provision
-    assert "--flash-ready-output" not in provision
+    # Identity использует проверенный vendor chip-MAC path, с SNV fallback.
+    assert "check_chip_mAddr();" in identity
+    assert "g_chipMAddr.chipMAddrStatus != CHIP_ID_VALID" in identity
+    assert "HCI_EXT_SetBDADDRCmd(controller_addr)" in identity
+    assert "DPLS_BLE_MAC_SNV_ID 0x82u" in identity
+    assert "ensure_identity_keys" in identity
 
-    assert 'APP_ARGS=(-p "$PORT" -r wh "$HEX")' in flash_firmware
-    assert 'run_programmer -p "$PORT" -r we "$FACTORY_OFFSET" "$FACTORY_BIN"' in flash_firmware
-    assert "FACTORY_OFFSET=0x3F000" in flash_firmware
-    assert "FACTORY_SIZE=64" in flash_firmware
-    assert "${HEX%.hex}.factory.bin" in flash_firmware
+    # Controller BD_ADDR задаётся до deferred GAPRole_StartDevice().
+    prepare = identity[identity.index("void dpls_ble_identity_prepare(void)"):]
+    assert "ensure_mac(mac)" in prepare
+    assert "set_controller_public_addr(mac)" in identity
+    assert peripheral.index("dpls_ble_identity_prepare();") < peripheral.index(
+        "osal_set_event(app_task_id, SBP_START_DEVICE_EVT);"
+    )
 
-    assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
-    assert "read_chip_factory_mac" in identity
-    assert "HCI_EXT_SetBDADDRCmd" in identity
-    assert "display_to_controller_addr" in identity
-    assert "configure_static_identity_addr" in identity
-    assert "dpls_ble_identity_is_ready" in peripheral
-    assert "if (!dpls_ble_identity_is_ready() || dpls_phy6252_flash_work_pending()) return false;" in peripheral
+    # Advertising не имеет identity-ready gate. Если identity не подготовилась,
+    # живая плата всё равно должна быть видна как Test-DPLS-0000.
+    assert "dpls_ble_identity_is_ready" not in peripheral
+    assert "if (dpls_phy6252_flash_work_pending()) return false;" in peripheral
+    assert '"Test-DPLS-0000"' in peripheral
 
-    # Hardware-proven 1.4.0 boot invariants must remain unchanged.
+    # Возвращён аппаратно проверенный 1.4.0 linker window. SNV по-прежнему
+    # монтируется в 0x1103C000, но linker region больше не перекраивает boot image.
+    assert "LR_ROM_XIP 0x11020000 0x020000" in scatter
+    assert "ER_ROM_XIP 0x11020000 0x020000" in scatter
+    assert "LENGTH = 0x20000" in gcc_ld
+    assert "hal_fs_init(0x1103C000u, 3)" in peripheral
+
+    # Сборка и прошивка имеют один artifact и одну programmer operation.
+    for forbidden in (
+        "--serial",
+        "--factory-bin",
+        "factory.bin",
+        "identity.json",
+        "make_factory_identity",
+        "0x3F000",
+    ):
+        assert forbidden not in build
+        assert forbidden not in flash
+    assert 'wh "$HEX"' in flash
+    assert " we " not in flash
+    for removed in (
+        "tools/make_factory_identity.py",
+        "tools/flash_factory_identity.sh",
+        "tools/provision_test_dpls.sh",
+    ):
+        assert not (ROOT / removed).exists(), removed
+
+    # Проверенные platform-инварианты стартового пути не трогаем.
     assert "hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2)" in peripheral
     assert "hal_pwrmgr_RAM_retention_set()" in peripheral
     assert "hal_pwrmgr_LowCurrentLdo_enable()" in peripheral
     assert "hal_pwrmgr_register(MOD_USR1, NULL, NULL)" in peripheral
-    assert "hal_fs_init(0x1103C000u, 3)" in peripheral
 
-    prepare_start = identity.index("void dpls_ble_identity_prepare(void)")
-    stack_start = identity.index("void dpls_ble_identity_on_stack_started(void)")
-    prepare_body = identity[prepare_start:stack_start]
-    stack_body = identity[stack_start:]
-
-    # The user's real 1.4.0 PB-03F proves this public-controller order. Public
-    # BD_ADDR must be applied before GAPRole_StartDevice(), then synchronized via
-    # GAP_ConfigDeviceAddr after GAPROLE_STARTED. Do not defer the first HCI write.
-    assert "set_controller_public_addr(mac)" in prepare_body
-    assert "GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, s_identity_mac)" in stack_body
-    assert "GAP_ConfigDeviceAddr(ADDRTYPE_PUBLIC, NULL)" not in identity
-
-    # Static identity is also an initialization-time input and must not be moved
-    # to the post-start callback.
-    assert "configure_static_identity_addr(mac)" in prepare_body
-    assert "GAP_ConfigDeviceAddr(ADDRTYPE_STATIC" not in stack_body
-    init_call = peripheral.index("dpls_ble_identity_prepare();")
-    start_event = peripheral.index("osal_set_event(app_task_id, SBP_START_DEVICE_EVT);")
-    assert init_call < start_event
-
-    # The 4-hex air-name suffix is only a display hint; DEVICE_INFO owns NodeId.
-    assert "deviceId = null" in mobile_ble
-    assert "authoritative deviceId" in mobile_ble
-    assert 'add("endpoint:$it")' in credentials
-    assert 'add("id:${nodeId.value}")' not in credentials
-    assert 'add("addr:$it")' not in credentials
-
-    # No old manufacturer payload remains in the current BLE path.
-    assert "GAP_ADTYPE_MANUFACTURER_SPECIFIC" not in peripheral
-    assert "MANUFACTURER_ID" not in mobile_ble
-    assert "manufacturerPayload" not in mobile_ble
-    assert "getManufacturerSpecificData" not in android_ble
-    assert "CBAdvertisementDataManufacturerDataKey" not in ios_ble
-    assert "COMPANY_ID" not in advertisement
-    assert "parseManufacturer" not in lab_ble
-
-    # Pairing starts on encrypted protocol RX; CCCD remains writable before SMP.
+    # Security boundary остаётся текущей: CCCD до SMP, protocol RX encrypted.
     assert "dpls_rx_uuid}, GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE" in gatt
     assert "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE," in gatt
-    assert (
-        "clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE"
-        not in gatt
-    )
 
-    # Application XIP cannot spill into SNV/factory sectors.
-    assert "0x01C000" in scatter
-    assert "0x1103C000" in scatter
-    assert "0x1103F000" in scatter
-    assert "LENGTH = 0x1c000" in gcc_ld
-    assert "0x1103C000" in gcc_ld
-    assert "0x1103F000" in gcc_ld
-
-    # Standalone factory flashing remains a raw 64-byte sector write.
-    assert "FACTORY_OFFSET=0x3F000" in flash_factory
-    assert "FACTORY_SIZE=64" in flash_factory
-    assert ' -r we "$FACTORY_OFFSET" "$BIN"' in flash_factory
-    assert " -r wh " not in flash_factory
-
-
-def main() -> int:
-    chip_record = factory.make_record(0x12345678, 2, None)
-    info = factory.validate_record(chip_record)
-    assert len(chip_record) == factory.RECORD_SIZE
-    assert info["serial"] == 0x12345678
-    assert info["hardware_revision"] == 2
-    assert factory.FLASH_OFFSET == 0x3F000
-    assert struct.unpack_from("<H", chip_record, 62)[0] == factory.crc16_ccitt_false(chip_record[:62])
-
-    static_mac = bytes.fromhex("C23456789ABC")
-    static_record = factory.make_record(42, 7, static_mac)
-    info = factory.validate_record(static_record)
-    assert info["static_mac"] == static_mac
-
-    generated_mac = factory.generate_static_mac()
-    assert len(generated_mac) == 6
-    assert generated_mac[0] & 0xC0 == 0xC0
-
-    identity_hex = factory.to_intel_hex(factory.FLASH_ADDRESS, static_record)
-    assert identity_hex.splitlines()[0] == ":020000041103E6"
-    assert identity_hex.splitlines()[-1] == ":00000001FF"
-    assert_hex_checksums(identity_hex)
-
-    try:
-        factory.make_record(43, 2, bytes.fromhex("023456789ABC"))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("non-static BLE address was accepted")
-
-    assert_source_contract()
-    print("factory identity / separate programmer boundary: OK")
+    print("hardware-safe BLE identity / boot contract: OK")
     return 0
 
 
