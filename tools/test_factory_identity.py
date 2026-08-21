@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract test for production Test-DPLS identity."""
+"""Offline contract test for production and upgrade Test-DPLS identity."""
 
 import struct
 from pathlib import Path
@@ -38,15 +38,22 @@ def assert_source_contract() -> None:
     ).read_text(encoding="utf-8")
     lab_ble = Path("tools/dpls-lab/native/DplsBle.swift").read_text(encoding="utf-8")
 
-    # One production identity model only: a valid factory record is mandatory.
-    assert "DPLS_LEGACY_BLE_MAC" not in identity
-    assert "read_legacy_mac_snv" not in identity
-    assert "development_id_from_mac" not in identity
-    assert "LL_ENC_GenerateTrueRandNum" not in identity
-    assert "read_key_snv" not in identity
-    assert "write_key_snv" not in identity
-    assert "factory_identity_load(&factory)" in identity
-    assert "s_device_id = factory.serial_number" in identity
+    # Factory identity is authoritative, but a normal firmware upgrade from the
+    # hardware-proven 1.3.x image must not make an existing board disappear.
+    # The fallback reuses the old public MAC/NodeId contract and SNV identity
+    # keys; it never invents a new random MAC.
+    assert "factory_identity_load(&identity)" in identity
+    assert "if (factory_loaded)" in identity
+    assert "legacy_identity_load(&identity, mac, &addr_type)" in identity
+    assert "DPLS_LEGACY_BLE_MAC_SNV_ID" in identity
+    assert "read_legacy_mac_snv" in identity
+    assert "legacy_device_id_from_mac" in identity
+    assert "LL_ENC_GenerateTrueRandNum" in identity
+    assert "read_key_snv" in identity
+    assert "write_key_snv" in identity
+    assert "s_device_id = identity.serial_number" in identity
+    assert "s_factory_provisioned = factory_loaded" in identity
+    assert "generate_mac" not in identity
 
     assert "DPLS_FACTORY_IDENTITY_FLASH_ADDR" in identity
     assert "read_chip_factory_mac" in identity
@@ -55,6 +62,12 @@ def assert_source_contract() -> None:
     assert "configure_static_identity_addr" in identity
     assert "dpls_ble_identity_is_ready" in peripheral
     assert "!link_up && !dpls_ble_identity_is_ready()" in peripheral
+
+    # Hardware-only boot invariants recovered during the SDK 3.1.2 migration.
+    # Losing either one again produces a green build but a dead-looking PB-03F.
+    assert "hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2)" in peripheral
+    assert "hal_pwrmgr_RAM_retention_set()" in peripheral
+    assert "hal_fs_init(0x1103C000u, 3)" in peripheral
 
     # PHY6252 snapshots the peripheral local address during GAP_DeviceInit.
     # Static identity must therefore be configured in prepare(), before the
@@ -171,7 +184,7 @@ def main() -> int:
         raise AssertionError("non-static BLE address was accepted")
 
     assert_source_contract()
-    print("factory identity: OK")
+    print("factory identity + legacy boot migration: OK")
     return 0
 
 
