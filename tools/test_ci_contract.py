@@ -35,8 +35,6 @@ missing = [token for token in required_ci_tokens if token not in ci]
 if missing:
     raise SystemExit("CI release contract missing: " + ", ".join(missing))
 
-# These jobs used to be completely disabled for pull requests. A release PR
-# must never regress to that topology.
 for job_id, name in (
     ("firmware_quality", "Firmware coverage + cppcheck"),
     ("soft_ble_e2e", "Soft-BLE DplsClient ↔ simulator"),
@@ -48,9 +46,6 @@ for job_id, name in (
     if old_shape in ci:
         raise SystemExit(f"CI release contract regressed: {job_id} disabled on every PR")
 
-# The final RC gate must depend on every independent evidence source. This is
-# intentionally textual: changing the workflow topology requires consciously
-# changing this contract in the same review.
 release_needs = (
     "      - smoke\n"
     "      - android\n"
@@ -76,6 +71,7 @@ for token in (
 
 for token in (
     "test_ci_contract.py",
+    "test_factory_identity.py",
     "ENABLE_SANITIZERS=ON",
     "ctest --test-dir",
     "architecture_guard.py",
