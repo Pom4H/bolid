@@ -77,13 +77,16 @@ class ConnectionMachineTest {
     }
 
     @Test
-    fun failedStateCannotBeRevivedByLinkFacts() {
+    fun failedStateCannotBeRevivedByRadioOrLinkFacts() {
         val failed: DeviceSession = DeviceSession.Failed(endpoint, LinkFailure.Closed)
         val afterAvailable = ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothAvailable)
+        val afterUnavailable = ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothUnavailable)
         val afterLost = ConnectionMachine.reduce(failed, ConnectionEvent.LinkLost)
 
         assertIs<DeviceSession.Failed>(afterAvailable)
+        assertIs<DeviceSession.Failed>(afterUnavailable)
         assertFalse(afterAvailable is DeviceSession.Recovering)
+        assertFalse(afterUnavailable is DeviceSession.Recovering)
         assertEquals(DeviceSession.Offline, afterLost)
     }
 
