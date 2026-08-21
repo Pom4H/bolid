@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test for the PHY6252 application/factory flashing boundary."""
+"""Regression test: PHY6252 flashing is exactly one application `wh`."""
 
 from __future__ import annotations
 
@@ -14,22 +14,18 @@ FLASH = ROOT / "tools" / "flash_firmware.sh"
 
 def main() -> int:
     source = FLASH.read_text(encoding="utf-8")
-
-    # Backticks in shell output caused `we: command not found` on real hardware.
-    assert "`" not in source
-    assert "wait_for_bootloader_entry \"Прошивка application\"" in source
-    assert "wait_for_bootloader_entry \"Прошивка factory identity\"" in source
+    assert "factory" not in source.lower()
+    assert "0x3F000" not in source
+    assert " -r we " not in source
+    assert 'ARGS=(-p "$PORT" -r wh "$HEX")' in source
 
     with tempfile.TemporaryDirectory() as tmp_raw:
         tmp = Path(tmp_raw)
         app = tmp / "output.hex"
-        factory = tmp / "output.factory.bin"
         log = tmp / "python-calls.log"
         fake_bin = tmp / "bin"
         fake_bin.mkdir()
-
         app.write_text(":00000001FF\n", encoding="ascii")
-        factory.write_bytes(bytes(range(64)))
 
         fake_python = fake_bin / "python3"
         fake_python.write_text(
@@ -49,7 +45,6 @@ def main() -> int:
                 "DPLS_TEST_PYTHON_LOG": str(log),
             }
         )
-
         result = subprocess.run(
             ["bash", str(FLASH), str(app)],
             cwd=ROOT,
@@ -64,13 +59,11 @@ def main() -> int:
             )
 
         calls = log.read_text(encoding="utf-8").splitlines()
-        assert len(calls) == 2, calls
+        assert len(calls) == 1, calls
         assert f" -p COM_TEST -r wh {app}" in f" {calls[0]}"
-        assert f" -p COM_TEST -r we 0x3F000 {factory}" in f" {calls[1]}"
+        assert " we " not in calls[0]
 
-        assert result.stdout.index("Application (wh)") < result.stdout.index("Factory identity (we 0x3F000)")
-
-    print("PHY6252 two-stage flashing contract: OK")
+    print("PHY6252 single-stage flashing contract: OK")
     return 0
 
 
