@@ -9,7 +9,7 @@ on:
       - "tools/fetch_phy6252_sdk.sh"
       - ".github/workflows/firmware-target.yml"
   push:
-    branches: [main]
+    branches: [main, debug/hw-bisect-1.4.0-rebuild]
     paths:
       - "firmware/**"
       - "tools/build_firmware.sh"
