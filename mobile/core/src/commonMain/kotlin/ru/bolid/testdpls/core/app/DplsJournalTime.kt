@@ -3,15 +3,48 @@ package ru.bolid.testdpls.core.app
 import ru.bolid.testdpls.core.domain.EventRecord
 import ru.bolid.testdpls.core.domain.JournalTimeAnchor
 
+private fun journalTimestampIsUtc(timestampSeconds: Long): Boolean =
+    eventTimestampBasis(timestampSeconds) == "utc"
+
+/**
+ * Возвращает uptime события внутри boot-сессии.
+ *
+ * Старый/текущий протокол намеренно допускает два basis в одном журнале:
+ * до TIME_SYNC firmware пишет uptime, после TIME_SYNC — Unix UTC. Поэтому UTC
+ * нельзя использовать как uptime и тем более прибавлять к boot epoch второй раз.
+ */
+internal fun journalRecordUptimeSeconds(record: EventRecord, bootEpochSeconds: Long?): Long? {
+    if (!journalTimestampIsUtc(record.timestampSeconds)) return record.timestampSeconds.coerceAtLeast(0L)
+    val epoch = bootEpochSeconds ?: return null
+    val delta = record.timestampSeconds - epoch
+    /* Секундное округление телефона/STATE_REPORT может дать -1..-2 с у самого boot. */
+    return if (delta >= -2L) delta.coerceAtLeast(0L) else null
+}
+
 internal fun journalBootFirstSequences(records: List<EventRecord>): List<Long> {
     if (records.isEmpty()) return emptyList()
     val chronological = records.sortedBy { it.sequence }
     val starts = ArrayList<Long>()
-    var prevUptime = -1L
+    var previous: EventRecord? = null
     for (record in chronological) {
-        val reboot = record.type == 1 || (prevUptime >= 0L && record.timestampSeconds + 1L < prevUptime)
+        val prev = previous
+        val reboot = record.type == 1 || when {
+            prev == null -> false
+            /* До синхронизации uptime -> UTC — это смена basis, не reboot. */
+            !journalTimestampIsUtc(prev.timestampSeconds) && journalTimestampIsUtc(record.timestampSeconds) -> false
+            /* Обратный переход внутри одного boot невозможен: после UTC firmware
+             * уже не возвращается к uptime. Значит это новый boot, даже если EVT_BOOT
+             * уже выпал из кольцевого журнала. */
+            journalTimestampIsUtc(prev.timestampSeconds) && !journalTimestampIsUtc(record.timestampSeconds) -> true
+            /* Для чистого uptime оставляем старый fallback по падению счётчика. */
+            !journalTimestampIsUtc(prev.timestampSeconds) && !journalTimestampIsUtc(record.timestampSeconds) ->
+                record.timestampSeconds + 1L < prev.timestampSeconds
+            /* UTC может корректироваться повторным TIME_SYNC; его уменьшение само по
+             * себе не является доказательством reboot. */
+            else -> false
+        }
         if (starts.isEmpty() || reboot) starts += record.sequence
-        prevUptime = record.timestampSeconds
+        previous = record
     }
     return starts
 }
@@ -30,6 +63,10 @@ internal fun journalWallSeconds(
     currentBootEpoch: Long?,
     anchors: List<JournalTimeAnchor>,
 ): Long? {
+    /* После TIME_SYNC timestamp уже Unix UTC. Это и был баг 2083 года: раньше
+     * сюда ещё раз прибавлялся boot epoch (~2026 + ~2026). */
+    if (journalTimestampIsUtc(record.timestampSeconds)) return record.timestampSeconds
+
     if (currentBootFirst != null && currentBootEpoch != null && record.sequence >= currentBootFirst) {
         return currentBootEpoch + record.timestampSeconds
     }
@@ -100,10 +137,16 @@ internal fun journalBootSessions(
             currentBootEpoch != null && first == currentBootFirst -> currentBootEpoch
             else -> anchors.find { it.bootFirstSequence == first }?.bootEpochSeconds
         }
+        /* Не берём max(raw timestamp): после TIME_SYNC это Unix epoch и он превращал
+         * продолжительность одной boot-сессии в десятки лет. */
+        val lastUptime = inBoot
+            .mapNotNull { journalRecordUptimeSeconds(it, epoch) }
+            .maxOrNull()
+            ?: 0L
         JournalBootSession(
             firstSequence = first,
             lastSequence = last.sequence,
-            lastUptimeSeconds = inBoot.maxOf { it.timestampSeconds },
+            lastUptimeSeconds = lastUptime,
             epochSeconds = epoch,
         )
     }
@@ -178,6 +221,9 @@ internal fun journalBootEpochRange(
 }
 
 internal fun journalEventWallRange(record: EventRecord, sessions: List<JournalBootSession>): LongRange? {
+    if (journalTimestampIsUtc(record.timestampSeconds)) {
+        return record.timestampSeconds..record.timestampSeconds
+    }
     val session = journalSessionFor(record.sequence, sessions) ?: return null
     val bootRange = journalBootEpochRange(session, sessions) ?: return null
     return (bootRange.first + record.timestampSeconds)..(bootRange.last + record.timestampSeconds)
