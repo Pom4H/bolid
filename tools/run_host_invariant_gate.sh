@@ -13,6 +13,7 @@ echo '== repository / CI / architecture invariants =='
 bash tools/check_repo_layout.sh
 python3 tools/test_ci_contract.py
 python3 tools/test_phy6252_linker_parity.py
+python3 tools/test_factory_identity.py
 python3 tools/test_phy6252_snv_guard_contract.py
 python3 tools/test_ble_timeout_contract.py
 python3 tools/test_android_ble_connection_contract.py
