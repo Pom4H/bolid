@@ -137,6 +137,8 @@ jobs:
           firmware: tmp/test-dpls-firmverse.hex
           board: pb03f-kit
           strict: 'true'
+          expect: |
+            BLE HCI LE_SetAdvEnable enabled=1
           log: tmp/firmverse.log
       - uses: actions/upload-artifact@v6
         if: always()
