@@ -3,9 +3,8 @@
 #
 #   tools/flash_firmware.sh [application.hex] [--auto-rst] [--erase] [--port /dev/...]
 #
-# Без --auto-rst скрипт не дёргает RTS/DTR: KEY1/reset остаются ручными.
-# С --auto-rst используется штатная RTS->RST_N, DTR->TM последовательность programmer.
-# Enter нигде не требуется.
+# Без --auto-rst: KEY1/reset выполняются вручную, Enter не нужен.
+# С --auto-rst: RTS -> RST_N, DTR -> TM. Эти линии должны быть физически подключены.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,10 +23,12 @@ Defaults:
   application.hex: tmp/test-dpls.hex
   port:            first detected USB-UART
 
-Modes:
-  default      KEY1/reset вручную, без Enter
-  --auto-rst   RTS->RST_N + DTR->TM, KEY1 не нужен
-  --erase      chip erase перед записью; стирает SNV/bonds
+ROM entry:
+  default      hold KEY1 and reset/power-cycle the board; no Enter
+  --auto-rst   requires physical RTS -> RST_N and DTR -> TM wiring
+
+Other:
+  --erase      chip erase before programming; erases SNV/bonds
 EOF
     exit "$status"
 }
@@ -114,23 +115,26 @@ ARGS+=(wh "$HEX")
 
 echo "port: $PORT"
 echo "hex:  $HEX"
-
 if [ "$AUTO_RST" -eq 1 ]; then
-    echo "ROM entry: automatic RTS->RST_N, DTR->TM, UXTDWU@9600"
-    PYTHONPATH="$ROOT/.python-deps" exec python3 "$PROGRAMMER" "${ARGS[@]}"
+    echo "ROM entry: AUTO — RTS->RST_N, DTR->TM, UXTDWU@9600"
+else
+    echo "ROM entry: MANUAL — hold KEY1 and reset/power-cycle now; no Enter"
+    echo "           for unattended flashing use --auto-rst"
 fi
 
-echo "ROM entry: hold KEY1 and reset/power-cycle; UXTDWU@9600 is sent automatically"
-
-# Vendor programmer правильно реализует ROM handshake и flash protocol, но по
-# умолчанию ещё дёргает RTS/DTR. В ручном режиме временно глушим только эти две
-# операции и запускаем тот же код programmer без его копирования.
-PYTHONPATH="$ROOT/.python-deps" exec python3 - "$PROGRAMMER" "${ARGS[@]}" <<'PY'
+# Используем vendor flash protocol без копии. Подменяем только вход в ROM:
+# - одинаковый bounded handshake для manual/auto;
+# - auto управляет RTS/DTR;
+# - manual вообще не трогает control lines.
+PYTHONPATH="$ROOT/.python-deps" exec python3 - "$PROGRAMMER" "$AUTO_RST" "${ARGS[@]}" <<'PY'
 import importlib.util
 import sys
+import time
 
 programmer = sys.argv[1]
-programmer_args = sys.argv[2:]
+auto_rst = sys.argv[2] == "1"
+programmer_args = sys.argv[3:]
+
 spec = importlib.util.spec_from_file_location("phy62x2_programmer", programmer)
 if spec is None or spec.loader is None:
     raise SystemExit(f"cannot load programmer: {programmer}")
@@ -139,18 +143,81 @@ spec.loader.exec_module(module)
 
 original_connect = module.phyflasher.Connect
 
-def connect_without_control_lines(self, baud=module.DEF_RUN_BAUD):
-    original_rts = self._port.setRTS
-    original_dtr = self._port.setDTR
-    self._port.setRTS = lambda _value: None
-    self._port.setDTR = lambda _value: None
-    try:
-        return original_connect(self, baud)
-    finally:
-        self._port.setRTS = original_rts
-        self._port.setDTR = original_dtr
 
-module.phyflasher.Connect = connect_without_control_lines
+def enter_rom(self):
+    self._port.baudrate = module.START_BAUD
+    self._port.timeout = 0.04
+
+    if auto_rst:
+        # Штатная последовательность PHY62x2 utility.
+        self._port.setRTS(True)   # RST_N low
+        self._port.setDTR(True)   # TM low
+        time.sleep(0.15)
+        self._port.reset_output_buffer()
+        self._port.reset_input_buffer()
+        self._port.setDTR(False)  # TM high
+        self._port.setRTS(False)  # RST_N high
+        time.sleep(0.02)
+    else:
+        # Не меняем RTS/DTR: оператор сам переводит плату через KEY1/reset.
+        self._port.reset_output_buffer()
+        self._port.reset_input_buffer()
+
+    # Upstream utility использует 250 попыток (~10 секунд). Этого достаточно,
+    # чтобы поймать reset window, но ошибка не выглядит как вечное зависание.
+    last = b""
+    for _ in range(250):
+        self._port.write(b"UXTDWU")
+        last = self._port.read(6)
+        if last == b"cmd>>:":
+            return True
+        if last == b"fct>>:":
+            print("error: chip entered FCT mode", file=sys.stderr)
+            return False
+
+    if auto_rst:
+        print(
+            "error: ROM did not answer UXTDWU@9600 after automatic reset\n"
+            "       auto mode requires physical RTS->RST_N and DTR->TM wiring;\n"
+            "       TX/RX alone cannot reset a running application into ROM",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "error: ROM did not answer UXTDWU@9600\n"
+            "       hold KEY1, reset/power-cycle the board while the script is running",
+            file=sys.stderr,
+        )
+    if last:
+        print(f"       last reply: {last!r}", file=sys.stderr)
+    return False
+
+
+def controlled_connect(self, baud=module.DEF_RUN_BAUD):
+    if self.next:
+        return original_connect(self, baud)
+    if not enter_rom(self):
+        self._port.close()
+        raise SystemExit(4)
+
+    print("Chip Reset Ok. Response: b'cmd>>:'")
+
+    # Переиспользуем vendor ReadRevision через его штатный --next branch.
+    self.next = True
+    try:
+        if not original_connect(self, module.START_BAUD):
+            return False
+    finally:
+        self.next = False
+
+    if not self.FlashUnlock():
+        self._port.close()
+        raise SystemExit(4)
+    print(self.chip, "- connected Ok")
+    return self.SetBaud(baud)
+
+
+module.phyflasher.Connect = controlled_connect
 sys.argv = [programmer, *programmer_args]
 module.main()
 PY
