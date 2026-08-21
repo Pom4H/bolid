@@ -28,6 +28,59 @@ class DplsJournalTimeTest {
     }
 
     @Test
+    fun utcTimestampIsAlreadyWallClockAndMustNotBeAnchoredTwice() {
+        val bootEpoch = 1_777_000_000L
+        val utc = bootEpoch + 120L
+        val synced = EventRecord(3, utc, 4, 0)
+
+        assertEquals(
+            utc,
+            journalWallSeconds(
+                synced,
+                currentBootFirst = 1L,
+                currentBootEpoch = bootEpoch,
+                anchors = emptyList(),
+            ),
+        )
+        assertEquals(
+            utc.toString(),
+            journalEventTimeCaption(
+                record = synced,
+                records = listOf(
+                    EventRecord(1, 0, 1, 0),
+                    EventRecord(2, 30, 2, 0),
+                    synced,
+                ),
+                currentBootFirst = 1L,
+                currentBootEpoch = bootEpoch,
+                anchors = emptyList(),
+                formatWall = { it.toString() },
+            ),
+        )
+    }
+
+    @Test
+    fun timeSyncBasisChangeIsNotMistakenForReboot() {
+        val bootEpoch = 1_777_000_000L
+        val records = listOf(
+            EventRecord(4, bootEpoch + 120L, 4, 0),
+            EventRecord(3, bootEpoch + 90L, 2, 0),
+            EventRecord(2, 30, 2, 0),
+            EventRecord(1, 0, 1, 0),
+        )
+        assertEquals(listOf(1L), journalBootFirstSequences(records))
+
+        val sessions = journalBootSessions(
+            records,
+            currentBootFirst = 1L,
+            currentBootEpoch = bootEpoch,
+            anchors = emptyList(),
+        )
+        assertEquals(1, sessions.size)
+        assertEquals(120L, sessions.single().lastUptimeSeconds)
+    }
+
+    @Test
     fun unsyncedPreviousBootHasNoCalendar() {
         val previous = EventRecord(1076, 3187, 3, 0)
         assertNull(
