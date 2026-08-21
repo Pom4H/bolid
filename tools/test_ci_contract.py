@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Small guard for the release evidence matrix and local firmware DX."""
+"""Release evidence and firmware toolchain contract.
+
+AC6 bootstrap has one owner: GitHub Actions. build_firmware.sh only consumes an
+already activated toolchain; it must not grow a second installer/license path.
+"""
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
 build = (ROOT / "tools/build_firmware.sh").read_text(encoding="utf-8")
 flash = (ROOT / "tools/flash_firmware.sh").read_text(encoding="utf-8")
@@ -49,16 +54,27 @@ for removed in (
     if removed in host:
         raise SystemExit(f"removed duplicate contract returned: {removed}")
 
-for token in (
-    'VCPKG_VERSION="2026.04.27"',
-    "AC6_TOOLCHAIN_6_24_0",
+# Production CI and fresh-clone DX deliberately share one AC6 bootstrap path.
+for workflow_name, workflow in (("ci.yml", ci), ("firmware-dx.yml", dx)):
+    for token in (
+        "ubuntu-22.04",
+        "ARM-software/cmsis-actions/vcpkg@v1",
+        "firmware/targets/phy6252/vcpkg-configuration.json",
+        "ARM-software/cmsis-actions/armlm@v1",
+        "tools/build_firmware.sh keil",
+    ):
+        if token not in workflow:
+            raise SystemExit(f"{workflow_name}: AC6 bootstrap contract missing: {token}")
+
+# The build script is a build script, not another package manager/license client.
+for forbidden in (
+    "vcpkg activate",
+    'VCPKG_VERSION=',
     "KEMDK-COM0",
-    '"$vcpkg" activate',
-    "CMSIS-Toolbox 2.14.1",
-    "Arm Compiler 6.24.0",
+    "armlm activate",
 ):
-    if token not in build:
-        raise SystemExit(f"zero-setup build contract missing: {token}")
+    if forbidden in build:
+        raise SystemExit(f"second AC6 bootstrap path leaked into build_firmware.sh: {forbidden}")
 
 for token in ('"6.24.0"', '"2.14.1"'):
     if token not in vcpkg:
@@ -76,3 +92,4 @@ if "--auto-rst" not in flash:
     raise SystemExit("single flasher lost --auto-rst")
 
 print("CI/DX contract: PASS")
+print("  one AC6 6.24 + Community license bootstrap: GitHub Actions")
