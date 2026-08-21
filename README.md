@@ -8,6 +8,102 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 - Android/iOS: **1.4.1**;
 - wire protocol: **v2**.
 
+## Быстрый старт firmware
+
+На macOS/Linux разработчику не нужно вручную искать CMSIS Toolbox, Arm Compiler или прописывать пути из `~/.vcpkg`.
+
+```sh
+git clone https://github.com/Pom4H/bolid.git
+cd bolid
+
+tools/build_firmware.sh
+tools/flash_firmware.sh
+```
+
+Первый `build` автоматически:
+
+1. скачивает pinned PHY62XX SDK 3.1.2;
+2. при необходимости ставит pinned `vcpkg 2026.04.27` в `.toolchains/`;
+3. через Arm artifact registry активирует **CMSIS-Toolbox 2.14.1** и **Arm Compiler 6.24.0**;
+4. получает из vcpkg окружение `PATH` и `AC6_TOOLCHAIN_6_24_0` внутри самого скрипта;
+5. если MDK-лицензии ещё нет, активирует **Keil MDK Community (`KEMDK-COM0`)**;
+6. собирает `tmp/test-dpls.hex`.
+
+То есть эти ручные действия больше не требуются:
+
+```sh
+# НЕ НУЖНО делать вручную:
+# export PATH=".../compilers.arm.armclang/6.24.0/bin:.../cmsis.toolbox/2.14.1/bin:$PATH"
+# export AC6_TOOLCHAIN_6_24_0=".../compilers.arm.armclang/6.24.0/bin"
+```
+
+`KEMDK-COM0` — бесплатная **non-commercial** лицензия Arm. Если на машине уже активна подходящая MDK Essentials/Professional/Community лицензия, скрипт использует её. Для другой user-based лицензии можно передать:
+
+```sh
+ARM_LICENSE_CODE='<activation-code>' tools/build_firmware.sh
+```
+
+или:
+
+```sh
+ARM_LICENSE_PRODUCT='<product>' \
+ARM_LICENSE_SERVER='https://license-server.example' \
+tools/build_firmware.sh
+```
+
+GNU build тоже zero-setup: при отсутствии подходящего `arm-none-eabi-gcc` скрипт скачает pinned Arm GNU Toolchain 13.2.rel1.
+
+```sh
+tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex
+```
+
+## Прошивка PB-03F
+
+Один скрипт обслуживает и человека, и автоматический стенд.
+
+Ручной вход в ROM — KEY1/reset, но **Enter нажимать не нужно**:
+
+```sh
+tools/flash_firmware.sh
+```
+
+Скрипт сам:
+
+- берёт `tmp/test-dpls.hex` после обычного build;
+- находит `/dev/cu.wchusbserial*`, `/dev/cu.usbserial*`, `/dev/cu.usbmodem*`, `/dev/ttyUSB*` или `/dev/ttyACM*`;
+- локально ставит `pyserial==3.5`, если его нет;
+- посылает ROM handshake `UXTDWU` на **9600 бод**;
+- ждёт `cmd>>:` и дальше использует штатный PHY62x2 flash protocol.
+
+Можно явно указать HEX или порт:
+
+```sh
+tools/flash_firmware.sh 1.4.2-rc7.hex
+tools/flash_firmware.sh 1.4.2-rc7.hex --port /dev/cu.wchusbserial110
+```
+
+Для стенда/агента, где USB-UART control lines подключены как `RTS -> RST_N` и `DTR -> TM`, тот же файл умеет полностью автоматический ROM entry без KEY1:
+
+```sh
+tools/flash_firmware.sh --auto-rst
+```
+
+или:
+
+```sh
+tools/flash_firmware.sh 1.4.2-rc7.hex --auto-rst
+```
+
+`--auto-rst` использует штатную последовательность vendor programmer: reset/test-mode через RTS/DTR, затем `UXTDWU@9600`. Если эти control lines физически не подключены к плате, программно заменить KEY1 невозможно — используйте обычный ручной режим.
+
+Полный chip erase доступен только явно:
+
+```sh
+tools/flash_firmware.sh --erase
+```
+
+Он стирает SNV/bonds, поэтому BLE identity и ключи будут созданы заново обычным boot path.
+
 ## Главные архитектурные правила
 
 1. **Firmware владеет hardware safety.** Телефон не может обойти таймауты, автоизоляцию и безопасный `NORMAL`.
@@ -29,7 +125,7 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 | `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
 | `mobile/web/` | тот же Compose UI поверх `LabBleTransport` |
 | `docs/` | архитектура, bring-up и технические reference |
-| `tools/` | build/flash/check/lab/session utilities |
+| `tools/` | build, flash, проверки и lab/session utilities |
 
 Production PHY62XX SDK не vendored: точная версия **3.1.2** закреплена в `firmware/sdk/phy6252-sdk.env`.
 
@@ -85,7 +181,7 @@ Firmware гарантирует:
 
 Успешный GATT write не считается подтверждением физического режима. UI меняет состояние только после `COMMAND_RESULT` и последующего `STATE_REPORT`.
 
-## Быстрые проверки
+## Проверки
 
 ```sh
 bash tools/check_all.sh
@@ -112,40 +208,7 @@ bash tools/dpls_lab.sh
 
 ### Production HEX / Firmverse
 
-Реальный GCC target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse). CI обязан подтвердить, что firmware не только исполняется, но и реально доходит до включения BLE advertising.
-
-## Сборка firmware
-
-```sh
-tools/build_firmware.sh keil tmp/test-dpls.hex
-tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
-```
-
-## Прошивка платы
-
-Обычная прошивка не требует Enter:
-
-```sh
-tools/flash_firmware.sh tmp/test-dpls.hex
-```
-
-Programmer сам посылает ROM handshake `UXTDWU` на 9600 бод и ждёт reset/входа в bootloader. Если control lines стенда не подключены, пользователь только удерживает KEY1 и делает reset/перезапуск питания — подтверждать это в терминале не нужно.
-
-Для стенда/агента с подключёнными RTS/DTR:
-
-```sh
-bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
-```
-
-Agent path полностью unattended: RTS/DTR используются для ROM-entry, затем идёт тот же `UXTDWU@9600` и обычный `wh`.
-
-Полный chip erase доступен явно:
-
-```sh
-tools/flash_firmware.sh tmp/test-dpls.hex --erase
-```
-
-Он стирает SNV/bonds, поэтому после erase BLE identity и ключи будут созданы заново обычным boot path.
+Реальный target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse). CI обязан подтвердить, что firmware не только исполняется, но и реально доходит до включения BLE advertising.
 
 ## Boot order PHY6252
 
