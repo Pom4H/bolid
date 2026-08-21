@@ -64,6 +64,15 @@ def assert_source_contract() -> None:
     assert "--merge-app-hex" not in provision
     assert "--flash-ready-output" not in provision
 
+    # New serial provisioning must not silently depend on optional PHY6252
+    # factory-MAC words. Static random identity is the safe production default;
+    # chip public address is available only as an explicit verified-lot opt-in.
+    assert "USE_CHIP_PUBLIC=0" in build
+    assert "--use-chip-public" in build
+    assert "FACTORY_ARGS+=(--generate-static-address)" in build
+    assert 'EXISTING_SOURCE="$(factory_address_source "$FACTORY_OUT")"' in build
+    assert 'if [ "$EXISTING_SOURCE" = "chip_public" ] && [ "$USE_CHIP_PUBLIC" -eq 0 ]' in build
+
     assert 'APP_ARGS=(-p "$PORT" -r wh "$HEX")' in flash_firmware
     assert 'run_programmer -p "$PORT" -r we "$FACTORY_OFFSET" "$FACTORY_BIN"' in flash_firmware
     assert "FACTORY_OFFSET=0x3F000" in flash_firmware
