@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Build the PHY6252 Test-DPLS image.
+# Build the PHY6252 Test-DPLS application image.
 #
-# Application-only (for CI / updates of an already provisioned device):
+# Application-only (CI / update of an already provisioned device):
 #   tools/build_firmware.sh [keil|ac6|gcc] [output.hex]
 #
-# First flash / personalization (application + factory identity in one HEX):
+# Personalized build:
 #   tools/build_firmware.sh keil output.hex --serial 1234
-#   tools/build_firmware.sh keil output.hex --factory-bin device-1234.factory.bin
+#   tools/build_firmware.sh keil output.hex --factory-bin device.factory.bin
 #
-# --serial creates a NEW identity once. Keep the emitted .factory.bin safe and
-# reuse it with --factory-bin for reproducible reflashes; do not regenerate keys
-# for an already paired production device.
+# IMPORTANT: output.hex is ALWAYS an application HEX suitable for programmer
+# operation `wh`. Personalization is emitted separately as output.factory.bin;
+# it must be written with raw programmer operation `we 0x3F000`. Do not merge
+# factory data into the application HEX: `wh` owns the application segment table.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/firmware/targets/phy6252"
 TOOLCHAIN="keil"
-FINAL_OUT="$ROOT/tmp/test-dpls.hex"
+OUT="$ROOT/tmp/test-dpls.hex"
 REGION_ROOT=""
 BUILD_LOG=""
 SERIAL="${DPLS_SERIAL:-}"
@@ -31,14 +32,19 @@ usage() {
 usage: tools/build_firmware.sh [keil|ac6|gcc] [output.hex] [identity options]
 
 identity options (optional, mutually exclusive source):
-  --serial N                    create a new factory identity and flash-ready HEX
+  --serial N                    create a new factory identity sidecar
   --factory-bin FILE            reuse an existing 64-byte factory identity
   --hw-revision N               factory hardware revision (default: 2)
   --static-address XX:..:XX     use a specified BLE static random address
   --generate-static-address     generate a BLE static random address
 
-Without --serial/--factory-bin the output is application-only and requires an
-already provisioned factory sector on the board.
+With identity options the build emits:
+  output.hex                    application image; flash with `wh`
+  output.factory.bin            factory identity; flash with `we 0x3F000`
+  output.identity.json          non-secret metadata
+
+`tools/flash_firmware.sh output.hex` automatically detects the sidecar and uses
+both programmer operations in the correct order.
 EOF
     exit 2
 }
@@ -71,7 +77,7 @@ while [ "$#" -gt 0 ]; do
         --*) usage ;;
         *)
             if [ "$OUT_SET" -ne 0 ]; then usage; fi
-            FINAL_OUT="$1"; OUT_SET=1; shift ;;
+            OUT="$1"; OUT_SET=1; shift ;;
     esac
 done
 if [ "$TOOLCHAIN" = "ac6" ]; then TOOLCHAIN="keil"; fi
@@ -89,9 +95,9 @@ if [ -n "$STATIC_ADDRESS" ] && [ "$GENERATE_STATIC_ADDRESS" -ne 0 ]; then
     exit 2
 fi
 
-case "$FINAL_OUT" in
+case "$OUT" in
     /*) ;;
-    *) FINAL_OUT="$ROOT/$FINAL_OUT" ;;
+    *) OUT="$ROOT/$OUT" ;;
 esac
 if [ -n "$FACTORY_BIN_INPUT" ]; then
     case "$FACTORY_BIN_INPUT" in
@@ -101,23 +107,13 @@ if [ -n "$FACTORY_BIN_INPUT" ]; then
     [ -f "$FACTORY_BIN_INPUT" ] || { echo "error: factory BIN not found: $FACTORY_BIN_INPUT" >&2; exit 1; }
 fi
 
-PERSONALIZED=0
-if [ -n "$SERIAL" ] || [ -n "$FACTORY_BIN_INPUT" ]; then PERSONALIZED=1; fi
-if [ "$PERSONALIZED" -eq 1 ]; then
-    APP_OUT="${FINAL_OUT%.hex}.application.tmp.hex"
-else
-    APP_OUT="$FINAL_OUT"
-fi
-OUT="$APP_OUT"
-
 cleanup() {
     if [ -n "$REGION_ROOT" ]; then rm -rf "$REGION_ROOT"; fi
-    if [ "$PERSONALIZED" -eq 1 ]; then rm -f "$APP_OUT"; fi
 }
 trap cleanup EXIT
 
 bash "$ROOT/tools/fetch_phy6252_sdk.sh"
-mkdir -p "$(dirname "$FINAL_OUT")"
+mkdir -p "$(dirname "$OUT")"
 
 build_keil() {
     for tool in cbuild fromelf; do
@@ -151,6 +147,8 @@ build_keil() {
         fi
     done
 
+    # This is intentionally the same application-image composition used by the
+    # hardware-proven 1.4.0 build. Factory data is never appended here.
     grep -v '^:00000001FF' "$REGIONS/ER_ROM_XIP" | grep -v '^:04000005' > "$OUT"
     grep -v '^:00000001FF' "$REGIONS/JUMP_TABLE" | grep -v '^:04000005' >> "$OUT"
     cat "$REGIONS/ER_IROM1" >> "$OUT"
@@ -205,21 +203,19 @@ build_gcc() {
 }
 
 if [ "$TOOLCHAIN" = "gcc" ]; then build_gcc; else build_keil; fi
-if [ ! -s "$APP_OUT" ]; then
-    echo "error: firmware build did not produce a non-empty HEX: $APP_OUT" >&2
+if [ ! -s "$OUT" ]; then
+    echo "error: firmware build did not produce a non-empty HEX: $OUT" >&2
     exit 1
 fi
 
-if [ "$PERSONALIZED" -eq 1 ]; then
-    STEM="${FINAL_OUT%.hex}"
+echo "hex: $OUT"
+echo "identity: application image only"
+
+if [ -n "$SERIAL" ] || [ -n "$FACTORY_BIN_INPUT" ]; then
+    STEM="${OUT%.hex}"
     FACTORY_OUT="$STEM.factory.bin"
     META_OUT="$STEM.identity.json"
-    FACTORY_ARGS=(
-        --binary-output "$FACTORY_OUT"
-        --merge-app-hex "$APP_OUT"
-        --flash-ready-output "$FINAL_OUT"
-        --metadata "$META_OUT"
-    )
+    FACTORY_ARGS=(--binary-output "$FACTORY_OUT" --metadata "$META_OUT")
     if [ -n "$FACTORY_BIN_INPUT" ]; then
         FACTORY_ARGS+=(--record-input "$FACTORY_BIN_INPUT")
     else
@@ -231,13 +227,10 @@ if [ "$PERSONALIZED" -eq 1 ]; then
         fi
     fi
     python3 "$ROOT/tools/make_factory_identity.py" "${FACTORY_ARGS[@]}"
-    [ -s "$FINAL_OUT" ] || { echo "error: flash-ready HEX was not produced" >&2; exit 1; }
-    echo "hex: $FINAL_OUT"
-    echo "identity: embedded factory sector"
+    [ -s "$FACTORY_OUT" ] || { echo "error: factory identity sidecar was not produced" >&2; exit 1; }
     echo "factory-bin: $FACTORY_OUT"
     echo "identity-meta: $META_OUT"
+    echo "flash: tools/flash_firmware.sh $OUT"
 else
-    echo "hex: $FINAL_OUT"
-    echo "identity: application-only (requires an existing factory sector)"
-    echo "NOTE: for the first flash use --serial N; otherwise BLE advertising is intentionally disabled."
+    echo "NOTE: no factory sidecar was emitted; this image only advertises on an already provisioned board."
 fi
