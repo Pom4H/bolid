@@ -53,7 +53,7 @@ for token in (
     'VCPKG_VERSION="2026.04.27"',
     "AC6_TOOLCHAIN_6_24_0",
     "KEMDK-COM0",
-    "vcpkg\" activate",
+    '"$vcpkg" activate',
     "CMSIS-Toolbox 2.14.1",
     "Arm Compiler 6.24.0",
 ):
