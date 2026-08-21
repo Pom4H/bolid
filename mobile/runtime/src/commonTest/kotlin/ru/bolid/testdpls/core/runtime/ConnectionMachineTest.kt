@@ -2,6 +2,7 @@ package ru.bolid.testdpls.core.runtime
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -21,49 +22,43 @@ class ConnectionMachineTest {
     @Test
     fun happyPathIsLinearAndReadyRequiresVerifiedIdentity() {
         var state: DeviceSession = DeviceSession.Offline
-        var t = ConnectionMachine.reduce(
+
+        state = ConnectionMachine.reduce(
             state,
             ConnectionEvent.ConnectRequested(endpoint, node),
         )
-        state = t.state
         assertIs<DeviceSession.Connecting>(state)
-        assertEquals(listOf(ConnectionEffect.OpenLink(endpoint, false)), t.effects)
 
-        state = ConnectionMachine.reduce(state, ConnectionEvent.LinkConnected).state
+        state = ConnectionMachine.reduce(state, ConnectionEvent.LinkConnected)
         assertIs<DeviceSession.Discovering>(state)
 
-        t = ConnectionMachine.reduce(state, ConnectionEvent.Subscribed(nonce))
-        state = t.state
+        state = ConnectionMachine.reduce(state, ConnectionEvent.Subscribed(nonce))
         assertIs<DeviceSession.Linked>(state)
-        assertIs<ConnectionEffect.SendHello>(t.effects.single())
 
         state = ConnectionMachine.reduce(
             state,
             ConnectionEvent.ChallengeReceived(challenge),
-        ).state
+        )
         assertIs<DeviceSession.Authenticating>(state)
 
-        t = ConnectionMachine.reduce(state, ConnectionEvent.Authenticated(auth))
-        state = t.state
+        state = ConnectionMachine.reduce(state, ConnectionEvent.Authenticated(auth))
         assertIs<DeviceSession.Synchronizing>(state)
-        assertEquals(listOf(ConnectionEffect.RequestState), t.effects)
 
         state = ConnectionMachine.reduce(
             state,
             ConnectionEvent.IdentityVerified(node),
-        ).state
+        )
         assertIs<DeviceSession.Online>(state)
     }
 
     @Test
     fun identityMismatchFailsClosed() {
         val state = DeviceSession.Synchronizing(endpoint, auth, node)
-        val transition = ConnectionMachine.reduce(
+        val next = ConnectionMachine.reduce(
             state,
             ConnectionEvent.IdentityVerified(NodeId(0x9999)),
         )
-        assertIs<DeviceSession.Failed>(transition.state)
-        assertEquals(listOf(ConnectionEffect.CloseLink), transition.effects)
+        assertIs<DeviceSession.Failed>(next)
     }
 
     @Test
@@ -75,9 +70,37 @@ class ConnectionMachineTest {
             DeviceSession.Recovering(node, endpoint),
         )
         states.forEach { state ->
-            val transition = ConnectionMachine.reduce(state, ConnectionEvent.LinkLost)
-            assertIs<DeviceSession.Recovering>(transition.state)
-            assertEquals(listOf(ConnectionEffect.OpenLink(endpoint, true)), transition.effects)
+            assertIs<DeviceSession.Recovering>(
+                ConnectionMachine.reduce(state, ConnectionEvent.LinkLost),
+            )
+        }
+    }
+
+    @Test
+    fun failedStateCannotBeRevivedByLinkFacts() {
+        val failed: DeviceSession = DeviceSession.Failed(endpoint, LinkFailure.Closed)
+        val afterAvailable = ConnectionMachine.reduce(failed, ConnectionEvent.BluetoothAvailable)
+        val afterLost = ConnectionMachine.reduce(failed, ConnectionEvent.LinkLost)
+
+        assertIs<DeviceSession.Failed>(afterAvailable)
+        assertFalse(afterAvailable is DeviceSession.Recovering)
+        assertEquals(DeviceSession.Offline, afterLost)
+    }
+
+    @Test
+    fun resetAlwaysReturnsOffline() {
+        val states = listOf<DeviceSession>(
+            DeviceSession.Connecting(endpoint, node),
+            DeviceSession.Discovering(endpoint, node),
+            DeviceSession.Linked(endpoint, nonce, node),
+            DeviceSession.Authenticating(endpoint, challenge, node),
+            DeviceSession.Synchronizing(endpoint, auth, node),
+            DeviceSession.Online(node, endpoint, auth),
+            DeviceSession.Recovering(node, endpoint),
+            DeviceSession.Failed(endpoint, LinkFailure.Closed),
+        )
+        states.forEach { state ->
+            assertEquals(DeviceSession.Offline, ConnectionMachine.reduce(state, ConnectionEvent.Reset))
         }
     }
 
@@ -114,9 +137,9 @@ class ConnectionMachineTest {
         var exercised = 0
         states.forEach { state ->
             events.forEach { event ->
-                val transition = ConnectionMachine.reduce(state, event)
+                val next = ConnectionMachine.reduce(state, event)
                 ++exercised
-                if (transition.state is DeviceSession.Online && state !is DeviceSession.Online) {
+                if (next is DeviceSession.Online && state !is DeviceSession.Online) {
                     assertTrue(
                         event is ConnectionEvent.IdentityVerified &&
                             state is DeviceSession.Synchronizing,
@@ -140,7 +163,7 @@ class ConnectionMachineTest {
             ConnectionEvent.LinkLost,
         )
         events.forEach { event ->
-            assertEquals(offline, ConnectionMachine.reduce(offline, event).state)
+            assertEquals(offline, ConnectionMachine.reduce(offline, event))
         }
     }
 }
