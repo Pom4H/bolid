@@ -197,9 +197,9 @@ jobs:
           bash tools/build_firmware.sh gcc tmp/test-dpls-firmverse.hex
       - name: Run production HEX in Firmverse
         id: firmverse
-        # Pin the Firmverse revision that models PHY6252 SPI flash Unique ID
-        # and the ROM LL base-timer helper used during production boot.
-        uses: Pom4H/firmverse@5dc70304456628d4d524a1e8b6292b2a175346a1
+        # Pin the Firmverse revision that models PHY6252 SPI flash Unique ID,
+        # ROM LL base-timer setup and the SDK's 4 MHz CurrentCount semantics.
+        uses: Pom4H/firmverse@078cb957bbe4b096e7a228611bfe6144c0d927c3
         with:
           firmware: tmp/test-dpls-firmverse.hex
           board: pb03f-kit
