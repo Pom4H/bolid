@@ -9,7 +9,6 @@ extern "C" {
 
 #define SBP_START_DEVICE_EVT 0x0001u
 #define SBP_DPLS_TIMER_EVT   0x0080u
-#define SBP_DPLS_LED_EVT     0x0200u
 
 void SimpleBLEPeripheral_Init(uint8 task_id);
 uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events);
