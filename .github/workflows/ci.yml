@@ -137,6 +137,7 @@ jobs:
           firmware: tmp/test-dpls-firmverse.hex
           board: pb03f-kit
           strict: 'true'
+          max-insns: '3000000'
           expect: |
             BLE HCI LE_SetAdvEnable enabled=1
           log: tmp/firmverse.log
