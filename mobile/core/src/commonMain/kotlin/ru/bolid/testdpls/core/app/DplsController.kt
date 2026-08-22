@@ -52,5 +52,4 @@ interface DplsController {
     fun eventLogCsv(): String
     fun eventLogTxt(): String
     fun formatEventTime(record: EventRecord): String
-    fun formatEventInstant(uptimeSeconds: Long): String
 }

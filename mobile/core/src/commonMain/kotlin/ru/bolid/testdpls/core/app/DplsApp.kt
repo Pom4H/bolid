@@ -1372,15 +1372,7 @@ private fun LogPage(state: DplsUiState, c: DplsController, share: (String, Strin
         }
     }
     val records = state.eventLog
-    val sessions = remember(records, state.deviceBootEpochSeconds, state.journalTimeAnchors) {
-        journalBootSessions(
-            records,
-            journalBootFirstSequences(records).lastOrNull(),
-            state.deviceBootEpochSeconds,
-            state.journalTimeAnchors,
-        )
-    }
-    val timeline = remember(records, sessions) { buildJournalTimeline(records, sessions) }
+    val timeline = remember(records) { buildJournalTimeline(records) }
     var bucketOverride by remember { mutableLongStateOf(0L) }
     val strip = remember(records, timeline, bucketOverride) {
         buildJournalStrip(records, timeline, bucketSeconds = bucketOverride.takeIf { it > 0L })
@@ -1519,21 +1511,8 @@ private fun LogPage(state: DplsUiState, c: DplsController, share: (String, Strin
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 itemsIndexed(records, key = { _, e -> e.sequence }) { index, e ->
-                    if (index > 0) {
-                        val newer = journalSessionFor(records[index - 1].sequence, sessions)
-                        val older = journalSessionFor(e.sequence, sessions)
-                        val crossedBoot = newer != null && older != null && newer.firstSequence != older.firstSequence
-                        val uptimeReboot = older == null && e.timestampSeconds > records[index - 1].timestampSeconds
-                        if (crossedBoot || uptimeReboot) {
-                            JournalBootDivider(
-                                colors,
-                                downtimeSeconds = if (older != null && newer != null) {
-                                    journalDowntimeSeconds(older, newer)
-                                } else {
-                                    null
-                                },
-                            )
-                        }
+                    if (index > 0 && e.type == 1) {
+                        JournalBootDivider(colors)
                     }
                     EventLogCard(e, c.formatEventTime(e), colors, isNew = newAfterSequence > 0L && e.sequence > newAfterSequence)
                 }
@@ -1581,21 +1560,14 @@ private fun LogPage(state: DplsUiState, c: DplsController, share: (String, Strin
 }
 
 @Composable
-private fun JournalBootDivider(colors: BolidColors, downtimeSeconds: Long? = null) {
-    val caption = if (downtimeSeconds != null) {
-        "простой ${journalDurationCaption(downtimeSeconds)}"
-    } else {
-        "предыдущее включение"
-    }
+private fun JournalBootDivider(colors: BolidColors) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(Modifier.weight(1f).height(1.dp).background(colors.line))
-        Text(caption, color = colors.muted, fontSize = 11.sp, maxLines = 1)
+        Text("включение устройства", color = colors.muted, fontSize = 11.sp, maxLines = 1)
         Box(Modifier.weight(1f).height(1.dp).background(colors.line))
     }
 }

@@ -66,7 +66,7 @@ static void update_now(dpls_server_t *s, uint32_t now_ms) {
 }
 
 static uint32_t event_timestamp_seconds(const dpls_server_t *s) {
-    return s->clock.valid ? s->clock.unix_seconds : s->now_ms / 1000u;
+    return s->clock.valid ? s->clock.unix_seconds : 0u;
 }
 
 static bool event_at_export_index(const dpls_server_t *s, uint16_t export_index, dpls_event_t *out) {

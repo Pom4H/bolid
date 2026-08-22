@@ -16,7 +16,6 @@ import ru.bolid.testdpls.core.domain.DiscoveredDevice
 import ru.bolid.testdpls.core.domain.DplsMode
 import ru.bolid.testdpls.core.domain.DplsUiState
 import ru.bolid.testdpls.core.domain.EventRecord
-import ru.bolid.testdpls.core.domain.JournalTimeAnchor
 import ru.bolid.testdpls.core.domain.SettingsOp
 import ru.bolid.testdpls.core.domain.UiTheme
 import ru.bolid.testdpls.core.protocol.DplsAdvertisement
@@ -97,7 +96,6 @@ class DplsClient(
     private var timeSyncAttempted = false
     private var logLoadPending = false
     private var drainLog = false
-    private var timeAnchors: List<JournalTimeAnchor> = emptyList()
 
     /** Делает безвредной отложенную работу от предыдущей попытки соединения. */
     private var linkGeneration = 0L
@@ -580,19 +578,11 @@ class DplsClient(
     }
 
     override fun formatEventTime(record: EventRecord): String =
-        journalEventTimeCaption(
-            record,
-            state.eventLog,
-            currentBootFirstSequence(),
-            state.deviceBootEpochSeconds,
-            timeAnchors,
-            platform::formatLocalDateTime,
-        )
-
-    override fun formatEventInstant(uptimeSeconds: Long): String {
-        val boot = state.deviceBootEpochSeconds ?: return ""
-        return platform.formatLocalDateTime(boot + uptimeSeconds)
-    }
+        if (eventTimestampBasis(record.timestampSeconds) == "utc") {
+            platform.formatLocalDateTime(record.timestampSeconds)
+        } else {
+            "Время не установлено"
+        }
 
     fun close() {
         disconnectInternal(clearSelection = true, clearVerifier = true)
@@ -996,8 +986,6 @@ class DplsClient(
             )
         }
         persistCachedVerifier()
-        loadTimeAnchors()
-        persistTimeAnchors()
         attemptTimeSync()
     }
 
@@ -1059,7 +1047,6 @@ class DplsClient(
                     "Состояние получено"
                 },
                 state = device,
-                deviceBootEpochSeconds = now / 1000 - device.uptimeSeconds,
                 identifyActive = false,
                 identifyLedLive = false,
                 identifyLedPhaseOffsetMs = 0,
@@ -1276,11 +1263,9 @@ class DplsClient(
 
     private fun publishJournal() {
         val snap = journal.snapshot()
-        if (snap.records.isNotEmpty()) rememberCurrentBootAnchor(snap.records)
         updateState {
             it.copy(
                 eventLog = snap.records,
-                journalTimeAnchors = timeAnchors,
                 logTotal = snap.total,
                 logHasMore = snap.hasMore,
                 logFirstTimestampSeconds = journal.firstTimestamp() ?: it.logFirstTimestampSeconds,
@@ -1553,31 +1538,6 @@ class DplsClient(
     private fun forgetSavedCredentials() {
         credentials.forget(session.nodeIdOrNull, currentBleAddress())
         updateState { it.copy(savedCredentials = false) }
-    }
-
-    private fun storageKeys(): List<String> = deviceStorageKeys(session.nodeIdOrNull, currentBleAddress())
-    private fun currentBootFirstSequence(): Long? = journalBootFirstSequences(state.eventLog).lastOrNull()
-
-    private fun rememberCurrentBootAnchor(records: List<EventRecord>) {
-        val epoch = state.deviceBootEpochSeconds ?: return
-        val first = journalBootFirstSequences(records).lastOrNull() ?: return
-        val last = records.maxOfOrNull(EventRecord::sequence) ?: return
-        timeAnchors = mergeJournalTimeAnchor(timeAnchors, JournalTimeAnchor(first, epoch, last))
-        persistTimeAnchors()
-    }
-
-    private fun loadTimeAnchors() {
-        var merged = timeAnchors
-        storageKeys().forEach { key ->
-            decodeJournalTimeAnchors(platform.readDeviceString("time.$key")).forEach { anchor -> merged = mergeJournalTimeAnchor(merged, anchor) }
-        }
-        timeAnchors = merged
-        updateState { it.copy(journalTimeAnchors = timeAnchors) }
-    }
-
-    private fun persistTimeAnchors() {
-        val encoded = encodeJournalTimeAnchors(timeAnchors)
-        storageKeys().forEach { platform.writeDeviceString("time.$it", encoded) }
     }
 
     private fun retainedUiState(status: String = "Готово к поиску", scanning: Boolean = false) = DplsUiState(

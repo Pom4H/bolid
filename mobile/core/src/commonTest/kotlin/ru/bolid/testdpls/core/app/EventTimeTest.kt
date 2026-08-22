@@ -11,8 +11,10 @@ class EventTimeTest {
     }
 
     @Test
-    fun preSyncTimestampRemainsUptime() {
-        assertEquals("uptime", eventTimestampBasis(3_661L))
-        assertEquals("+01:01:01", eventTimestampText(3_661L))
+    fun missingAndLegacyRelativeTimestampsAreUnknown() {
+        assertEquals("unknown", eventTimestampBasis(0L))
+        assertEquals("Время не установлено", eventTimestampText(0L))
+        assertEquals("unknown", eventTimestampBasis(3_661L))
+        assertEquals("Время не установлено", eventTimestampText(3_661L))
     }
 }

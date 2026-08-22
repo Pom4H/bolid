@@ -77,6 +77,7 @@ typedef enum {
 
 typedef struct {
     uint32_t sequence;
+    /* 0 = calendar time unknown; otherwise Unix UTC seconds. */
     uint32_t timestamp_seconds;
     uint8_t event_type;
     uint8_t parameter;

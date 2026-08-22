@@ -151,12 +151,22 @@ class SoftBleBridgeTest {
             dpls.uiState.value.logProgress == null && dpls.uiState.value.eventLog.isNotEmpty()
         }
         val first = dpls.uiState.value
+        val unknown = first.eventLog.firstOrNull { event -> event.timestampSeconds == 0L }
+            ?: fail("journal contains no pre-TIME_SYNC event: ${first.eventLog}")
+        assertEquals("Время не установлено", dpls.formatEventTime(unknown))
+        assertTrue(
+            first.eventLog.all { event ->
+                event.timestampSeconds == 0L ||
+                    event.timestampSeconds in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS
+            },
+            "journal must contain only UTC or zero: ${first.eventLog}",
+        )
         val synced = first.eventLog.firstOrNull { event ->
             event.timestampSeconds in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS
         } ?: fail("journal contains no post-TIME_SYNC event: ${first.eventLog}")
         val caption = dpls.formatEventTime(synced)
         assertEquals(services.formatLocalDateTime(synced.timestampSeconds), caption)
-        assertFalse(caption.contains("2083"), "post-sync timestamp was anchored twice: $caption")
+        assertFalse(caption.contains("2083"), "post-sync timestamp was transformed twice: $caption")
 
         val previousHead = first.eventLog.maxOf { it.sequence }
         roundTripMode(dpls, DplsMode.SHORT_2)
