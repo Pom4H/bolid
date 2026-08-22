@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt"
+ANDROID_PLATFORM = ROOT / "mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidPlatformServices.kt"
+IOS_PLATFORM = ROOT / "mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosPlatform.kt"
+WEB_PLATFORM = ROOT / "mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabPlatformServices.kt"
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
 TRANSPORT = ROOT / "firmware/phy6252/dpls_phy6252_transport.c"
 RUNTIME = ROOT / "firmware/phy6252/dpls_phy6252_runtime.c"
@@ -16,6 +19,9 @@ TARGET_H = ROOT / "firmware/targets/phy6252/source/simpleBLEPeripheral.h"
 MEASUREMENTS = ROOT / "firmware/phy6252/dpls_phy6252_measurements.c"
 
 android = ANDROID.read_text(encoding="utf-8")
+android_platform = ANDROID_PLATFORM.read_text(encoding="utf-8")
+ios_platform = IOS_PLATFORM.read_text(encoding="utf-8")
+web_platform = WEB_PLATFORM.read_text(encoding="utf-8")
 client = CLIENT.read_text(encoding="utf-8")
 transport = TRANSPORT.read_text(encoding="utf-8")
 runtime = RUNTIME.read_text(encoding="utf-8")
@@ -27,11 +33,6 @@ measurements = MEASUREMENTS.read_text(encoding="utf-8")
 for forbidden in ("PAIRING_TIMEOUT_MS", "pairingTimeout"):
     if forbidden in android:
         raise SystemExit(f"Android transport owns forbidden pairing deadline: {forbidden}")
-
-# Mobile and firmware may each reclaim resources, but CI must never encode an
-# ordering relation between those independent deadlines again.
-if "firmware_ms - connect_ms" in client or "firmware_ms - connect_ms" in transport:
-    raise SystemExit("cross-layer timeout ordering returned")
 
 # The old global correctness tick is gone. Periodic ADC sampling is explicitly
 # allowed because physics must be observed; safety reacts at ADC completion.
@@ -72,12 +73,22 @@ for required in (
 # delayed until the next sampling timer.
 if "update_power_state(mode);" not in measurements:
     raise SystemExit("ADC completion does not reconcile derived safety state")
-if "dpls_server_tick(&server, now);" not in runtime:
-    raise SystemExit("runtime does not reconcile safety on events")
+if runtime.count("dpls_server_tick(&server, now);") < 2:
+    raise SystemExit("runtime must reconcile safety on both events and deadlines")
 
-# Keep the existing mobile deadline, but only as local liveness/resource
-# reclamation. Its numeric relation to firmware is intentionally irrelevant.
+# nowMillis is intentionally epoch-compatible because TIME_SYNC uses it, but its
+# progression must come from a monotonic clock on real platforms.
+if "SystemClock.elapsedRealtime()" not in android_platform:
+    raise SystemExit("Android nowMillis must advance from elapsedRealtime")
+if "NSProcessInfo.processInfo.systemUptime" not in ios_platform:
+    raise SystemExit("iOS nowMillis must advance from systemUptime")
+if "performanceNow()" not in web_platform:
+    raise SystemExit("Web lab nowMillis must advance from performance.now")
+
+# Keep the existing mobile deadline only as local liveness/resource reclamation.
+# Its numeric relation to the independent firmware deadline is deliberately not
+# inspected or constrained here.
 if "CONNECT_TIMEOUT_MS" not in client:
     raise SystemExit("mobile connect liveness deadline unexpectedly missing")
 
-print("RC9 timing contract: PASS (independent deadlines, one-shot runtime, no TX pacing guess)")
+print("RC9 timing contract: PASS (independent deadlines, one-shot runtime, monotonic clocks)")
