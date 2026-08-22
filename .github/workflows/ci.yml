@@ -12,12 +12,9 @@ on:
         default: false
         type: boolean
 
-# Each PR synchronization validates exactly that pushed change-set. Do not cancel
-# an older run: otherwise a later firmware-only push could erase the only proof
-# for an earlier mobile change without selecting Android/iOS again.
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+# Every PR synchronize validates exactly that pushed change-set. Runs are
+# intentionally independent: a later firmware-only push must neither cancel nor
+# serialize the Android/iOS proof started by an earlier mobile change.
 
 jobs:
   smoke:
@@ -111,7 +108,7 @@ jobs:
             if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
             if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
 
-            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_power_ab|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
               firmware=true
             fi
 
