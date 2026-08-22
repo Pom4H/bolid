@@ -11,6 +11,7 @@
 #include "dpls_phy6252_transport.h"
 #include "dpls_server.h"
 #include "OSAL.h"
+#include "att.h"
 #include "log.h"
 #include <core_cm0.h>
 #include <string.h>
@@ -94,6 +95,18 @@ bool dpls_phy6252_runtime_flash_pending(void)
     return dpls_phy6252_storage_work_pending();
 }
 
+static uint8 receive_frame(const uint8 *data, uint16 length)
+{
+    /* Once a transaction staged security/settings persistence (or the domain
+     * entered a critical fault), this connection is quiescing. Reject all new
+     * application work before ATT acknowledges it. The already-queued response
+     * is allowed to drain, then runtime owns the disconnect. */
+    if (server.critical_fault || dpls_phy6252_storage_critical_pending() ||
+        factory_reset_commit_wait)
+        return ATT_ERR_INSUFFICIENT_RESOURCES;
+    return dpls_phy6252_transport_receive_frame(data, length);
+}
+
 static void schedule_storage_if_needed(void)
 {
     if (!dpls_phy6252_transport_connected_now() && dpls_phy6252_storage_work_pending())
@@ -104,8 +117,8 @@ static void disconnect_if_ready(void)
 {
     if (!dpls_phy6252_transport_connected_now() || !dpls_phy6252_transport_tx_idle()) return;
 
-    /* Runtime — единственный владелец физического disconnect. Domain сообщает
-     * только факт critical_fault; storage сообщает только critical dirty fact. */
+    /* Runtime is the only owner of physical disconnect. Domain reports only a
+     * critical fault; storage reports only a critical dirty fact. */
     if (server.critical_fault || dpls_phy6252_storage_critical_pending())
         dpls_phy6252_transport_disconnect(NULL);
 }
@@ -116,6 +129,8 @@ static void finish_factory_reset_if_ready(void)
         dpls_phy6252_storage_work_pending())
         return;
 
+    /* The only bond erase in production: physical button, link down, durable
+     * settings already committed. */
     if (!dpls_phy6252_transport_factory_forget_bonds()) return;
 
     factory_reset_commit_wait = false;
@@ -166,7 +181,7 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
 
     hal = server_hal();
     dpls_server_init(&server, &hal, now_ms());
-    (void)dpls_gatt_add_service(dpls_phy6252_transport_receive_frame);
+    (void)dpls_gatt_add_service(receive_frame);
     dpls_phy6252_supervisor_checkpoint();
     LOG("DPLS boot settings=%u\n",
         (unsigned)dpls_phy6252_storage_settings_state(NULL));
