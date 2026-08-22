@@ -6,8 +6,8 @@
 #include "dpls_phy6252_power.h"
 #include "dpls_phy6252_storage.h"
 #include "OSAL.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wunused-function"
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunused-function"
 #endif
 #include "adc.h"
 #include "error.h"
