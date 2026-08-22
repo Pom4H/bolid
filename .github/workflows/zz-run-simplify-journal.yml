@@ -20,11 +20,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 tools/fix_simplify_journal_script.py
           python3 tools/simplify_journal_time.py
           git diff --check
           git rm \
             .github/workflows/zz-simplify-journal-time.yml \
             .github/workflows/zz-run-simplify-journal.yml \
+            tools/fix_simplify_journal_script.py \
             tools/simplify_journal_time.py
           git add firmware mobile docs
           git config user.name "github-actions[bot]"
