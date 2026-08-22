@@ -11,8 +11,11 @@
 #include "peripheral.h"
 #include <string.h>
 
-#define DPLS_RX_QUEUE_DEPTH 2u
+/* Protocol v2 is strict request/response. One RX slot means there can never be
+ * hidden application backlog behind a transaction that commits durable state. */
+#define DPLS_RX_QUEUE_DEPTH 1u
 #define DPLS_RX_SLOT_SIZE 96u
+/* TX keeps one in-flight response plus exactly one queued response. */
 #define DPLS_TX_QUEUE_DEPTH 2u
 #define DPLS_TX_SLOT_SIZE 168u
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
@@ -99,8 +102,7 @@ uint8 dpls_phy6252_transport_receive_frame(const uint8 *data, uint16 length)
 {
     dpls_rx_slot_t *slot;
     if (!data || length == 0u || length > DPLS_RX_SLOT_SIZE) return ATT_ERR_INVALID_VALUE_SIZE;
-    /* Every accepted request may emit one response. Reserve that future TX slot
-     * now, before telling ATT that the write succeeded. */
+    /* Every accepted request reserves its future TX slot before ATT says OK. */
     if (rx.count >= DPLS_RX_QUEUE_DEPTH ||
         (uint8)(rx.count + tx.count) >= DPLS_TX_QUEUE_DEPTH)
         return ATT_ERR_INSUFFICIENT_RESOURCES;
@@ -178,6 +180,7 @@ void dpls_phy6252_transport_tick_security(uint32 now_ms)
 {
     if (connection_handle == INVALID_CONNHANDLE) return;
     if (dpls_phy6252_transport_encrypted(NULL)) { connection_had_encryption = true; return; }
+    /* Plaintext timeout is only resource reclamation; never a bond heuristic. */
     if (!connection_had_encryption && (uint32)(now_ms - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
         LOG("DPLS KILL plaintext link\n");
         (void)GAPRole_TerminateConnection();
