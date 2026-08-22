@@ -21,7 +21,7 @@ if(ENABLE_SANITIZERS)
             -fno-sanitize-recover=all
         )
     else()
-        message(FATAL_ERROR "ENABLE_SANITIZERS requires GCC or Clang")
+        message(FATAL_ERROR "ENABLE_SANITIZERS requires a GNU-compatible or Clang host compiler")
     endif()
 endif()
 
