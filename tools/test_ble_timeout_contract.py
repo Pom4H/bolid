@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""RC9 timing architecture invariants.
+"""RC9 timing and power architecture invariants.
 
 Time may bound waiting or schedule physical sampling, but correctness must not
-rely on one layer timing out before another layer.
+rely on one layer timing out before another layer. Sleep locks are explicit
+resource owners: link / dangerous outputs / ADC conversion series.
 """
 from pathlib import Path
 
@@ -17,6 +18,7 @@ RUNTIME = ROOT / "firmware/phy6252/dpls_phy6252_runtime.c"
 TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 TARGET_H = ROOT / "firmware/targets/phy6252/source/simpleBLEPeripheral.h"
 MEASUREMENTS = ROOT / "firmware/phy6252/dpls_phy6252_measurements.c"
+OUTPUTS = ROOT / "firmware/phy6252/dpls_phy6252_outputs.c"
 
 android = ANDROID.read_text(encoding="utf-8")
 android_platform = ANDROID_PLATFORM.read_text(encoding="utf-8")
@@ -28,6 +30,7 @@ runtime = RUNTIME.read_text(encoding="utf-8")
 target = TARGET.read_text(encoding="utf-8")
 target_h = TARGET_H.read_text(encoding="utf-8")
 measurements = MEASUREMENTS.read_text(encoding="utf-8")
+outputs = OUTPUTS.read_text(encoding="utf-8")
 
 # Android pairing must not introduce a second competing product deadline.
 for forbidden in ("PAIRING_TIMEOUT_MS", "pairingTimeout"):
@@ -76,6 +79,23 @@ if "update_power_state(mode);" not in measurements:
 if runtime.count("dpls_server_tick(&server, now);") < 2:
     raise SystemExit("runtime must reconcile safety on both events and deadlines")
 
+# PHY6252 power ownership is deliberate. MOD_USR0 is retained for the entire
+# connected session because real PB-03F/SDK 3.1.2 testing exposed an ADC/radio
+# sleep race. MOD_USR1 protects energized dangerous GPIO. MOD_USR2 is held only
+# while an ADC conversion series is active. Do not trade these reliability
+# barriers for lower current without a separate real-hardware proof.
+for owner in ("MOD_USR0", "MOD_USR1", "MOD_USR2"):
+    if f"hal_pwrmgr_register({owner}" not in target:
+        raise SystemExit(f"sleep owner registration missing: {owner}")
+if "hal_pwrmgr_lock(MOD_USR0)" not in target or "hal_pwrmgr_unlock(MOD_USR0)" not in target:
+    raise SystemExit("BLE link sleep guard MOD_USR0 must remain symmetric")
+if "hal_pwrmgr_lock(MOD_USR1)" not in outputs or "hal_pwrmgr_unlock(MOD_USR1)" not in outputs:
+    raise SystemExit("dangerous-output sleep guard MOD_USR1 missing")
+if "hal_pwrmgr_lock(MOD_USR2)" not in measurements or "hal_pwrmgr_unlock(MOD_USR2)" not in measurements:
+    raise SystemExit("ADC conversion sleep guard MOD_USR2 missing")
+if measurements.count("hal_pwrmgr_lock(MOD_USR2)") != 1:
+    raise SystemExit("ADC sleep lock must stay centralized in adc_sleep_guard")
+
 # nowMillis is intentionally epoch-compatible because TIME_SYNC uses it, but its
 # progression must come from a monotonic clock on real platforms.
 if "SystemClock.elapsedRealtime()" not in android_platform:
@@ -91,4 +111,4 @@ if "performanceNow()" not in web_platform:
 if "CONNECT_TIMEOUT_MS" not in client:
     raise SystemExit("mobile connect liveness deadline unexpectedly missing")
 
-print("RC9 timing contract: PASS (independent deadlines, one-shot runtime, monotonic clocks)")
+print("RC9 timing/power contract: PASS (independent deadlines, one-shot runtime, monotonic clocks, explicit sleep owners)")
