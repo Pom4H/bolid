@@ -100,11 +100,13 @@ static void schedule_storage_if_needed(void)
         osal_set_event(task_id, DPLS_PHY6252_STORAGE_EVT);
 }
 
-static void disconnect_for_critical_flash_if_ready(void)
+static void disconnect_if_ready(void)
 {
-    if (dpls_phy6252_transport_connected_now() &&
-        dpls_phy6252_storage_critical_pending() &&
-        dpls_phy6252_transport_tx_idle())
+    if (!dpls_phy6252_transport_connected_now() || !dpls_phy6252_transport_tx_idle()) return;
+
+    /* Runtime — единственный владелец физического disconnect. Domain сообщает
+     * только факт critical_fault; storage сообщает только critical dirty fact. */
+    if (server.critical_fault || dpls_phy6252_storage_critical_pending())
         dpls_phy6252_transport_disconnect(NULL);
 }
 
@@ -124,7 +126,7 @@ static void finish_factory_reset_if_ready(void)
 static void tick_factory_reset(uint32 now)
 {
     if (factory_reset_commit_wait) {
-        disconnect_for_critical_flash_if_ready();
+        disconnect_if_ready();
         return;
     }
 
@@ -144,7 +146,7 @@ static void tick_factory_reset(uint32 now)
     }
 
     factory_reset_commit_wait = true;
-    disconnect_for_critical_flash_if_ready();
+    disconnect_if_ready();
     schedule_storage_if_needed();
 }
 
@@ -195,7 +197,7 @@ void dpls_phy6252_runtime_process_rx(void)
 
     (void)dpls_server_receive(&server, frame, length, now_ms());
     dpls_phy6252_transport_consume_rx();
-    disconnect_for_critical_flash_if_ready();
+    disconnect_if_ready();
 }
 
 void dpls_phy6252_runtime_process_adc(void)
@@ -206,7 +208,7 @@ void dpls_phy6252_runtime_process_adc(void)
 void dpls_phy6252_runtime_process_tx(void)
 {
     dpls_phy6252_transport_process_tx();
-    disconnect_for_critical_flash_if_ready();
+    disconnect_if_ready();
 }
 
 void dpls_phy6252_runtime_process_storage(void)
@@ -224,7 +226,7 @@ void dpls_phy6252_runtime_process_storage(void)
 void dpls_phy6252_runtime_tx_confirmed(void)
 {
     dpls_phy6252_transport_tx_confirmed();
-    disconnect_for_critical_flash_if_ready();
+    disconnect_if_ready();
 }
 
 void dpls_phy6252_runtime_tick(void)
@@ -241,7 +243,7 @@ void dpls_phy6252_runtime_tick(void)
     dpls_phy6252_measurements_tick(connected, server.safety.mode);
     dpls_server_tick(&server, now);
     dpls_phy6252_transport_tick_tx(now);
-    disconnect_for_critical_flash_if_ready();
+    disconnect_if_ready();
     schedule_storage_if_needed();
     finish_factory_reset_if_ready();
 }
