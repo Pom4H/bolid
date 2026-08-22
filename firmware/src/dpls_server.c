@@ -14,6 +14,10 @@ enum {
     DPLS_ERROR_UNSUPPORTED = 5,
     DPLS_ERROR_LOG_READ = 6,
     DPLS_ERROR_SETUP_WINDOW_CLOSED = 7,
+    DPLS_ERROR_LINK_NOT_SECURE = 8,
+    DPLS_ERROR_ALREADY_CONFIGURED = 9,
+    DPLS_ERROR_HELLO_REQUIRED = 10,
+    DPLS_ERROR_SESSION_MISMATCH = 11,
 };
 
 enum {
@@ -202,6 +206,8 @@ void dpls_server_connected(dpls_server_t *s, uint32_t now_ms) {
     s->session.connected = true;
     s->session.authenticated = false;
     s->session.hello_received = false;
+    s->session.setup_completed = false;
+    s->session.setup_fingerprint = 0u;
     dpls_server_log(s, EVT_BLE_CONNECTED, 0);
 }
 
@@ -211,6 +217,8 @@ void dpls_server_disconnected(dpls_server_t *s, uint32_t now_ms) {
     s->session.connected = false;
     s->session.authenticated = false;
     s->session.hello_received = false;
+    s->session.setup_completed = false;
+    s->session.setup_fingerprint = 0u;
     memset(s->session.token, 0, sizeof(s->session.token));
     if (s->identify.active) stop_identify(s);
     force_normal(s, DPLS_RETURN_DISCONNECT);
@@ -512,9 +520,23 @@ static bool secure_link_ready(const dpls_server_t *s) {
            s->hal.link.encrypted(s->hal.context);
 }
 
+static uint32_t setup_payload_fingerprint(const uint8_t *payload, uint16_t length) {
+    uint32_t hash = 2166136261u;
+    uint16_t i;
+    for (i = 0u; i < length; ++i) {
+        hash ^= payload[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 static void handle_hello(dpls_server_t *s, const dpls_frame_t *f) {
-    if (!secure_link_ready(s) || f->payload_length != DPLS_AUTH_NONCE_SIZE) {
-        send_error(s, f->sequence, DPLS_ERROR_REJECTED);
+    if (!secure_link_ready(s)) {
+        send_error(s, f->sequence, DPLS_ERROR_LINK_NOT_SECURE);
+        return;
+    }
+    if (f->payload_length != DPLS_AUTH_NONCE_SIZE) {
+        send_error(s, f->sequence, DPLS_ERROR_INVALID_VALUE);
         return;
     }
     memcpy(s->session.client_nonce, f->payload, DPLS_AUTH_NONCE_SIZE);
@@ -524,13 +546,48 @@ static void handle_hello(dpls_server_t *s, const dpls_frame_t *f) {
 
 static void handle_setup(dpls_server_t *s, const dpls_frame_t *f) {
     char name[DPLS_NAME_MAX + 1u];
+    dpls_settings_state_t settings_state;
     uint8_t name_length;
     uint16_t expected_length;
+    uint32_t fingerprint;
 
-    if (!secure_link_ready(s) || s->hal.settings.state(s->hal.context) != DPLS_SETTINGS_EMPTY ||
-        !s->session.hello_received || f->payload_length < 54u ||
-        rd32(f->payload) != s->session.session_id) {
-        send_error(s, f->sequence, DPLS_ERROR_REJECTED);
+    if (!secure_link_ready(s)) {
+        send_error(s, f->sequence, DPLS_ERROR_LINK_NOT_SECURE);
+        return;
+    }
+    if (f->payload_length < 54u) {
+        send_error(s, f->sequence, DPLS_ERROR_INVALID_VALUE);
+        return;
+    }
+    if (rd32(f->payload) != s->session.session_id) {
+        send_error(s, f->sequence, DPLS_ERROR_SESSION_MISMATCH);
+        return;
+    }
+
+    fingerprint = setup_payload_fingerprint(f->payload, f->payload_length);
+    if (s->session.setup_completed) {
+        if (fingerprint == s->session.setup_fingerprint) {
+            /* The first SETUP may already have changed settings_state to VALID
+             * while a duplicate request was sitting in the RX queue. Retrying
+             * the exact transaction is success, never a false "already set". */
+            send_auth_result(s, f->sequence, DPLS_AUTH_SETUP_COMPLETE, 0);
+        } else {
+            send_error(s, f->sequence, DPLS_ERROR_ALREADY_CONFIGURED);
+        }
+        return;
+    }
+
+    settings_state = s->hal.settings.state(s->hal.context);
+    if (settings_state == DPLS_SETTINGS_VALID) {
+        send_error(s, f->sequence, DPLS_ERROR_ALREADY_CONFIGURED);
+        return;
+    }
+    if (settings_state == DPLS_SETTINGS_CORRUPT) {
+        send_error(s, f->sequence, DPLS_ERROR_STORAGE);
+        return;
+    }
+    if (!s->session.hello_received) {
+        send_error(s, f->sequence, DPLS_ERROR_HELLO_REQUIRED);
         return;
     }
     if (elapsed(s->now_ms, s->boot_ms + DPLS_SETUP_WINDOW_MS)) {
@@ -551,6 +608,8 @@ static void handle_setup(dpls_server_t *s, const dpls_frame_t *f) {
         send_error(s, f->sequence, DPLS_ERROR_STORAGE);
         return;
     }
+    s->session.setup_completed = true;
+    s->session.setup_fingerprint = fingerprint;
     s->session.hello_received = false;
     send_auth_result(s, f->sequence, DPLS_AUTH_SETUP_COMPLETE, 0);
     dpls_server_log(s, EVT_PASSWORD_SET, 0);
@@ -574,9 +633,16 @@ static void block_authentication(dpls_server_t *s, const dpls_frame_t *f) {
 }
 
 static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
-    if (!secure_link_ready(s) || !s->session.hello_received ||
-        f->payload_length != DPLS_AUTH_NONCE_SIZE + DPLS_AUTH_PROOF_SIZE) {
-        send_error(s, f->sequence, DPLS_ERROR_REJECTED);
+    if (!secure_link_ready(s)) {
+        send_error(s, f->sequence, DPLS_ERROR_LINK_NOT_SECURE);
+        return;
+    }
+    if (!s->session.hello_received) {
+        send_error(s, f->sequence, DPLS_ERROR_HELLO_REQUIRED);
+        return;
+    }
+    if (f->payload_length != DPLS_AUTH_NONCE_SIZE + DPLS_AUTH_PROOF_SIZE) {
+        send_error(s, f->sequence, DPLS_ERROR_INVALID_VALUE);
         return;
     }
     if (auth_block_active(s, s->now_ms)) {
