@@ -21,6 +21,11 @@
 #define DPLS_TX_SLOT_SIZE 168u
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
 #define DPLS_LINK_ENCRYPT_TIMEOUT_MS 60000u
+/* Transient ATT backpressure is a liveness concern, not a correctness clock.
+ * Retry with bounded exponential backoff so a busy stack cannot create a spin
+ * loop or a high wakeup rate. */
+#define DPLS_TX_RETRY_MIN_MS 20u
+#define DPLS_TX_RETRY_MAX_MS 160u
 
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
 typedef struct {
@@ -33,6 +38,8 @@ typedef struct {
     uint8 head, tail, count;
     bool in_flight;
     uint32 in_flight_since_ms;
+    uint32 retry_at_ms;
+    uint16 retry_delay_ms;
 } dpls_tx_queue_t;
 
 static uint8 task_id;
@@ -54,28 +61,62 @@ static uint32 earlier_deadline(uint32 now_ms, uint32 current, uint32 candidate)
     return (int32_t)(candidate - now_ms) < (int32_t)(current - now_ms) ? candidate : current;
 }
 
+static void reset_retry(void)
+{
+    tx.retry_at_ms = 0u;
+    tx.retry_delay_ms = DPLS_TX_RETRY_MIN_MS;
+}
+
+static void schedule_retry(uint32 now_ms)
+{
+    uint16 delay = tx.retry_delay_ms == 0u ? DPLS_TX_RETRY_MIN_MS : tx.retry_delay_ms;
+    tx.retry_at_ms = now_ms + delay;
+    tx.retry_delay_ms = delay >= DPLS_TX_RETRY_MAX_MS / 2u
+        ? DPLS_TX_RETRY_MAX_MS
+        : (uint16)(delay * 2u);
+}
+
 static void tx_complete_head(void)
 {
-    if (tx.count == 0u) { tx.in_flight = false; return; }
+    if (tx.count == 0u) { tx.in_flight = false; reset_retry(); return; }
     tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
     --tx.count;
     tx.in_flight = false;
+    reset_retry();
 }
 
 static void tx_pump(void)
 {
     bStatus_t rc;
+    uint32 now;
+    bool confirmation;
     if (tx.in_flight || tx.count == 0u || connection_handle == INVALID_CONNHANDLE) return;
+
+    now = (uint32)osal_GetSystemClock();
+    if (tx.retry_at_ms != 0u && !due(now, tx.retry_at_ms)) return;
+    tx.retry_at_ms = 0u;
+
     rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
                                    tx.slots[tx.head].length, task_id);
     if (rc == SUCCESS) {
-        /* RC9: every production TX is an indication. It remains in flight until
-         * ATT_HANDLE_VALUE_CFM or the explicit confirmation deadline. */
-        tx.in_flight = true;
-        tx.in_flight_since_ms = (uint32)osal_GetSystemClock();
+        confirmation = dpls_gatt_needs_confirmation(connection_handle);
+        if (confirmation) {
+            tx.in_flight = true;
+            tx.in_flight_since_ms = now;
+            reset_retry();
+        } else {
+            /* Notifications have no ATT confirmation by definition. SUCCESS is
+             * the host-boundary completion; reliability above that boundary is
+             * request retry + idempotent server handling, never a sleep(80ms). */
+            tx_complete_head();
+            if (tx.count != 0u) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
+        }
         return;
     }
-    if (rc == bleMemAllocError || rc == blePending || rc == MSG_BUFFER_NOT_AVAIL || rc == bleNotConnected) return;
+    if (rc == bleMemAllocError || rc == blePending || rc == MSG_BUFFER_NOT_AVAIL || rc == bleNotConnected) {
+        schedule_retry(now);
+        return;
+    }
     LOG("DPLS TX drop t=%02x rc=%u\n", tx.slots[tx.head].length > 1u ? tx.slots[tx.head].data[1] : 0u, rc);
     tx_complete_head();
     if (tx.count != 0u) osal_set_event(task_id, DPLS_PHY6252_TX_EVT);
@@ -89,6 +130,7 @@ void dpls_phy6252_transport_init(uint8 new_task_id)
     connection_had_encryption = false;
     memset(&rx, 0, sizeof(rx));
     memset(&tx, 0, sizeof(tx));
+    reset_retry();
 }
 
 void dpls_phy6252_transport_connected(uint16 conn_handle)
@@ -105,6 +147,7 @@ void dpls_phy6252_transport_disconnected(void)
     connection_had_encryption = false;
     memset(&rx, 0, sizeof(rx));
     memset(&tx, 0, sizeof(tx));
+    reset_retry();
 }
 
 bool dpls_phy6252_transport_connected_now(void) { return connection_handle != INVALID_CONNHANDLE; }
@@ -184,16 +227,22 @@ void dpls_phy6252_transport_check_deadlines(uint32 now_ms)
     } else if (!connection_had_encryption &&
                due(now_ms, connected_at_ms + DPLS_LINK_ENCRYPT_TIMEOUT_MS)) {
         /* This timeout only reclaims an unauthenticated radio resource. It is
-         * not ordered against any mobile timeout and never implies stale keys. */
+         * independent of mobile timeout ordering and never implies stale keys. */
         LOG("DPLS KILL plaintext link\n");
         (void)GAPRole_TerminateConnection();
         return;
     }
 
-    if (tx.in_flight && due(now_ms, tx.in_flight_since_ms + DPLS_TX_CONFIRM_TIMEOUT_MS)) {
-        LOG("DPLS TX confirmation timeout\n");
-        (void)GAPRole_TerminateConnection();
+    if (tx.in_flight) {
+        if (due(now_ms, tx.in_flight_since_ms + DPLS_TX_CONFIRM_TIMEOUT_MS)) {
+            LOG("DPLS TX confirmation timeout\n");
+            (void)GAPRole_TerminateConnection();
+        }
+        return;
     }
+
+    if (tx.count != 0u && tx.retry_at_ms != 0u && due(now_ms, tx.retry_at_ms))
+        tx_pump();
 }
 
 uint32 dpls_phy6252_transport_next_deadline_ms(uint32 now_ms)
@@ -205,6 +254,8 @@ uint32 dpls_phy6252_transport_next_deadline_ms(uint32 now_ms)
         next = earlier_deadline(now_ms, next, connected_at_ms + DPLS_LINK_ENCRYPT_TIMEOUT_MS);
     if (tx.in_flight)
         next = earlier_deadline(now_ms, next, tx.in_flight_since_ms + DPLS_TX_CONFIRM_TIMEOUT_MS);
+    else if (tx.count != 0u && tx.retry_at_ms != 0u)
+        next = earlier_deadline(now_ms, next, tx.retry_at_ms);
     return next;
 }
 
