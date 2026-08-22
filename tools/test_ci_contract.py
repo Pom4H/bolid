@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,13 @@ vcpkg = json.loads((ROOT / "firmware/targets/phy6252/vcpkg-configuration.json").
 
 for script in (ROOT / "tools/build_firmware.sh", ROOT / "tools/flash_firmware.sh"):
     subprocess.run(["bash", "-n", str(script)], check=True)
+
+if not re.fullmatch(r"[0-9a-f]{40}", FIRMVERSE_SHA):
+    raise SystemExit("Firmverse must be pinned by a full immutable commit SHA")
+if ci.count(f"Pom4H/firmverse@{FIRMVERSE_SHA}") != 1:
+    raise SystemExit("CI must reference the pinned Firmverse revision exactly once")
+if harness.count(f"ref: {FIRMVERSE_SHA}") != 1:
+    raise SystemExit("flash harness must reference the same Firmverse revision exactly once")
 
 for token in (
     "workflow_dispatch:",
@@ -41,9 +49,6 @@ for token in (
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
-
-if f"ref: {FIRMVERSE_SHA}" not in harness:
-    raise SystemExit("flash harness is not pinned to the same Firmverse revision")
 
 for token in (
     '"$EVENT_ACTION" == "synchronize"',
