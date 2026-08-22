@@ -1,125 +1,168 @@
 # RC9: timing, reliability and power invariants
 
-RC9 не меняет продуктовый протокол и не пытается оптимизировать PHY6252 ценой уже доказанной стабильности. Цель релиза уже: убрать зависимость корректности от порядка таймаутов и одновременно уменьшить лишние пробуждения CPU.
+RC9 сохраняет product protocol v2, но меняет runtime вокруг него: корректность больше не зависит от порядка независимых таймеров, а idle-состояние не должно создавать постоянную CPU/radio activity.
 
 Главное правило:
 
-> Время может ограничивать ожидание и задавать частоту физического измерения, но правильность состояния не зависит от того, какой независимый таймер сработал первым.
+> Время может ограничивать ожидание и задавать частоту физического измерения, но правильность состояния не зависит от того, какой независимый timer/event пришёл первым.
 
-## Один runtime timer вместо correctness polling
+## Один application timer
 
-В RC8 target shell будил runtime фиксированно раз в 1 секунду при BLE link и раз в 5 секунд без link. Этим же тиком проверялись safety deadlines, transport deadlines, factory reset и запуск ADC.
+В target существует один replaceable `SBP_DPLS_TIMER_EVT`. `dpls_phy6252_runtime_next_wakeup_ms()` выбирает ближайшее реальное событие:
 
-В RC9 target содержит один replaceable `SBP_DPLS_TIMER_EVT`. Runtime вычисляет ближайший абсолютный monotonic deadline через `dpls_phy6252_runtime_next_wakeup_ms()`. После любого события, которое меняет набор deadlines, target переустанавливает этот one-shot timer.
-
-В ближайший wakeup входят:
-
-- следующий ADC sample;
-- 5-минутный deadline опасного режима;
-- 10-секундный deadline authenticated activity в опасном режиме;
+- ADC sample;
+- следующий LED edge;
+- 5-минутный dangerous-mode deadline;
+- 10-секундный authenticated-activity deadline dangerous mode;
 - identify deadline;
-- plaintext-link resource deadline;
+- plaintext-link reclamation deadline;
 - ATT indication confirmation deadline;
 - bounded ATT retry deadline;
-- физический factory-reset hold deadline.
+- physical factory-reset hold deadline.
 
-Периодическим остаётся только наблюдение физики:
+Отдельный LED timer удалён. LED state machine возвращает точное время до следующего фронта; старый adapter cap 250 ms, который превращал длинную паузу в 4 Hz wake source, удалён.
 
-- `1000 ms` во время BLE session;
-- `5000 ms` вне BLE session.
+## Adaptive ADC cadence
 
-Это sampling cadence, а не application correctness tick.
+ADC остаётся периодическим только потому, что физику нужно наблюдать. Частота зависит от риска:
 
-## Event-driven safety
+| Состояние | Интервал |
+| --- | ---: |
+| dangerous mode | 250 ms |
+| reserve / reserve-low / auto-isolation condition | 1000 ms |
+| connected authenticated NORMAL | 2000 ms |
+| disconnected stable NORMAL | 5000 ms |
 
-`dpls_server_tick()` теперь вызывается не только на deadline wakeup, но и после semantic RX и после каждого ADC completion.
+После RX или ADC runtime может только приблизить следующий measurement deadline, если состояние стало более опасным. Поэтому переход в dangerous state не ждёт старого idle interval.
 
-Поэтому изменение `reserve_low`, measurement validity или real-short-derived state влияет на safety сразу после получения свежего физического измерения. Дополнительной задержки до следующего 1 Hz application tick больше нет.
-
-Коллизии событий разрешаются pure policy. Например, если 5-минутный mode deadline и session deadline наступили в один момент, результат детерминирован. Если одновременно появился физический fail-safe факт, физическая причина имеет приоритет. Это закреплено `test_deadline_collision_precedence()`.
+`dpls_server_tick()` вызывается до и после semantic RX, после ADC completion и на deadline wake. Уже истёкший deadline нельзя «оживить» поздним authenticated packet.
 
 ## BLE TX без guessed completion
 
-RC8 использовал `80 ms` как предполагаемое завершение notification. RC9 удаляет `DPLS_TX_NOTIFY_PACE_MS`.
+`DPLS_TX_NOTIFY_PACE_MS = 80 ms` удалён.
 
-Два допустимых пути:
+- indication остаётся `in_flight` до реального `ATT_HANDLE_VALUE_CFM`;
+- Samsung-compatible CCCD `0x03` path использует notification; `GATT_Notification(...)=SUCCESS` считается completion на ATT host boundary;
+- transient ATT pressure использует bounded backoff 20→40→80→160 ms;
+- application delivery выше notification boundary обеспечивается request timeout/retry и idempotent server semantics.
 
-1. ATT indication: frame остаётся `in_flight` до настоящего `ATT_HANDLE_VALUE_CFM`; если confirmation не приходит за 2 секунды, link освобождается через disconnect.
-2. Samsung-compatible notification: `GATT_Notification(...)=SUCCESS` означает завершение на ATT host boundary. Дополнительного искусственного ожидания нет.
+## Adaptive BLE connection profile
 
-Samsung workaround сохранён намеренно: SM-A135F в уже проверенном пути требует CCCD `0x03`, поэтому indication-only был бы недопустимой регрессией ради архитектурной чистоты.
+Connection parameters принадлежат runtime policy, а не независимому vendor timer. `GAPROLE_PARAM_UPDATE_ENABLE` остаётся выключенным; target вызывает `GAPRole_SendUpdateParam()` только при semantic profile change.
 
-Transient `blePending` / allocation pressure не создают spin loop. Transport использует bounded exponential backoff 20→40→80→160 ms и сообщает ближайший retry runtime scheduler.
+### ACTIVE
 
-## Независимые timeout domains
+Используется до authentication и во всех dangerous/quiescing состояниях:
 
-Mobile connect timeout и firmware plaintext-link timeout остаются локальными механизмами liveness/resource reclamation. RC9 больше не требует численного порядка между ними.
+- min interval: 30 ms;
+- max interval: 50 ms;
+- slave latency: 0.
 
-Удалён старый CI-инвариант `mobile timeout < firmware timeout минимум на 5 секунд`. Новый gate запрещает возвращать такую зависимость.
+### IDLE
 
-Поздний callback после локального timeout должен быть harmless благодаря lifecycle generation/state checks, а firmware не делает destructive conclusions о bond по timeout.
+Разрешён только для authenticated NORMAL:
 
-## Monotonic epoch clock на mobile
+- min interval: 120 ms;
+- max interval: 150 ms;
+- slave latency: 3.
 
-`DplsPlatformServices.nowMillis()` остаётся epoch-compatible, потому что это значение используется для `TIME_SYNC`, но его ход теперь монотонный:
+Worst-case пропуск нескольких connection events остаётся в пределах порядка 600 ms, то есть профиль экономит radio activity без намеренного выхода за 1-секундный control budget.
 
-- Android: `System.currentTimeMillis()` берётся один раз как epoch anchor, дальше используется `SystemClock.elapsedRealtime()`;
-- iOS: wall clock берётся один раз, дальше используется `NSProcessInfo.systemUptime`;
-- web lab: `Date.now()` anchor + `performance.now()` delta.
+## Mobile traffic follows risk
 
-Поэтому telemetry stale, identify phase и другие elapsed-time решения не прыгают при NTP или ручном изменении часов.
+Телефон больше не создаёт одинаковый 1 Hz traffic во всех состояниях.
 
-## Power ownership
+| Работа | dangerous | NORMAL |
+| --- | ---: | ---: |
+| `STATE_GET` cadence | 1 s | 5 s |
+| telemetry stale threshold | 3 s | 15 s |
+| `KEEP_ALIVE` | при необходимости, 3 s | не отправляется |
+| RSSI | identify: 350 ms | обычная session: 10 s |
 
-RC9 уменьшает software wakeups, но не снимает уже доказанные hardware safety barriers.
+При mode change session loop re-arm выполняется сразу, поэтому NORMAL→dangerous не ждёт окончания старой 5-секундной паузы.
 
-PHY6252 использует три независимых sleep owner:
+## Centralized power ownership
 
-| Owner | Ресурс | Когда удерживается |
+`dpls_phy6252_power.c` — единственный first-party владелец `hal_pwrmgr_register/lock/unlock`.
+
+| Reason | SDK module | Удерживается |
 | --- | --- | --- |
-| `MOD_USR0` | BLE link stability | вся физическая BLE session |
-| `MOD_USR1` | dangerous outputs | только пока опасный GPIO может быть energized |
-| `MOD_USR2` | ADC series | только во время короткой серии ADC conversions |
+| `DPLS_POWER_LINK` | `MOD_USR0` | только в A/B reference build |
+| `DPLS_POWER_OUTPUT` | `MOD_USR1` | пока dangerous GPIO может быть energized |
+| `DPLS_POWER_ADC` | `MOD_USR2` | только во время ADC conversion series |
 
-`MOD_USR0` пока нельзя удалять ради снижения потребления. На реальной PB-03F с SDK 3.1.2 уже наблюдался ADC/radio sleep race, который замораживал OSAL loop / приводил к watchdog resets. Снятие этого lock требует отдельного hardware proof, а не только green CI.
+Power manager считает acquire count и суммарное время удержания каждого constraint.
 
-Также сохраняется retention `SRAM0 | SRAM1 | SRAM2`: текущий scatter размещает живые секции во всех трёх банках, и уже был реальный warm-reset loop при неполной retention.
+### Connected sleep candidate
 
-Следовательно RC9 оптимизирует то, что можно оптимизировать безопасно: количество лишних timer wakeups, spin/retry behavior и software race-space. Минимизация connected-session current за счёт deep sleep — отдельная hardware-задача после стабилизации release.
+Production RC9 по умолчанию собирается с:
+
+```text
+DPLS_CONNECTED_SLEEP=1
+DEBUG_INFO=0
+```
+
+То есть установленный BLE link сам по себе больше не держит `MOD_USR0`. BLE controller/OSAL должен будить ядро на свои события; ADC и dangerous outputs держат независимые короткие constraints.
+
+Исторический safety barrier не удалён из кода. `DPLS_CONNECTED_SLEEP=0` возвращает link-wide `MOD_USR0` и используется как reference build для hardware A/B. Это позволяет отличить эффект deep sleep от остальных изменений без source edits.
+
+SRAM retention `SRAM0 | SRAM1 | SRAM2` не меняется: частичная retention уже приводила к warm-reset loop.
+
+## Production logging
+
+Pinned PHY62XX SDK превращает `LOG(...)` в `dbg_printf(...)` при `DEBUG_INFO=1`. Для production/current measurements GCC и AC6 теперь используют `DEBUG_INFO=0`, поэтому application UART trace не искажает ток и timing.
+
+Debug trace включается только явным diagnostic build override.
+
+## Durable storage
+
+Устройство ещё pre-series, поэтому RC9 удаляет migration из rc3/rc4 single-copy settings. Существует один текущий формат:
+
+- CRC-protected dual-slot settings A/B;
+- отсутствуют оба слота → `EMPTY`;
+- присутствует повреждённая durable запись без валидного winner → `CORRUPT`;
+- старый SNV record не может воскресить credentials.
+
+Flash writer остаётся единственным и выполняется только offline. Journal dirty blocks сами по себе не разрывают live BLE session; critical settings/auth persistence проходит controlled quiesce.
 
 ## CI invariants
 
-`tools/test_ble_timeout_contract.py` в RC9 проверяет:
+Software gates запрещают вернуть:
 
-- отсутствие глобального `DPLS_TICK_MS` / `DPLS_TICK_IDLE_MS` correctness poll;
-- наличие одного replaceable runtime timer;
-- отсутствие `DPLS_TX_NOTIFY_PACE_MS`;
-- наличие explicit transport deadlines и bounded retry backoff;
-- safety reconciliation в ADC event path;
-- monotonic clock progression Android/iOS/web;
-- отсутствие дополнительного Android pairing timeout;
-- сохранение трёх PHY6252 sleep owners и симметричных lock/unlock barriers;
-- отсутствие численной зависимости mobile timeout от firmware timeout.
+- global correctness tick или второй LED timer;
+- direct `hal_pwrmgr_*` вне power manager;
+- runtime heap в first-party production firmware;
+- 80 ms notification pacing;
+- fixed 1 Hz NORMAL mobile polling;
+- 1 Hz background RSSI polling;
+- KEEP_ALIVE в NORMAL;
+- pre-series legacy settings migration;
+- production `DEBUG_INFO=1`;
+- потерю low-power/reference A/B build pair;
+- численную cross-layer timeout ordering dependency.
 
-Host safety tests дополнительно проверяют collision precedence и fail-safe state space.
+CI выбирает Android/iOS/firmware по изменённым областям. PR synchronize анализирует previous PR head → new PR head, поэтому старый mobile commit не пересобирается после каждого firmware-only push. Incremental proof нельзя отменять последующим unrelated push.
 
-## Hardware release gate
+## Что остаётся доказать на железе
 
-Green software CI всё ещё недостаточен для утверждения connected-session power и PHY6252 sleep stability. Перед признанием RC9 hardware-ready нужен физический smoke минимум:
+`DPLS_CONNECTED_SLEEP=1` — намеренно hardware candidate, а не уже доказанный факт. На PHY6252/SDK 3.1.2 ранее наблюдалась sleep/radio/ADC нестабильность, поэтому release остаётся DRAFT до A/B current + reliability test.
+
+Минимальный gate:
 
 ```text
 flash + readback
 → cold boot
 → advertise
 → pair/auth
-→ все опасные modes + NORMAL
+→ authenticated NORMAL idle
+→ все dangerous modes + NORMAL
 → reserve/measurement fail-safe
-→ rename/password persistence
-→ 10 × disconnect/reconnect
+→ reconnect ×10
 → power cycle
-→ reconnect/auth
-→ длительная session без watchdog/warm reset
-→ измерение тока idle / connected / reserve-source
+→ long connected idle/session
+→ отсутствие watchdog/warm reset
+→ current measurements
+→ low-power vs link-guard A/B
 ```
 
-Любая будущая попытка снять `MOD_USR0` или уменьшить SRAM retention должна проходить этот hardware gate отдельно.
+Точный протокол: `docs/rc9-power-measurement.md`.
