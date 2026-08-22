@@ -14,20 +14,45 @@
 #include "att.h"
 #include "log.h"
 #include <core_cm0.h>
+#include <stdint.h>
 #include <string.h>
 
 #define DPLS_HW_REVISION 2u
 #define DPLS_FACTORY_RESET_HOLD_MS 5000u
+/* These are sensor sampling cadences, not correctness ticks. Safety, transport
+ * and factory-reset deadlines are independently scheduled as one-shot wakeups. */
+#define DPLS_MEASUREMENT_ACTIVE_MS 1000u
+#define DPLS_MEASUREMENT_IDLE_MS 5000u
 
 static dpls_server_t server;
 static uint8 task_id;
 static bool factory_reset_armed;
 static bool factory_reset_commit_wait;
 static uint32 factory_reset_started_ms;
+static uint32 next_measurement_ms;
 
 static uint32 now_ms(void)
 {
     return (uint32)osal_GetSystemClock();
+}
+
+static bool due(uint32 now, uint32 deadline)
+{
+    return (int32_t)(now - deadline) >= 0;
+}
+
+static uint32 earlier_deadline(uint32 now, uint32 current, uint32 candidate)
+{
+    if (candidate == 0u) return current;
+    if (current == 0u) return candidate;
+    return (int32_t)(candidate - now) < (int32_t)(current - now) ? candidate : current;
+}
+
+static uint32 measurement_interval_ms(void)
+{
+    return dpls_phy6252_transport_connected_now()
+        ? DPLS_MEASUREMENT_ACTIVE_MS
+        : DPLS_MEASUREMENT_IDLE_MS;
 }
 
 static void device_info(void *context, dpls_device_info_t *out)
@@ -136,7 +161,7 @@ static void finish_factory_reset_if_ready(void)
     NVIC_SystemReset();
 }
 
-static void tick_factory_reset(uint32 now)
+static void check_factory_reset(uint32 now)
 {
     if (factory_reset_commit_wait) {
         disconnect_if_ready();
@@ -148,7 +173,7 @@ static void tick_factory_reset(uint32 now)
         factory_reset_armed = false;
         return;
     }
-    if ((uint32)(now - factory_reset_started_ms) < DPLS_FACTORY_RESET_HOLD_MS) return;
+    if (!due(now, factory_reset_started_ms + DPLS_FACTORY_RESET_HOLD_MS)) return;
 
     factory_reset_armed = false;
     dpls_phy6252_outputs_safe_normal(NULL);
@@ -163,9 +188,34 @@ static void tick_factory_reset(uint32 now)
     schedule_storage_if_needed();
 }
 
+static uint32 server_next_deadline_ms(uint32 now)
+{
+    uint32 next = 0u;
+
+    if (server.identify.active)
+        next = earlier_deadline(now, next, server.identify.deadline_ms);
+
+    if (server.safety.mode != DPLS_MODE_NORMAL) {
+        next = earlier_deadline(now, next, server.safety.mode_deadline_ms);
+        if (!server.session.connected || !server.session.authenticated) {
+            /* Event handlers normally force NORMAL synchronously. Keep an
+             * immediate deadline as a fail-safe invariant if they ever regress. */
+            next = earlier_deadline(now, next, now);
+        } else {
+            next = earlier_deadline(
+                now,
+                next,
+                server.session.last_authenticated_activity_ms + DPLS_SAFETY_SESSION_TIMEOUT_MS
+            );
+        }
+    }
+    return next;
+}
+
 void dpls_phy6252_runtime_init(uint8 new_task_id)
 {
     dpls_hal_t hal;
+    uint32 now;
     task_id = new_task_id;
 
     dpls_phy6252_outputs_init();
@@ -173,12 +223,14 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
     dpls_phy6252_transport_init(task_id);
     dpls_phy6252_measurements_init(task_id);
 
+    now = now_ms();
     factory_reset_armed = dpls_phy6252_outputs_factory_reset_active();
     factory_reset_commit_wait = false;
-    factory_reset_started_ms = now_ms();
+    factory_reset_started_ms = now;
+    next_measurement_ms = now + DPLS_MEASUREMENT_IDLE_MS;
 
     hal = server_hal();
-    dpls_server_init(&server, &hal, now_ms());
+    dpls_server_init(&server, &hal, now);
     (void)dpls_gatt_add_service(receive_frame);
     dpls_phy6252_supervisor_checkpoint();
     LOG("DPLS boot settings=%u\n",
@@ -187,16 +239,22 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
 
 void dpls_phy6252_runtime_connected(uint16 conn_handle)
 {
+    uint32 now = now_ms();
     dpls_phy6252_supervisor_checkpoint();
     dpls_phy6252_transport_connected(conn_handle);
-    dpls_server_connected(&server, now_ms());
+    dpls_server_connected(&server, now);
+    /* Get safety measurements promptly after link-up without creating a
+     * permanent awake lock. ADC owns MOD_USR2 only for the conversion series. */
+    next_measurement_ms = now + 1u;
     LOG("DPLS CONN %u\n", conn_handle);
 }
 
 void dpls_phy6252_runtime_disconnected(void)
 {
+    uint32 now = now_ms();
     dpls_phy6252_transport_disconnected();
-    dpls_server_disconnected(&server, now_ms());
+    dpls_server_disconnected(&server, now);
+    next_measurement_ms = now + DPLS_MEASUREMENT_IDLE_MS;
     LOG("DPLS DISC\n");
     schedule_storage_if_needed();
     finish_factory_reset_if_ready();
@@ -206,16 +264,26 @@ void dpls_phy6252_runtime_process_rx(void)
 {
     const uint8 *frame;
     uint16 length;
+    uint32 now;
     if (!dpls_phy6252_transport_peek_rx(&frame, &length)) return;
 
-    (void)dpls_server_receive(&server, frame, length, now_ms());
+    now = now_ms();
+    (void)dpls_server_receive(&server, frame, length, now);
     dpls_phy6252_transport_consume_rx();
+    /* Reconcile after every semantic request. A deadline event racing with a
+     * request therefore converges to the same domain state on the next reduce. */
+    dpls_server_tick(&server, now);
     disconnect_if_ready();
 }
 
 void dpls_phy6252_runtime_process_adc(void)
 {
-    dpls_phy6252_measurements_process();
+    uint32 now = now_ms();
+    dpls_phy6252_measurements_process(server.safety.mode);
+    /* A low reserve / lost measurement / real short acts at ADC completion,
+     * never at an unrelated 1 Hz application tick. */
+    dpls_server_tick(&server, now);
+    disconnect_if_ready();
 }
 
 void dpls_phy6252_runtime_process_tx(void)
@@ -242,7 +310,7 @@ void dpls_phy6252_runtime_tx_confirmed(void)
     disconnect_if_ready();
 }
 
-void dpls_phy6252_runtime_tick(void)
+void dpls_phy6252_runtime_process_timer(void)
 {
     uint32 now;
     bool connected;
@@ -251,14 +319,40 @@ void dpls_phy6252_runtime_tick(void)
     now = now_ms();
     connected = dpls_phy6252_transport_connected_now();
 
-    dpls_phy6252_transport_tick_security(now);
-    tick_factory_reset(now);
-    dpls_phy6252_measurements_tick(connected, server.safety.mode);
+    /* Sampling is periodic because physics must be observed. Everything else is
+     * a one-shot deadline. This distinction is the RC9 power/reliability rule. */
+    if (due(now, next_measurement_ms)) {
+        dpls_phy6252_measurements_tick(connected, server.safety.mode);
+        next_measurement_ms = now + measurement_interval_ms();
+    }
+
+    check_factory_reset(now);
     dpls_server_tick(&server, now);
-    dpls_phy6252_transport_tick_tx(now);
+    dpls_phy6252_transport_check_deadlines(now);
     disconnect_if_ready();
     schedule_storage_if_needed();
     finish_factory_reset_if_ready();
+}
+
+uint32 dpls_phy6252_runtime_next_wakeup_ms(void)
+{
+    uint32 now = now_ms();
+    uint32 next = next_measurement_ms;
+    uint32 candidate;
+    uint32 delta;
+
+    candidate = server_next_deadline_ms(now);
+    next = earlier_deadline(now, next, candidate);
+
+    candidate = dpls_phy6252_transport_next_deadline_ms(now);
+    next = earlier_deadline(now, next, candidate);
+
+    if (factory_reset_armed)
+        next = earlier_deadline(now, next, factory_reset_started_ms + DPLS_FACTORY_RESET_HOLD_MS);
+
+    if (next == 0u || due(now, next)) return 1u;
+    delta = next - now;
+    return delta == 0u ? 1u : delta;
 }
 
 uint32 dpls_phy6252_runtime_led_tick(void)
