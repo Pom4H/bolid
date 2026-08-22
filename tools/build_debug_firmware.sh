@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a GNU diagnostic PHY6252 image with UART logs, power diagnostics and
+# Build an AC6 diagnostic PHY6252 image with UART logs, power diagnostics and
 # application-assisted ROM entry. This image is intentionally not a release or
 # absolute-current measurement artifact: UART logging changes CPU/current load.
 set -euo pipefail
@@ -24,12 +24,9 @@ echo "    DPLS_DEBUG_UART_ROM=1"
 echo "    DPLS_POWER_DIAG_LOG=1"
 echo "    DPLS_CONNECTED_SLEEP=$CONNECTED_SLEEP"
 
-BUILD=build-debug-rom \
-DEBUG_INFO=1 \
-DPLS_DEBUG_UART_ROM=1 \
-DPLS_POWER_DIAG_LOG=1 \
+DPLS_BUILD_PROFILE=debug-rom \
 DPLS_CONNECTED_SLEEP="$CONNECTED_SLEEP" \
-    bash "$ROOT/tools/build_firmware.sh" gcc "$OUT"
+    bash "$ROOT/tools/build_firmware.sh" "$OUT"
 
 python3 - "$OUT" <<'PY'
 from pathlib import Path
@@ -66,7 +63,7 @@ PY
 
 printf '%s\n' \
     "image=$OUT" \
-    "toolchain=GNU-Arm" \
+    "toolchain=Arm-Compiler-6.24.0" \
     "DEBUG_INFO=1" \
     "DPLS_DEBUG_UART_ROM=1" \
     "DPLS_POWER_DIAG_LOG=1" \

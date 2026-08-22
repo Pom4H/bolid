@@ -14,7 +14,7 @@ PB-03F-Kit содержит служебную обвязку, поэтому de
 Все измерения релизного кандидата выполняются на **том же HEX**, который собирает CI:
 
 ```sh
-tools/build_firmware.sh tmp/TestDPLS-1.4.2-rc9.hex
+tools/build_firmware.sh tmp/TestDPLS-1.5.0.hex
 ```
 
 Toolchain и source graph не меняются между CI, Firmverse и аппаратным измерением.
@@ -33,7 +33,7 @@ UART application logging в этом image отсутствует.
 Для каждой серии записать:
 
 - PCB/module revision;
-- SHA `release/1.4.2-rc9`;
+- tag `v1.5.0` и release commit SHA;
 - SHA-256 HEX;
 - напряжение питания;
 - измерительный прибор и диапазон;

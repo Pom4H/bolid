@@ -2,10 +2,12 @@
 
 Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6252 / PB-03F.
 
+История изменений: [CHANGELOG.md](CHANGELOG.md).
+
 Текущие версии:
 
-- PHY6252 firmware: **1.4.2**;
-- Android/iOS: **1.4.1**;
+- PHY6252 firmware: **1.5.0**;
+- Android/iOS: **1.5.0**;
 - wire protocol: **v2**.
 
 ## Firmware DX
@@ -64,8 +66,8 @@ tools/flash_debug_firmware.sh
 автоопределение Firmverse. Это намеренно отдельный dev-инструмент: release HEX
 не включает UART handoff и диагностику энергопотребления.
 Wrapper также явно передаёт Firmverse boot start `0x1fff1838`: для SDK 3.1.2
-это база jump/vector table, тогда как type-05 entry в GNU HEX указывает прямо
-на `Reset_Handler` и не подходит для поля start в PHY62xx boot-info.
+это база jump/vector table. Entry point из application HEX указывает прямо на
+`Reset_Handler` и не подходит для поля start в PHY62xx boot-info.
 
 ## Прошивка PB-03F
 

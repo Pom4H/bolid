@@ -1,9 +1,9 @@
-name: RC9 Firmverse flash harness
+name: Firmverse release flash harness
 
 on:
   pull_request:
     branches:
-      - release/1.4.2-rc9
+      - main
     paths:
       - 'firmware/**'
       - 'tools/build_firmware.sh'
@@ -11,7 +11,7 @@ on:
       - '.github/workflows/firmverse-flash-harness.yml'
   push:
     branches:
-      - release/1.4.2-rc9
+      - main
     paths:
       - 'firmware/**'
       - 'tools/build_firmware.sh'
@@ -45,41 +45,41 @@ jobs:
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
 
-      - name: Build RC9 production PHY6252 HEX
+      - name: Build 1.5.0 production PHY6252 HEX
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p tmp
-          bash tools/build_firmware.sh tmp/test-dpls-1.4.2-rc9.hex
-          test -s tmp/test-dpls-1.4.2-rc9.hex
-          sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
+          bash tools/build_firmware.sh tmp/test-dpls-1.5.0.hex
+          test -s tmp/test-dpls-1.5.0.hex
+          sha256sum tmp/test-dpls-1.5.0.hex | tee tmp/test-dpls-1.5.0.hex.sha256
 
       - name: Checkout pinned Firmverse flash + boot harness
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: b1a92e3e6f941bf0f55049087d6cb10dd76f1045
+          ref: 64aff0828bf9930db5fc3b339d72edc5ee2cc5a5
           path: tmp/firmverse
           submodules: recursive
 
       - name: Setup Rust for Firmverse
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Program RC9 image and reconstruct boot image from virtual NOR
+      - name: Program release image and reconstruct boot image from virtual NOR
         shell: bash
         run: |
           set -euo pipefail
           cargo run --quiet --locked \
             --manifest-path tmp/firmverse/Cargo.toml \
             --bin phy6252-flash -- \
-            tmp/test-dpls-1.4.2-rc9.hex \
+            tmp/test-dpls-1.5.0.hex \
             --harness \
             --harness-flash-size 262144 \
-            --harness-boot-hex tmp/test-dpls-1.4.2-rc9.boot.hex \
+            --harness-boot-hex tmp/test-dpls-1.5.0.boot.hex \
             2>&1 | tee tmp/firmverse-flash-harness.log
 
-          test -s tmp/test-dpls-1.4.2-rc9.boot.hex
-          sha256sum tmp/test-dpls-1.4.2-rc9.boot.hex | tee tmp/test-dpls-1.4.2-rc9.boot.hex.sha256
+          test -s tmp/test-dpls-1.5.0.boot.hex
+          sha256sum tmp/test-dpls-1.5.0.boot.hex | tee tmp/test-dpls-1.5.0.boot.hex.sha256
           grep -q 'verified .* image part(s) byte-for-byte in virtual NOR' tmp/firmverse-flash-harness.log
           grep -q 'reset observed by harness' tmp/firmverse-flash-harness.log
           grep -q 'boot image reconstructed from virtual NOR:' tmp/firmverse-flash-harness.log
@@ -92,7 +92,7 @@ jobs:
           cargo run --quiet --locked \
             --manifest-path tmp/firmverse/Cargo.toml \
             --bin firmverse -- \
-            tmp/test-dpls-1.4.2-rc9.boot.hex \
+            tmp/test-dpls-1.5.0.boot.hex \
             --once \
             --strict \
             --max-insns 3000000 \
@@ -105,12 +105,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: rc9-firmverse-flash-boot-chain
+          name: v1.5.0-firmverse-flash-boot-chain
           path: |
-            tmp/test-dpls-1.4.2-rc9.hex
-            tmp/test-dpls-1.4.2-rc9.hex.sha256
-            tmp/test-dpls-1.4.2-rc9.boot.hex
-            tmp/test-dpls-1.4.2-rc9.boot.hex.sha256
+            tmp/test-dpls-1.5.0.hex
+            tmp/test-dpls-1.5.0.hex.sha256
+            tmp/test-dpls-1.5.0.boot.hex
+            tmp/test-dpls-1.5.0.boot.hex.sha256
             tmp/firmverse-flash-harness.log
             tmp/firmverse-boot-from-nor.log
           if-no-files-found: warn

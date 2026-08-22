@@ -4,7 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${DPLS_HOST_BUILD_DIR:-$ROOT/firmware/build-invariants}"
 
-export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1}"
+if [[ -z "${ASAN_OPTIONS+x}" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # Current AppleClang ASan aborts when leak detection is requested. Address
+    # and UB checks remain enabled; Linux CI additionally runs leak detection.
+    export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=1"
+  else
+    export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1"
+  fi
+fi
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
 
 cd "$ROOT"

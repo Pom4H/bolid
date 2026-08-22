@@ -11,7 +11,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/firmware/targets/phy6252"
 OUT="${1:-$ROOT/tmp/test-dpls.hex}"
 REGION_ROOT=""
-BUILD_LOG="$ROOT/tmp/firmware-ac6.log"
+PROFILE="${DPLS_BUILD_PROFILE:-production}"
+CONNECTED_SLEEP="${DPLS_CONNECTED_SLEEP:-1}"
+SOLUTION="$TARGET/test-dpls.csolution.yml"
+TEMP_PROJECT=""
+TEMP_SOLUTION=""
+BUILD_LOG="$ROOT/tmp/firmware-ac6-${PROFILE}.log"
 
 usage() {
     echo "usage: tools/build_firmware.sh [output.hex]" >&2
@@ -27,8 +32,52 @@ esac
 
 cleanup() {
     if [ -n "$REGION_ROOT" ]; then rm -rf "$REGION_ROOT"; fi
+    if [ -n "$TEMP_PROJECT" ]; then rm -f "$TEMP_PROJECT"; fi
+    if [ -n "$TEMP_SOLUTION" ]; then rm -f "$TEMP_SOLUTION"; fi
 }
 trap cleanup EXIT
+
+case "$PROFILE" in
+    production) ;;
+    debug-rom)
+        case "$CONNECTED_SLEEP" in
+            0|1) ;;
+            *) echo "error: DPLS_CONNECTED_SLEEP must be 0 or 1" >&2; exit 2 ;;
+        esac
+        PROFILE_ID="$$"
+        TEMP_PROJECT="$TARGET/test-dpls-debug-$PROFILE_ID.cproject.yml"
+        TEMP_SOLUTION="$TARGET/test-dpls-debug-$PROFILE_ID.csolution.yml"
+        python3 - "$TARGET/test-dpls.cproject.yml" "$TEMP_PROJECT" \
+            "$TARGET/test-dpls.csolution.yml" "$TEMP_SOLUTION" \
+            "$PROFILE_ID" "$CONNECTED_SLEEP" <<'PY'
+from pathlib import Path
+import sys
+
+project_source, project_output, solution_source, solution_output, profile_id, connected_sleep = sys.argv[1:]
+project = Path(project_source).read_text(encoding="utf-8")
+replacements = {
+    '- DEBUG_INFO: "0"': '- DEBUG_INFO: "1"',
+    '- DPLS_CONNECTED_SLEEP: "1"': f'- DPLS_CONNECTED_SLEEP: "{connected_sleep}"',
+    '- DPLS_DEBUG_UART_ROM: "0"': '- DPLS_DEBUG_UART_ROM: "1"',
+    '- DPLS_POWER_DIAG_LOG: "0"': '- DPLS_POWER_DIAG_LOG: "1"',
+}
+for old, new in replacements.items():
+    if project.count(old) != 1:
+        raise SystemExit(f"error: diagnostic profile expected exactly one {old!r}")
+    project = project.replace(old, new)
+Path(project_output).write_text(project, encoding="utf-8")
+
+solution = Path(solution_source).read_text(encoding="utf-8")
+old_project = "project: test-dpls.cproject.yml"
+new_project = f"project: test-dpls-debug-{profile_id}.cproject.yml"
+if solution.count(old_project) != 1:
+    raise SystemExit("error: diagnostic profile could not locate the CMSIS project")
+Path(solution_output).write_text(solution.replace(old_project, new_project), encoding="utf-8")
+PY
+        SOLUTION="$TEMP_SOLUTION"
+        ;;
+    *) echo "error: unsupported DPLS_BUILD_PROFILE: $PROFILE" >&2; exit 2 ;;
+esac
 
 for tool in cbuild fromelf; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -44,7 +93,7 @@ rm -rf "$TARGET/out" "$TARGET/tmp" "$TARGET/RTE"
 mkdir -p "$TARGET/out"
 ln -s ../../../sdk "$TARGET/out/sdk"
 
-cbuild "$TARGET/test-dpls.csolution.yml" --packs --update-rte 2>&1 | tee "$BUILD_LOG"
+cbuild "$SOLUTION" --packs --update-rte 2>&1 | tee "$BUILD_LOG"
 if grep -E ': warning:|Warning: [LA][0-9]|[1-9][0-9]* warning(s)? generated' "$BUILD_LOG"; then
     echo "error: firmware build produced warnings" >&2
     exit 1
@@ -119,5 +168,6 @@ print("persistent flash guard: PASS")
 PY
 
 echo "toolchain: Arm Compiler 6.24.0"
+echo "profile: $PROFILE"
 echo "axf: $AXF"
 echo "hex: $OUT"

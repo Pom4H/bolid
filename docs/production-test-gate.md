@@ -40,7 +40,7 @@ bash tools/run_host_invariant_gate.sh
 
 ## Single-artifact rule
 
-Production job создаёт `TestDPLS-1.4.2-rc9.hex` один раз. Firmverse скачивает этот artifact через Actions и не запускает вторую target-сборку. Flash harness и аппаратная приёмка используют тот же формат image.
+Production job создаёт `TestDPLS-1.5.0.hex` один раз. Firmverse скачивает этот artifact через Actions и не запускает вторую target-сборку. Flash harness и аппаратная приёмка используют тот же формат image.
 
 `tools/check_repo_layout.sh` и `tools/test_ci_contract.py` запрещают возврат второго PHY6252 production toolchain/source graph.
 

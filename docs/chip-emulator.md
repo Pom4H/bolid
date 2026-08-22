@@ -11,7 +11,7 @@ CI сначала собирает единственный PHY6252 artifact Arm
 ```text
 CMSIS project
   ↓ Arm Compiler 6.24.0
-TestDPLS-1.4.2-rc9.hex
+TestDPLS-1.5.0.hex
   ├─ release artifact
   ├─ Firmverse strict boot
   ├─ flash harness

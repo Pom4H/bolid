@@ -1,6 +1,6 @@
 # Firmware Test-DPLS
 
-PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. `firmware/sim` — быстрый protocol/UI simulator; production HEX исполняется внешним Firmverse.
+PHY6252 firmware версии **1.5.0**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. `firmware/sim` — быстрый protocol/UI simulator; production HEX исполняется внешним Firmverse.
 
 ## Структура
 

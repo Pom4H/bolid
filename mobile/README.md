@@ -2,7 +2,7 @@
 
 Один Kotlin Multiplatform application для Android и iOS.
 
-Текущая версия приложений — **1.4.1**. PHY6252 firmware — **1.4.2**. Wire protocol — v2.
+Текущая версия приложений — **1.5.0**. PHY6252 firmware — **1.5.0**. Wire protocol — v2.
 
 ## Где находится код
 

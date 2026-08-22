@@ -5,7 +5,7 @@ set -euo pipefail
 # Не изменяет vendor utility. Показывает, проходит ли вход в ROM.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-HEX="${1:-${ROOT_DIR}/1.4.2-rc7.hex}"
+HEX="${1:-${ROOT_DIR}/tmp/TestDPLS-1.5.0.hex}"
 PORT="${2:-}"
 
 if [[ -z "$PORT" ]]; then

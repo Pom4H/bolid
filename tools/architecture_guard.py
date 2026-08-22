@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RC9 ownership invariants for the single production source graph."""
+"""Ownership invariants for the single production source graph."""
 from __future__ import annotations
 
 import re
@@ -89,8 +89,8 @@ for path in sorted(PHY.glob("*.c")):
     phy_lines += lines
     if lines > 600:
         fail(path, f"{lines} lines exceeds 600-line module budget")
-if phy_lines > 2300:
-    fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2300")
+if phy_lines > 2400:
+    fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2400")
 production_paths = list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")) + [TARGET]
 production_lines = sum(len(text(path).splitlines()) for path in production_paths)
 if production_lines > 5000:

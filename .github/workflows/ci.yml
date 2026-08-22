@@ -91,7 +91,7 @@ jobs:
             if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
             if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
 
-            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py|\.github/workflows/(firmware-dx|firmverse-flash-harness)\.yml)' /tmp/changed.txt; then
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_debug_firmware|flash_debug_firmware|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_debug_firmware|test_ble_timeout_contract)\.py|\.github/workflows/(firmware-dx|firmverse-flash-harness)\.yml)' /tmp/changed.txt; then
               firmware=true
             fi
 
@@ -154,12 +154,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/android
-          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc9-debug.apk
-          sha256sum tmp/android/TestDPLS-1.4.2-rc9-debug.apk > tmp/android/TestDPLS-1.4.2-rc9-debug.apk.sha256
-          printf 'version=1.4.2\nrc=9\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.5.0-debug.apk
+          sha256sum tmp/android/TestDPLS-1.5.0-debug.apk > tmp/android/TestDPLS-1.5.0-debug.apk.sha256
+          printf 'version=1.5.0\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-android-1.4.2-rc9
+          name: test-dpls-android-1.5.0
           path: tmp/android
           if-no-files-found: error
           retention-days: 7
@@ -190,15 +190,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/firmware
-          bash tools/build_firmware.sh tmp/firmware/TestDPLS-1.4.2-rc9.hex 2>&1 | tee tmp/firmware/build.log
+          bash tools/build_firmware.sh tmp/firmware/TestDPLS-1.5.0.hex 2>&1 | tee tmp/firmware/build.log
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/firmware/test-dpls.axf
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/firmware/test-dpls.map
-          sha256sum tmp/firmware/TestDPLS-1.4.2-rc9.hex > tmp/firmware/TestDPLS-1.4.2-rc9.hex.sha256
-          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\n' "$GITHUB_SHA" > tmp/firmware/BUILD.txt
+          sha256sum tmp/firmware/TestDPLS-1.5.0.hex > tmp/firmware/TestDPLS-1.5.0.hex.sha256
+          printf 'version=1.5.0\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\n' "$GITHUB_SHA" > tmp/firmware/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-1.4.2-rc9
+          name: test-dpls-phy6252-1.5.0
           path: tmp/firmware
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build opt-in UART/power diagnostic image
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/debug-firmware
+          bash tools/build_debug_firmware.sh tmp/debug-firmware/TestDPLS-1.5.0-debug-rom.hex
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-1.5.0-debug-rom
+          path: tmp/debug-firmware
           if-no-files-found: error
           retention-days: 7
 
@@ -211,13 +222,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: test-dpls-phy6252-1.4.2-rc9
+          name: test-dpls-phy6252-1.5.0
           path: tmp/firmware
       - name: Run the production image in Firmverse
         id: firmverse
-        uses: Pom4H/firmverse@b1a92e3e6f941bf0f55049087d6cb10dd76f1045
+        uses: Pom4H/firmverse@64aff0828bf9930db5fc3b339d72edc5ee2cc5a5
         with:
-          firmware: tmp/firmware/TestDPLS-1.4.2-rc9.hex
+          firmware: tmp/firmware/TestDPLS-1.5.0.hex
           board: pb03f-kit
           strict: 'true'
           max-insns: '3000000'

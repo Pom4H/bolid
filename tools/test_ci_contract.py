@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIRMVERSE_SHA = "b1a92e3e6f941bf0f55049087d6cb10dd76f1045"
+FIRMVERSE_SHA = "64aff0828bf9930db5fc3b339d72edc5ee2cc5a5"
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 harness = (ROOT / ".github/workflows/firmverse-flash-harness.yml").read_text(encoding="utf-8")
@@ -45,7 +45,7 @@ for token in (
     "RC affected-area production gate: PASS",
     "BLE HCI LE_SetAdvEnable enabled=1",
     "actions/download-artifact@v7",
-    "test-dpls-phy6252-1.4.2-rc9",
+    "test-dpls-phy6252-1.5.0",
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
@@ -60,8 +60,8 @@ for token in (
 
 if "cancel-in-progress: true" in ci:
     raise SystemExit("affected-area CI must not cancel an earlier proof")
-if "1.4.2-rc8" in ci or "rc=8" in ci:
-    raise SystemExit("RC9 CI still publishes RC8-labelled artifacts")
+if "1.4.2-rc" in ci or "rc=" in ci:
+    raise SystemExit("release CI still publishes release-candidate-labelled artifacts")
 
 for token in (
     "test_flash_firmware.py",
@@ -120,11 +120,21 @@ for forbidden in ("--auto-rst", "setRTS", "setDTR", "controlled_connect"):
 if '-r wh "$HEX"' not in flash or "зажмите KEY1" not in flash:
     raise SystemExit("production flasher lost manual KEY1 + vendor wh contract")
 
-# The old second target compiler is forbidden in first-party filenames and text.
+# The old second target compiler is forbidden in tracked first-party filenames
+# and text. Developer worktrees may contain ignored SDK/build experiments; they
+# must not make the repository contract depend on local cleanup.
 legacy = "".join(("g", "c", "c"))
 text_suffixes = {".yml", ".yaml", ".sh", ".py", ".md", ".c", ".h", ".kt", ".kts", ".swift", ".pbxproj", ".json", ".toml", ".txt", ".env", ".sct"}
-for path in ROOT.rglob("*"):
-    if not path.is_file() or "third_party" in path.parts or ".git" in path.parts:
+tracked = subprocess.run(
+    ["git", "-C", str(ROOT), "ls-files", "-z"],
+    check=True,
+    capture_output=True,
+).stdout.split(b"\0")
+for raw_path in tracked:
+    if not raw_path:
+        continue
+    path = ROOT / raw_path.decode("utf-8")
+    if not path.is_file() or "third_party" in path.parts:
         continue
     if legacy in path.name.casefold():
         raise SystemExit(f"legacy target toolchain filename remains: {path.relative_to(ROOT)}")

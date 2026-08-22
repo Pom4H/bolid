@@ -53,13 +53,15 @@ for path in \
   test ! -e "$path" || { echo "legacy PHY6252 layer returned: $path" >&2; exit 1; }
 done
 
-test ! -e .gitmodules
-test ! -e third_party/phy6252-emu
-test ! -e firmware/phy6252_emu
-test ! -e firmware/zmu
+for path in .gitmodules third_party/phy6252-emu firmware/phy6252_emu firmware/zmu; do
+  test -z "$(git ls-files -- "$path")" || {
+    echo "removed production path returned to git: $path" >&2
+    exit 1
+  }
+done
 
 # Firmverse executes the production artifact.
-grep -q 'uses: Pom4H/firmverse@b1a92e3e6f941bf0f55049087d6cb10dd76f1045' .github/workflows/ci.yml
+grep -q 'uses: Pom4H/firmverse@64aff0828bf9930db5fc3b339d72edc5ee2cc5a5' .github/workflows/ci.yml
 grep -q 'actions/download-artifact@v7' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml

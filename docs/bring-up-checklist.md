@@ -54,7 +54,7 @@ python3 tools/session_capture/parse_session.py tmp/sessions/session-*-bringup.lo
 - [ ] После очистки SNV identity восстанавливается обычным runtime path.
 - [ ] Boot journal/deferred flash не задерживает первый advertising.
 - [ ] Через несколько секунд idle flash flush не ломает advertising и последующее подключение.
-- [ ] `DEVICE_INFO_REPORT` показывает firmware `1.4.2`, hardware revision и сохранённое пользовательское имя.
+- [ ] `DEVICE_INFO_REPORT` показывает firmware `1.5.0`, hardware revision и сохранённое пользовательское имя.
 
 Проверяем порядок:
 
