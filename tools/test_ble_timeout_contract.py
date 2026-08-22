@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""RC9 timing, BLE-profile and power architecture invariants.
+"""RC9 timing, BLE-profile, storage and power architecture invariants.
 
 Correctness may use absolute deadlines, but must not depend on independent timer
 ordering. One runtime timer owns application wakeups. One power module owns every
-pwrmgr lock so sleeping becomes an explicit resource policy.
+pwrmgr lock. Mobile traffic follows risk instead of polling every second forever.
 """
 from pathlib import Path
 
@@ -21,6 +21,7 @@ MEASUREMENTS = ROOT / "firmware/phy6252/dpls_phy6252_measurements.c"
 OUTPUTS = ROOT / "firmware/phy6252/dpls_phy6252_outputs.c"
 POWER = ROOT / "firmware/phy6252/dpls_phy6252_power.c"
 POWER_H = ROOT / "firmware/phy6252/dpls_phy6252_power.h"
+STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
 
 android = ANDROID.read_text(encoding="utf-8")
 android_platform = ANDROID_PLATFORM.read_text(encoding="utf-8")
@@ -35,6 +36,7 @@ measurements = MEASUREMENTS.read_text(encoding="utf-8")
 outputs = OUTPUTS.read_text(encoding="utf-8")
 power = POWER.read_text(encoding="utf-8")
 power_h = POWER_H.read_text(encoding="utf-8")
+storage = STORAGE.read_text(encoding="utf-8")
 
 for forbidden in ("PAIRING_TIMEOUT_MS", "pairingTimeout"):
     if forbidden in android:
@@ -136,6 +138,40 @@ for required in (
 if "uint8 update_enabled = FALSE;" not in target:
     raise SystemExit("vendor automatic param-update timer must remain disabled")
 
+# Mobile application traffic follows safety risk. NORMAL does not renew the
+# dangerous-mode lease, and background RSSI must not wake the radio every second.
+for required in (
+    "DANGEROUS_STATE_REFRESH_MS = 1_000L",
+    "NORMAL_STATE_REFRESH_MS = 5_000L",
+    "SAFETY_KEEP_ALIVE_MS = 3_000L",
+    "RSSI_IDENTIFY_POLL_MS = 350L",
+    "RSSI_SESSION_POLL_MS = 10_000L",
+    "if (dangerous && now - lastLeaseActivityMillis >= SAFETY_KEEP_ALIVE_MS)",
+):
+    if required not in client:
+        raise SystemExit(f"mobile low-traffic/safety cadence missing: {required}")
+for forbidden in ("STATE_REFRESH_MS = 1_000L", "KEEP_ALIVE_TICKS", "RSSI_SESSION_POLL_MS = 1_000L"):
+    if forbidden in client:
+        raise SystemExit(f"mobile periodic traffic regression: {forbidden}")
+
+# Pre-series device has one durable settings format. Old RC credentials must not
+# add boot paths or resurrect state from abandoned SNV records.
+for forbidden in (
+    "DPLS_LEGACY_SETTINGS",
+    "dpls_legacy_settings_t",
+    "load_legacy_settings",
+):
+    if forbidden in storage:
+        raise SystemExit(f"pre-series legacy migration returned: {forbidden}")
+for required in (
+    "DPLS_SETTINGS_SLOT_A_SNV_ID",
+    "DPLS_SETTINGS_SLOT_B_SNV_ID",
+    "dpls_durable_settings_select",
+    "DPLS_SETTINGS_CORRUPT",
+):
+    if required not in storage:
+        raise SystemExit(f"dual-slot durable settings contract missing: {required}")
+
 # nowMillis is epoch-compatible for TIME_SYNC but progresses monotonically.
 if "SystemClock.elapsedRealtime()" not in android_platform:
     raise SystemExit("Android nowMillis must advance from elapsedRealtime")
@@ -151,3 +187,5 @@ print("RC9 timing/power contract: PASS")
 print("  one application timer: ADC + LED + semantic/transport deadlines")
 print("  one pwrmgr owner with connected-sleep A/B switch and hold-time diagnostics")
 print("  adaptive BLE active/idle profile follows auth + safety state")
+print("  mobile polling follows risk; NORMAL does not send safety keepalives")
+print("  one current dual-slot settings format; no pre-series migration path")
