@@ -113,7 +113,7 @@ SDK_SOURCES := \
 	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/sha256.c \
 	$(SDK)/components/libraries/tinycrypt-0.2.8/lib/source/utils.c
 
-# Канонический production surface RC8. architecture_guard.py сравнивает его с AC6.
+# Канонический production surface. architecture_guard.py сравнивает его с AC6.
 APP_SOURCES := \
 	source/dplsBLEPeripheral.c \
 	$(FW)/src/dpls_protocol.c \
@@ -127,6 +127,7 @@ APP_SOURCES := \
 	$(FW)/phy6252/dpls_phy6252_auth.c \
 	$(FW)/phy6252/dpls_phy6252_measurements.c \
 	$(FW)/phy6252/dpls_phy6252_outputs.c \
+	$(FW)/phy6252/dpls_phy6252_power.c \
 	$(FW)/phy6252/dpls_phy6252_runtime.c \
 	$(FW)/phy6252/dpls_phy6252_storage.c \
 	$(FW)/phy6252/dpls_phy6252_supervisor.c \
