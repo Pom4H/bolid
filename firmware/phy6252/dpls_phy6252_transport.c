@@ -9,6 +9,7 @@
 #include "linkdb.h"
 #include "log.h"
 #include "peripheral.h"
+#include <stdint.h>
 #include <string.h>
 
 /* Protocol v2 is strict request/response. One RX slot means there can never be
@@ -19,7 +20,6 @@
 #define DPLS_TX_QUEUE_DEPTH 2u
 #define DPLS_TX_SLOT_SIZE 168u
 #define DPLS_TX_CONFIRM_TIMEOUT_MS 2000u
-#define DPLS_TX_NOTIFY_PACE_MS 80u
 #define DPLS_LINK_ENCRYPT_TIMEOUT_MS 60000u
 
 typedef struct { uint8 data[DPLS_RX_SLOT_SIZE]; uint16 length; } dpls_rx_slot_t;
@@ -32,7 +32,6 @@ typedef struct {
     dpls_tx_slot_t slots[DPLS_TX_QUEUE_DEPTH];
     uint8 head, tail, count;
     bool in_flight;
-    bool confirmation_required;
     uint32 in_flight_since_ms;
 } dpls_tx_queue_t;
 
@@ -43,13 +42,24 @@ static bool connection_had_encryption;
 static dpls_rx_queue_t rx;
 static dpls_tx_queue_t tx;
 
+static bool due(uint32 now_ms, uint32 deadline_ms)
+{
+    return (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
+static uint32 earlier_deadline(uint32 now_ms, uint32 current, uint32 candidate)
+{
+    if (candidate == 0u) return current;
+    if (current == 0u) return candidate;
+    return (int32_t)(candidate - now_ms) < (int32_t)(current - now_ms) ? candidate : current;
+}
+
 static void tx_complete_head(void)
 {
-    if (tx.count == 0u) { tx.in_flight = false; tx.confirmation_required = false; return; }
+    if (tx.count == 0u) { tx.in_flight = false; return; }
     tx.head = (uint8)((tx.head + 1u) % DPLS_TX_QUEUE_DEPTH);
     --tx.count;
     tx.in_flight = false;
-    tx.confirmation_required = false;
 }
 
 static void tx_pump(void)
@@ -59,8 +69,9 @@ static void tx_pump(void)
     rc = dpls_gatt_send_indication(connection_handle, tx.slots[tx.head].data,
                                    tx.slots[tx.head].length, task_id);
     if (rc == SUCCESS) {
+        /* RC9: every production TX is an indication. It remains in flight until
+         * ATT_HANDLE_VALUE_CFM or the explicit confirmation deadline. */
         tx.in_flight = true;
-        tx.confirmation_required = dpls_gatt_needs_confirmation(connection_handle);
         tx.in_flight_since_ms = (uint32)osal_GetSystemClock();
         return;
     }
@@ -159,32 +170,42 @@ void dpls_phy6252_transport_process_tx(void) { tx_pump(); }
 
 void dpls_phy6252_transport_tx_confirmed(void)
 {
-    if (!tx.in_flight || !tx.confirmation_required) return;
-    tx_complete_head(); tx_pump();
+    if (!tx.in_flight) return;
+    tx_complete_head();
+    tx_pump();
 }
 
-void dpls_phy6252_transport_tick_tx(uint32 now_ms)
+void dpls_phy6252_transport_check_deadlines(uint32 now_ms)
 {
-    uint32 elapsed;
     if (connection_handle == INVALID_CONNHANDLE) return;
-    if (!tx.in_flight) { tx_pump(); return; }
-    elapsed = (uint32)(now_ms - tx.in_flight_since_ms);
-    if (tx.confirmation_required) {
-        if (elapsed >= DPLS_TX_CONFIRM_TIMEOUT_MS) { LOG("DPLS TX confirmation timeout\n"); (void)GAPRole_TerminateConnection(); }
-        return;
-    }
-    if (elapsed >= DPLS_TX_NOTIFY_PACE_MS) { tx_complete_head(); tx_pump(); }
-}
 
-void dpls_phy6252_transport_tick_security(uint32 now_ms)
-{
-    if (connection_handle == INVALID_CONNHANDLE) return;
-    if (dpls_phy6252_transport_encrypted(NULL)) { connection_had_encryption = true; return; }
-    /* Plaintext timeout is only resource reclamation; never a bond heuristic. */
-    if (!connection_had_encryption && (uint32)(now_ms - connected_at_ms) >= DPLS_LINK_ENCRYPT_TIMEOUT_MS) {
+    if (dpls_phy6252_transport_encrypted(NULL)) {
+        connection_had_encryption = true;
+    } else if (!connection_had_encryption &&
+               due(now_ms, connected_at_ms + DPLS_LINK_ENCRYPT_TIMEOUT_MS)) {
+        /* This timeout only reclaims an unauthenticated radio resource. It is
+         * not ordered against any mobile timeout and never implies stale keys. */
         LOG("DPLS KILL plaintext link\n");
         (void)GAPRole_TerminateConnection();
+        return;
     }
+
+    if (tx.in_flight && due(now_ms, tx.in_flight_since_ms + DPLS_TX_CONFIRM_TIMEOUT_MS)) {
+        LOG("DPLS TX confirmation timeout\n");
+        (void)GAPRole_TerminateConnection();
+    }
+}
+
+uint32 dpls_phy6252_transport_next_deadline_ms(uint32 now_ms)
+{
+    uint32 next = 0u;
+    if (connection_handle == INVALID_CONNHANDLE) return 0u;
+
+    if (!connection_had_encryption && !dpls_phy6252_transport_encrypted(NULL))
+        next = earlier_deadline(now_ms, next, connected_at_ms + DPLS_LINK_ENCRYPT_TIMEOUT_MS);
+    if (tx.in_flight)
+        next = earlier_deadline(now_ms, next, tx.in_flight_since_ms + DPLS_TX_CONFIRM_TIMEOUT_MS);
+    return next;
 }
 
 bool dpls_phy6252_transport_tx_idle(void) { return tx.count == 0u && !tx.in_flight; }
