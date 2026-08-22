@@ -23,6 +23,7 @@ import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
 import platform.Foundation.NSMutableData
+import platform.Foundation.NSProcessInfo
 import platform.Foundation.NSUserDefaults
 import platform.Foundation.dateWithTimeIntervalSince1970
 import platform.UserNotifications.UNAuthorizationOptionAlert
@@ -55,11 +56,22 @@ import platform.posix.timeval
 import ru.bolid.testdpls.core.domain.UiTheme
 
 internal object IosPlatformServices : DplsPlatformServices {
-    override fun nowMillis(): Long = memScoped {
+    private fun wallClockMillis(): Long = memScoped {
         val tv = alloc<timeval>()
         gettimeofday(tv.ptr, null)
         tv.tv_sec * 1_000L + tv.tv_usec / 1_000L
     }
+
+    private fun uptimeMillis(): Long =
+        (NSProcessInfo.processInfo.systemUptime * 1_000.0).toLong()
+
+    /* Same contract as Android: epoch-compatible, but progression comes from a
+     * monotonic clock so NTP/manual wall-clock changes cannot reorder events. */
+    private val epochBaseMillis = wallClockMillis()
+    private val uptimeBaseMillis = uptimeMillis()
+
+    override fun nowMillis(): Long =
+        epochBaseMillis + (uptimeMillis() - uptimeBaseMillis)
 
     override fun secureRandomBytes(count: Int): ByteArray {
         require(count >= 0)
