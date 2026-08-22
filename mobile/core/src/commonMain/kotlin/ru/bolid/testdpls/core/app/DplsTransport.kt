@@ -48,6 +48,12 @@ data class DplsTransportDevice(
 
 /** Tiny platform surface that cannot be made deterministic in commonMain. */
 interface DplsPlatformServices {
+    /**
+     * Epoch milliseconds on a monotonic process-local timeline. Android/iOS
+     * anchor wall time once and then advance it from elapsedRealtime/systemUptime.
+     * This keeps TIME_SYNC epoch-compatible while elapsed-time decisions cannot
+     * jump when NTP or the operator changes the wall clock.
+     */
     fun nowMillis(): Long
     fun secureRandomBytes(count: Int): ByteArray
     fun readUiTheme(): UiTheme = UiTheme.SYSTEM
