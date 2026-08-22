@@ -94,7 +94,6 @@ typedef struct {
 typedef struct {
     bool (*encrypted)(void *context);
     bool (*indicate)(void *context, const uint8_t *frame, size_t length);
-    void (*disconnect)(void *context);
 } dpls_link_hal_t;
 
 typedef struct {
