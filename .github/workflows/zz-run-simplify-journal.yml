@@ -37,7 +37,7 @@ jobs:
               lines.append(line)
           script = '\n'.join(lines) + '\n'
           needle = 's = replace_once(s, old, new, "client formatter")'
-          replacement = '''if s.count(old) == 1:
+          replacement = r'''if s.count(old) == 1:
               s = s.replace(old, new)
           else:
               formatter_start = s.index("    override fun formatEventTime(record: EventRecord): String =")
