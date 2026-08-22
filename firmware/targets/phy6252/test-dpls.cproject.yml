@@ -50,7 +50,9 @@ project:
         - HCI_TL_NONE: "1"
         - ENABLE_LOG_ROM_: "0"
         - _BUILD_FOR_DTM_: "0"
-        - DEBUG_INFO: "1"
+        # Production/current-measurement build: SDK LOG() compiles to nothing.
+        - DEBUG_INFO: "0"
+        - DPLS_CONNECTED_SLEEP: "1"
         - DBG_ROM_MAIN: "0"
         - APP_CFG: "0"
         - OSALMEM_METRICS: "0"
