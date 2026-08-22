@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """RC8 ownership invariants.
 
-This file checks facts that must remain singular: one source set, one link owner,
-one logical mode owner, one flash writer and bounded request/response pressure.
+Checks facts that must remain singular: one source graph, one link owner, one
+logical mode owner, one flash writer, one request in flight and fail-safe output
+admission.
 """
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ def section(path: Path, start: str, end: str) -> str:
         fail(path, f"cannot isolate {start!r}..{end!r}")
         return ""
 
-# One production source graph, same for GCC and AC6.
+# One production source graph, identical first-party behavior for GCC and AC6.
 for name in REMOVED:
     if (PHY / name).exists(): fail(PHY / name, "removed runtime/duplicate returned")
 make = text(MAKEFILE); cproject = text(CPROJECT)
@@ -98,13 +99,17 @@ forbid(OUTPUTS, "hardware_mode", "outputs must not copy logical mode")
 forbid(OUTPUTS, "dpls_phy6252_outputs_mode", "second mode getter returned")
 need(RUNTIME, "server.safety.mode", "runtime must consume canonical safety mode")
 
-# Request/response pressure is bounded and every accepted RX reserves a future TX slot.
-need(TRANSPORT, "#define DPLS_RX_QUEUE_DEPTH 2u", "RX queue must stay at two slots")
-need(TRANSPORT, "#define DPLS_TX_QUEUE_DEPTH 2u", "TX queue must stay at two slots")
+# One request at a time, bounded TX, and capacity reserved before ATT accepts RX.
+need(TRANSPORT, "#define DPLS_RX_QUEUE_DEPTH 1u", "RX must serialize application transactions")
+need(TRANSPORT, "#define DPLS_TX_QUEUE_DEPTH 2u", "TX must allow in-flight + one queued response")
 need(TRANSPORT, "(uint8)(rx.count + tx.count) >= DPLS_TX_QUEUE_DEPTH",
      "accepted RX must reserve response capacity")
+need(RUNTIME, "static uint8 receive_frame", "runtime must own GATT admission boundary")
+need(RUNTIME, "server.critical_fault || dpls_phy6252_storage_critical_pending()",
+     "quiescing connection must reject new application work")
+need(RUNTIME, "dpls_gatt_add_service(receive_frame)", "GATT must enter through runtime admission")
 
-# One physical SNV writer. Offline permission is passed as a current fact, never stored.
+# One physical SNV writer. Offline permission is a current fact, never stored.
 for path in list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")):
     if "osal_snv_write" in text(path) and path != STORAGE:
         fail(path, "physical SNV write outside storage owner")
@@ -115,6 +120,13 @@ need(RUNTIME, "dpls_phy6252_storage_critical_pending()", "runtime must own contr
 need(RUNTIME, "dpls_phy6252_transport_tx_idle()", "persistence must wait for TX drain")
 need(STORAGE, "static uint32_t journal_timestamp[DPLS_EVENT_CAPACITY]", "compact RAM journal missing")
 forbid(STORAGE, "journal_records[DPLS_EVENT_CAPACITY]", "flash record representation leaked into RAM")
+
+# Dangerous GPIO requires a successfully acquired sleep resource before any pin is energized.
+need(OUTPUTS, "if (!control_sleep_guard(true)) return false;", "dangerous mode must require sleep lock")
+lock_pos = text(OUTPUTS).find("if (!control_sleep_guard(true)) return false;")
+first_dangerous_write = text(OUTPUTS).find("hal_gpio_write(DPLS_PIN_ISO_T, 1)")
+if lock_pos < 0 or first_dangerous_write < 0 or lock_pos > first_dangerous_write:
+    fail(OUTPUTS, "dangerous GPIO may be energized before sleep lock")
 
 # Bond erase exists only behind physical factory reset; radio failures never infer key state.
 for path in PHY.glob("*.c"):
@@ -137,7 +149,7 @@ if "enable_advertising();" not in started: fail(TARGET, "started state must alwa
 if started.find("dpls_ble_identity_on_stack_started();") > started.find("enable_advertising();"):
     fail(TARGET, "controller identity must be set before advertising")
 
-# Safety policy is pure and fail-safe both before entry and while a dangerous mode is active.
+# Safety policy is pure and fail-safe before entry and while dangerous mode is active.
 need(SAFETY_H, "bool measurements_ready;", "measurement validity must be a safety input fact")
 need(SAFETY, "dpls_safety_admission_reason", "dangerous-mode admission policy missing")
 need(SAFETY, "DPLS_SAFETY_RETURN_MEASUREMENT_LOST", "measurement-loss fail-safe missing")
@@ -169,4 +181,4 @@ if errors:
 print("Architecture guard: PASS")
 print(f"  first-party firmware: {production_lines} lines; PHY adapter: {phy_lines} lines")
 print("  one link owner, one mode owner, one flash writer, one explicit bond erase")
-print("  bounded RX/TX with response reservation; safety requires valid measurements")
+print("  one RX transaction; reserved TX; quiescent durable boundary; fail-safe outputs")
