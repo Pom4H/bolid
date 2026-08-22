@@ -5,6 +5,9 @@ package ru.bolid.testdpls.web
 @JsFun("() => Date.now()")
 external fun dateNow(): Double
 
+@JsFun("() => performance.now()")
+external fun performanceNow(): Double
+
 @JsFun("() => (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'")
 external fun labWsUrl(): String
 
