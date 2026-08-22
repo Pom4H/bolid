@@ -10,10 +10,6 @@ LR_IROM1 0x1fff1838 0x0E7C8 {
     .ANY (+RO)
     .ANY (+RW +ZI)
   }
-  ER_IROM2 0x1fffc000 0x04000 {
-    rf_phy_driver.o(i.rf_phy_dtm*)
-    rf_phy_driver.o(i.rf_phy_direct_*)
-  }
 }
 
 LR_ROM_JT_GC 0x1fff0000 0x00800 {
@@ -40,7 +36,6 @@ LR_ROM_XIP 0x11020000 0x01C000 {
     hmac.o(+RO)
     sha256.o(+RO)
     utils.o(+RO)
-    my_printf.o(+RO)
     gpio.o(+RO)
     adc.o(+RO)
     fadd.o(+RO)
