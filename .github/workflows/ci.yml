@@ -108,7 +108,7 @@ jobs:
             if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
             if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
 
-            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_power_ab|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_power_ab|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
               firmware=true
             fi
 
@@ -198,8 +198,8 @@ jobs:
       - name: Run production HEX in Firmverse
         id: firmverse
         # Pin the Firmverse revision that models PHY6252 SPI flash Unique ID
-        # in addition to the complete ROM-UART flash -> reset -> boot path.
-        uses: Pom4H/firmverse@03422429fe25382ed95b2d96a7482bd43907b6eb
+        # and the ROM LL base-timer helper used during production boot.
+        uses: Pom4H/firmverse@5dc70304456628d4d524a1e8b6292b2a175346a1
         with:
           firmware: tmp/test-dpls-firmverse.hex
           board: pb03f-kit
