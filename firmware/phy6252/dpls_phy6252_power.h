@@ -13,10 +13,17 @@
 #define DPLS_CONNECTED_SLEEP 1
 #endif
 
+#ifndef DPLS_DEBUG_UART_ROM
+#define DPLS_DEBUG_UART_ROM 0
+#endif
+
 typedef enum {
     DPLS_POWER_LINK = 0,
     DPLS_POWER_OUTPUT,
     DPLS_POWER_ADC,
+#if DPLS_DEBUG_UART_ROM
+    DPLS_POWER_DEBUG_UART,
+#endif
     DPLS_POWER_REASON_COUNT
 } dpls_power_reason_t;
 

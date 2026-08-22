@@ -13,6 +13,9 @@ static uint8 module_for(dpls_power_reason_t reason)
     case DPLS_POWER_LINK: return MOD_USR0;
     case DPLS_POWER_OUTPUT: return MOD_USR1;
     case DPLS_POWER_ADC: return MOD_USR2;
+#if DPLS_DEBUG_UART_ROM
+    case DPLS_POWER_DEBUG_UART: return MOD_USR3;
+#endif
     default: return MOD_USR0;
     }
 }
@@ -33,6 +36,9 @@ void dpls_phy6252_power_init(void)
     (void)hal_pwrmgr_register(MOD_USR0, NULL, NULL);
     (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
     (void)hal_pwrmgr_register(MOD_USR2, NULL, NULL);
+#if DPLS_DEBUG_UART_ROM
+    (void)hal_pwrmgr_register(MOD_USR3, NULL, NULL);
+#endif
 }
 
 bool dpls_phy6252_power_acquire(dpls_power_reason_t reason)

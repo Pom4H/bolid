@@ -38,4 +38,8 @@ void dpls_phy6252_storage_load_calibration(dpls_calib_t *line, dpls_calib_t *vca
 
 bool dpls_phy6252_storage_clear_settings(void);
 
+/* Diagnostic image only: make the application boot descriptor invalid so the
+ * next software reset is captured by the PHY6252 ROM UART programmer. */
+bool dpls_phy6252_storage_prepare_rom_boot(void);
+
 #endif

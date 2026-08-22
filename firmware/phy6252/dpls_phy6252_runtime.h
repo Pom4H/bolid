@@ -33,4 +33,8 @@ bool dpls_phy6252_runtime_link_active(void);
 /* Пока true, advertising не включаем: persistence ещё не закончена. */
 bool dpls_phy6252_runtime_flash_pending(void);
 
+/* Enabled only in the diagnostic ROM-UART image. The request first forces
+ * NORMAL, drains offline storage, then invalidates boot-info and resets. */
+bool dpls_phy6252_runtime_request_rom_boot(void);
+
 #endif

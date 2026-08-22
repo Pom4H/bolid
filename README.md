@@ -30,6 +30,43 @@ Production toolchain закреплён проектом:
 
 В CI окружение активируется через официальный CMSIS Actions bootstrap. `tools/build_firmware.sh` не выбирает компилятор и не содержит второго способа установки toolchain: он только собирает production target и создаёт `tmp/test-dpls.hex`.
 
+Отдельный диагностический образ с UART-логом, счётчиками power constraints и
+программным переходом в ROM-загрузчик без KEY1 собирается так:
+
+```sh
+tools/build_debug_firmware.sh
+```
+
+Результат — `tmp/test-dpls-debug-rom.hex`. В нём включены `DEBUG_INFO=1`,
+`DPLS_POWER_DIAG_LOG=1` и dev-only UART handoff: приложение принимает guard-токен
+на 115200, переводит выходы в `NORMAL`, завершает offline flash work, делает
+boot-info невалидным; после reset ROM принимает штатную синхронизацию
+`UXTDWU@9600`.
+Этот образ не используют для абсолютного измерения тока: UART trace сам меняет
+нагрузку. Для A/B тока без логирования остаётся `tools/build_power_ab.sh`.
+
+Первая установка dev-образа требует одного ручного входа в ROM:
+
+```sh
+tools/flash_debug_firmware.sh --initial-manual
+```
+
+После неё следующие dev-обновления выполняются через Firmverse без KEY1:
+скрипт посылает UART BREAK и токен приложению, приложение обнуляет
+`boot_info.part_count`, перезагружается в ROM, а штатный программатор Firmverse
+прошивает и запускает новый образ:
+
+```sh
+tools/flash_debug_firmware.sh
+```
+
+Порт можно задать явно через `--port /dev/cu...`; без него используется
+автоопределение Firmverse. Это намеренно отдельный dev-инструмент: release HEX
+не включает UART handoff и диагностику энергопотребления.
+Wrapper также явно передаёт Firmverse boot start `0x1fff1838`: для SDK 3.1.2
+это база jump/vector table, тогда как type-05 entry в GNU HEX указывает прямо
+на `Reset_Handler` и не подходит для поля start в PHY62xx boot-info.
+
 ## Прошивка PB-03F
 
 ```sh

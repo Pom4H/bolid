@@ -12,6 +12,7 @@ cd "$ROOT"
 bash tools/check_repo_layout.sh
 python3 tools/test_ci_contract.py
 python3 tools/test_flash_firmware.py
+python3 tools/test_debug_firmware.py
 python3 tools/test_ble_timeout_contract.py
 python3 tools/test_dpls_protocol_crc.py
 python3 tools/session_capture/test_session_capture.py

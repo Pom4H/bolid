@@ -53,6 +53,8 @@ project:
         # Production/current-measurement build: SDK LOG() compiles to nothing.
         - DEBUG_INFO: "0"
         - DPLS_CONNECTED_SLEEP: "1"
+        - DPLS_DEBUG_UART_ROM: "0"
+        - DPLS_POWER_DIAG_LOG: "0"
         - DBG_ROM_MAIN: "0"
         - APP_CFG: "0"
         - OSALMEM_METRICS: "0"

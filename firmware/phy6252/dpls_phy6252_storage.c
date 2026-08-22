@@ -2,6 +2,7 @@
 
 #include "dpls_durable_settings.h"
 #include "dpls_phy6252_supervisor.h"
+#include "flash.h"
 #include "osal_snv.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -21,6 +22,7 @@
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_CALIB_MAGIC 0x434c5044u
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
+#define DPLS_ROM_BOOTINFO_PART_COUNT_ADDR 0x11002000u
 
 typedef struct {
     uint32_t magic;
@@ -353,6 +355,25 @@ bool dpls_phy6252_storage_process_one(bool radio_offline)
     if (settings_dirty) return commit_settings();
     if (auth_lock_dirty) return commit_auth_lock();
     return commit_one_journal_block();
+}
+
+bool dpls_phy6252_storage_prepare_rom_boot(void)
+{
+#if DPLS_DEBUG_UART_ROM
+    uint32_t verify = 0xffffffffu;
+    if (dpls_phy6252_storage_work_pending()) return false;
+    dpls_phy6252_supervisor_blocking_io_begin();
+    if (flash_write_word(DPLS_ROM_BOOTINFO_PART_COUNT_ADDR, 0u) != PPlus_SUCCESS) {
+        dpls_phy6252_supervisor_blocking_io_end();
+        return false;
+    }
+    (void)hal_flash_read(DPLS_ROM_BOOTINFO_PART_COUNT_ADDR,
+                         (uint8_t *)&verify, sizeof(verify));
+    dpls_phy6252_supervisor_blocking_io_end();
+    return verify == 0u;
+#else
+    return false;
+#endif
 }
 
 dpls_settings_state_t dpls_phy6252_storage_settings_state(void *context)

@@ -6,6 +6,7 @@
 #include "dpls_phy6252_events.h"
 #include "dpls_phy6252_measurements.h"
 #include "dpls_phy6252_outputs.h"
+#include "dpls_phy6252_power.h"
 #include "dpls_phy6252_storage.h"
 #include "dpls_phy6252_supervisor.h"
 #include "dpls_phy6252_transport.h"
@@ -25,6 +26,11 @@
 #define DPLS_MEASUREMENT_RESERVE_MS 1000u
 #define DPLS_MEASUREMENT_CONNECTED_NORMAL_MS 2000u
 #define DPLS_MEASUREMENT_IDLE_MS 5000u
+#define DPLS_POWER_DIAG_INTERVAL_MS 5000u
+
+#ifndef DPLS_POWER_DIAG_LOG
+#define DPLS_POWER_DIAG_LOG 0
+#endif
 
 static dpls_server_t server;
 static uint8 task_id;
@@ -33,6 +39,12 @@ static bool factory_reset_commit_wait;
 static uint32 factory_reset_started_ms;
 static uint32 next_measurement_ms;
 static uint32 next_led_ms;
+#if DPLS_DEBUG_UART_ROM
+static bool rom_boot_pending;
+#endif
+#if DPLS_POWER_DIAG_LOG
+static uint32 next_power_diag_ms;
+#endif
 
 static uint32 now_ms(void)
 {
@@ -141,8 +153,58 @@ bool dpls_phy6252_runtime_link_active(void)
 
 bool dpls_phy6252_runtime_flash_pending(void)
 {
+#if DPLS_DEBUG_UART_ROM
+    if (rom_boot_pending) return true;
+#endif
     return dpls_phy6252_storage_work_pending();
 }
+
+bool dpls_phy6252_runtime_request_rom_boot(void)
+{
+#if DPLS_DEBUG_UART_ROM
+    rom_boot_pending = true;
+    dpls_phy6252_outputs_safe_normal(NULL);
+    dpls_safety_force_normal(&server.safety);
+    if (dpls_phy6252_transport_connected_now())
+        dpls_phy6252_transport_disconnect(NULL);
+    return true;
+#else
+    return false;
+#endif
+}
+
+#if DPLS_POWER_DIAG_LOG
+static void log_power_diag(uint32 now)
+{
+    dpls_power_diag_t power;
+    dpls_phy6252_power_snapshot(&power);
+#if DPLS_DEBUG_UART_ROM
+    LOG("DPLS PWR t=%lu sleep=%u mask=%u acq{link=%lu,out=%lu,adc=%lu,uart=%lu} held_ms{link=%lu,out=%lu,adc=%lu,uart=%lu}\n",
+        (unsigned long)now,
+        dpls_phy6252_power_connected_sleep_enabled() ? 1u : 0u,
+        power.held_mask,
+        (unsigned long)power.acquire_count[DPLS_POWER_LINK],
+        (unsigned long)power.acquire_count[DPLS_POWER_OUTPUT],
+        (unsigned long)power.acquire_count[DPLS_POWER_ADC],
+        (unsigned long)power.acquire_count[DPLS_POWER_DEBUG_UART],
+        (unsigned long)power.held_ms[DPLS_POWER_LINK],
+        (unsigned long)power.held_ms[DPLS_POWER_OUTPUT],
+        (unsigned long)power.held_ms[DPLS_POWER_ADC],
+        (unsigned long)power.held_ms[DPLS_POWER_DEBUG_UART]);
+#else
+    LOG("DPLS PWR t=%lu sleep=%u mask=%u acq{link=%lu,out=%lu,adc=%lu} held_ms{link=%lu,out=%lu,adc=%lu}\n",
+        (unsigned long)now,
+        dpls_phy6252_power_connected_sleep_enabled() ? 1u : 0u,
+        power.held_mask,
+        (unsigned long)power.acquire_count[DPLS_POWER_LINK],
+        (unsigned long)power.acquire_count[DPLS_POWER_OUTPUT],
+        (unsigned long)power.acquire_count[DPLS_POWER_ADC],
+        (unsigned long)power.held_ms[DPLS_POWER_LINK],
+        (unsigned long)power.held_ms[DPLS_POWER_OUTPUT],
+        (unsigned long)power.held_ms[DPLS_POWER_ADC]);
+#endif
+}
+#endif
 
 dpls_link_profile_t dpls_phy6252_runtime_link_profile(void)
 {
@@ -260,6 +322,12 @@ void dpls_phy6252_runtime_init(uint8 new_task_id)
     factory_reset_started_ms = now;
     next_measurement_ms = now + DPLS_MEASUREMENT_IDLE_MS;
     next_led_ms = 0u;
+#if DPLS_DEBUG_UART_ROM
+    rom_boot_pending = false;
+#endif
+#if DPLS_POWER_DIAG_LOG
+    next_power_diag_ms = now + DPLS_POWER_DIAG_INTERVAL_MS;
+#endif
 
     hal = server_hal();
     dpls_server_init(&server, &hal, now);
@@ -355,6 +423,31 @@ void dpls_phy6252_runtime_process_timer(void)
     now = now_ms();
     connected = dpls_phy6252_transport_connected_now();
 
+#if DPLS_DEBUG_UART_ROM
+    if (rom_boot_pending) {
+        dpls_phy6252_outputs_safe_normal(NULL);
+        if (connected) {
+            dpls_phy6252_transport_disconnect(NULL);
+        } else if (dpls_phy6252_storage_work_pending()) {
+            schedule_storage_if_needed();
+        } else if (dpls_phy6252_storage_prepare_rom_boot()) {
+            LOG("DPLS ROM READY\n");
+            NVIC_SystemReset();
+        } else {
+            rom_boot_pending = false;
+            LOG("DPLS ROM ERROR\n");
+            (void)dpls_phy6252_power_release(DPLS_POWER_DEBUG_UART);
+        }
+    }
+#endif
+
+#if DPLS_POWER_DIAG_LOG
+    if (due(now, next_power_diag_ms)) {
+        log_power_diag(now);
+        next_power_diag_ms = now + DPLS_POWER_DIAG_INTERVAL_MS;
+    }
+#endif
+
     if (due(now, next_measurement_ms)) {
         dpls_phy6252_measurements_tick(connected, server.safety.mode);
         next_measurement_ms = now + measurement_interval_ms();
@@ -383,6 +476,13 @@ uint32 dpls_phy6252_runtime_next_wakeup_ms(void)
     next = earlier_deadline(now, next, candidate);
 
     next = earlier_deadline(now, next, next_led_ms);
+
+#if DPLS_DEBUG_UART_ROM
+    if (rom_boot_pending) next = earlier_deadline(now, next, now + 1u);
+#endif
+#if DPLS_POWER_DIAG_LOG
+    next = earlier_deadline(now, next, next_power_diag_ms);
+#endif
 
     if (factory_reset_armed)
         next = earlier_deadline(now, next, factory_reset_started_ms + DPLS_FACTORY_RESET_HOLD_MS);

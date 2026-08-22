@@ -17,6 +17,21 @@
 #include "pwrmgr.h"
 #include "fs.h"
 #include "log.h"
+#include "gpio.h"
+#include "uart.h"
+
+#ifndef DPLS_DEBUG_UART_ROM
+#define DPLS_DEBUG_UART_ROM 0
+#endif
+
+#if DPLS_DEBUG_UART_ROM
+#define DPLS_DEBUG_UART_AWAKE_MS 750u
+static const uint8 debug_uart_boot_token[] = {
+    0x00u, 0xd5u, 'D', 'P', 'L', 'S', '-', 'R', 'O', 'M',
+    0xa5u, 0x5au, 0xc3u, 0x3cu, 0x7eu, 0x81u
+};
+static uint8 debug_uart_boot_match;
+#endif
 
 /* BLE units are 1.25 ms for connection interval and 10 ms for supervision
  * timeout. ACTIVE keeps pairing/control responsive. IDLE allows up to ~600 ms
@@ -33,6 +48,55 @@
 static uint8 app_task_id;
 static bool link_profile_known;
 static dpls_link_profile_t applied_link_profile;
+
+#if DPLS_DEBUG_UART_ROM
+static void debug_uart_rx(uart_Evt_t *event)
+{
+    uint8 i;
+    if (event == NULL || event->data == NULL) return;
+    for (i = 0u; i < event->len; ++i) {
+        uint8 byte = event->data[i];
+        if (byte == debug_uart_boot_token[debug_uart_boot_match]) {
+            ++debug_uart_boot_match;
+            if (debug_uart_boot_match == sizeof(debug_uart_boot_token)) {
+                debug_uart_boot_match = 0u;
+                osal_set_event(app_task_id, DPLS_PHY6252_DEBUG_UART_BOOT_EVT);
+            }
+        } else {
+            debug_uart_boot_match = byte == debug_uart_boot_token[0] ? 1u : 0u;
+        }
+    }
+}
+
+static void debug_uart_wake(gpio_pin_e pin, gpio_polarity_e polarity)
+{
+    (void)pin;
+    (void)polarity;
+    osal_set_event(app_task_id, DPLS_PHY6252_DEBUG_UART_WAKE_EVT);
+}
+
+static void debug_uart_init(void)
+{
+    uart_Cfg_t config = {
+        .tx_pin = P9,
+        .rx_pin = P10,
+        .rts_pin = GPIO_DUMMY,
+        .cts_pin = GPIO_DUMMY,
+        .baudrate = 115200u,
+        .use_fifo = TRUE,
+        .hw_fwctrl = FALSE,
+        .use_tx_buf = FALSE,
+        .parity = FALSE,
+        .evt_handler = debug_uart_rx,
+    };
+    debug_uart_boot_match = 0u;
+    (void)hal_gpioin_register(P10, NULL, debug_uart_wake);
+    (void)hal_uart_deinit(UART0);
+    (void)hal_uart_init(config, UART0);
+    LOG("DPLS DBG uart-rom=1 power-diag=1 reset=%lu\n",
+        (unsigned long)g_system_reset_cause);
+}
+#endif
 
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
@@ -238,6 +302,9 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GGS_AddService(GATT_ALL_SERVICES);
     GATTServApp_AddService(GATT_ALL_SERVICES);
     dpls_phy6252_runtime_init(app_task_id);
+#if DPLS_DEBUG_UART_ROM
+    debug_uart_init();
+#endif
     ATT_SetMTUSizeMax(247);
     llInitFeatureSetDLE(TRUE);
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
@@ -301,6 +368,36 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
             enable_advertising();
         return events ^ DPLS_PHY6252_STORAGE_EVT;
     }
+
+#if DPLS_DEBUG_UART_ROM
+    if (events & DPLS_PHY6252_DEBUG_UART_WAKE_EVT) {
+        (void)dpls_phy6252_power_acquire(DPLS_POWER_DEBUG_UART);
+        (void)osal_start_timerEx(app_task_id, DPLS_PHY6252_DEBUG_UART_SLEEP_EVT,
+                                 DPLS_DEBUG_UART_AWAKE_MS);
+        return events ^ DPLS_PHY6252_DEBUG_UART_WAKE_EVT;
+    }
+
+    if (events & DPLS_PHY6252_DEBUG_UART_BOOT_EVT) {
+        static const uint8 ack[] = "\r\n[DPLS ROM PREPARE]\r\n";
+        static const uint8 error[] = "\r\n[DPLS ROM ERROR]\r\n";
+        (void)osal_stop_timerEx(app_task_id, DPLS_PHY6252_DEBUG_UART_SLEEP_EVT);
+        (void)dpls_phy6252_power_acquire(DPLS_POWER_DEBUG_UART);
+        if (dpls_phy6252_runtime_request_rom_boot()) {
+            (void)hal_uart_send_buff(UART0, (uint8 *)ack, (uint16)(sizeof(ack) - 1u));
+            schedule_runtime_timer();
+        } else {
+            (void)hal_uart_send_buff(UART0, (uint8 *)error, (uint16)(sizeof(error) - 1u));
+            (void)dpls_phy6252_power_release(DPLS_POWER_DEBUG_UART);
+        }
+        return events & (uint16)~(DPLS_PHY6252_DEBUG_UART_BOOT_EVT |
+                                 DPLS_PHY6252_DEBUG_UART_SLEEP_EVT);
+    }
+
+    if (events & DPLS_PHY6252_DEBUG_UART_SLEEP_EVT) {
+        (void)dpls_phy6252_power_release(DPLS_POWER_DEBUG_UART);
+        return events ^ DPLS_PHY6252_DEBUG_UART_SLEEP_EVT;
+    }
+#endif
 
     return 0u;
 }
