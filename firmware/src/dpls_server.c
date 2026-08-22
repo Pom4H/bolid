@@ -120,20 +120,23 @@ static void send_error(dpls_server_t *s, uint16_t sequence, uint8_t code) {
                      sequence, &code, 1u);
 }
 
-void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter) {
+static bool append_event(dpls_server_t *s, uint8_t type, uint8_t parameter) {
     dpls_event_t event;
-    if (!event_type_valid(type) || !s->hal.events.append) return;
+    if (!event_type_valid(type) || !s->hal.events.append) return false;
     memset(&event, 0, sizeof(event));
     event.sequence = s->journal.next_sequence;
     event.timestamp_seconds = event_timestamp_seconds(s);
     event.event_type = type;
     event.parameter = parameter;
-    if (!s->hal.events.append(s->hal.context, &event)) {
-        if (s->hal.diagnostic_error) s->hal.diagnostic_error(s->hal.context, false);
-        return;
-    }
+    if (!s->hal.events.append(s->hal.context, &event)) return false;
     ++s->journal.next_sequence;
     if (s->journal.count < DPLS_EVENT_CAPACITY) ++s->journal.count;
+    return true;
+}
+
+void dpls_server_log(dpls_server_t *s, uint8_t type, uint8_t parameter) {
+    if (!append_event(s, type, parameter) && s->hal.diagnostic_error)
+        s->hal.diagnostic_error(s->hal.context, false);
 }
 
 static void force_normal(dpls_server_t *s, dpls_return_reason_t reason) {
@@ -141,6 +144,18 @@ static void force_normal(dpls_server_t *s, dpls_return_reason_t reason) {
     s->hal.hardware.safe_normal(s->hal.context);
     dpls_safety_force_normal(&s->safety);
     dpls_server_log(s, EVT_MODE_AUTO_RETURN, (uint8_t)reason);
+}
+
+static void enter_critical_fault(dpls_server_t *s) {
+    if (s->critical_fault) return;
+    s->critical_fault = true;
+    s->session.authenticated = false;
+    memset(s->session.token, 0, sizeof(s->session.token));
+    /* Critical fault bypasses audit logging: the journal itself may be the
+     * failed dependency. Hardware is driven to the sink state first. */
+    s->hal.hardware.safe_normal(s->hal.context);
+    dpls_safety_force_normal(&s->safety);
+    if (s->hal.diagnostic_error) s->hal.diagnostic_error(s->hal.context, true);
 }
 
 static dpls_return_reason_t safety_return_reason(dpls_safety_return_t reason) {
@@ -267,10 +282,7 @@ static bool session_matches(dpls_server_t *s, const dpls_frame_t *f, uint16_t mi
 static bool random_or_fail(dpls_server_t *s, uint8_t *out, size_t length) {
     if (s->hal.auth.random_bytes && s->hal.auth.random_bytes(s->hal.context, out, length)) return true;
     memset(out, 0, length);
-    s->session.authenticated = false;
-    s->critical_fault = true;
-    force_normal(s, DPLS_RETURN_INTERNAL_ERROR);
-    if (s->hal.diagnostic_error) s->hal.diagnostic_error(s->hal.context, true);
+    enter_critical_fault(s);
     return false;
 }
 
@@ -292,7 +304,7 @@ static void send_auth_result(dpls_server_t *s, uint16_t sequence, uint8_t status
     uint8_t payload[11];
     payload[0] = status;
     wr16(payload + 1, retry_seconds);
-    if (status == 0) {
+    if (status == DPLS_AUTH_OK) {
         if (!random_or_fail(s, s->session.token, sizeof(s->session.token))) {
             payload[0] = DPLS_AUTH_INTERNAL_ERROR;
             memset(payload + 3, 0, 8);
@@ -418,7 +430,12 @@ static void handle_mode(dpls_server_t *s, const dpls_frame_t *f) {
                 result.status = DPLS_COMMAND_APPLY_FAILED;
             } else {
                 dpls_safety_commit_mode(&s->safety, requested, s->now_ms);
-                if (requested != prev_mode) dpls_server_log(s, EVT_MODE_CHANGED, (uint8_t)requested);
+                if (requested != prev_mode && !append_event(s, EVT_MODE_CHANGED, (uint8_t)requested)) {
+                    /* Dangerous mode without an audit record is not an admissible
+                     * steady state. Roll back immediately and close the session. */
+                    enter_critical_fault(s);
+                    result.status = DPLS_COMMAND_APPLY_FAILED;
+                }
             }
         }
     }
@@ -478,9 +495,15 @@ static void send_log_from(dpls_server_t *s, uint16_t sequence, uint16_t first) {
 static bool auth_block_active(dpls_server_t *s, uint32_t now) {
     if (!s->session.blocked_until_ms) return false;
     if (!elapsed(now, s->session.blocked_until_ms)) return true;
+
+    /* Сначала stage durable unlock. Только после успешного stage RAM lockout
+     * считается снятым. Иначе reboot мог бы вернуть противоречивое состояние. */
+    if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, false)) {
+        enter_critical_fault(s);
+        return true;
+    }
     s->session.blocked_until_ms = 0;
     s->session.failed_auth_attempts = 0;
-    if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
     return false;
 }
 
@@ -534,11 +557,17 @@ static void handle_setup(dpls_server_t *s, const dpls_frame_t *f) {
 }
 
 static void block_authentication(dpls_server_t *s, const dpls_frame_t *f) {
+    s->session.authenticated = false;
     s->session.blocked_until_ms = s->now_ms + DPLS_AUTH_BLOCK_MS;
-    if (s->hal.auth.lock_write && !s->hal.auth.lock_write(s->hal.context, true) &&
-        s->hal.diagnostic_error) {
-        s->hal.diagnostic_error(s->hal.context, false);
+
+    /* A lockout that cannot be staged for persistence is not a lockout. Fail
+     * closed instead of reporting BLOCKED while reboot could bypass it. */
+    if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, true)) {
+        enter_critical_fault(s);
+        send_auth_result(s, f->sequence, DPLS_AUTH_INTERNAL_ERROR, 0);
+        return;
     }
+
     send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED,
                      (uint16_t)(DPLS_AUTH_BLOCK_MS / 1000u));
     dpls_server_log(s, EVT_AUTH_BLOCKED, 0);
@@ -551,9 +580,13 @@ static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
         return;
     }
     if (auth_block_active(s, s->now_ms)) {
-        uint16_t retry_seconds =
-            (uint16_t)((s->session.blocked_until_ms - s->now_ms + 999u) / 1000u);
-        send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED, retry_seconds);
+        if (s->critical_fault) {
+            send_auth_result(s, f->sequence, DPLS_AUTH_INTERNAL_ERROR, 0);
+        } else {
+            uint16_t retry_seconds =
+                (uint16_t)((s->session.blocked_until_ms - s->now_ms + 999u) / 1000u);
+            send_auth_result(s, f->sequence, DPLS_AUTH_BLOCKED, retry_seconds);
+        }
         return;
     }
     if (s->session.last_auth_proof_ms &&
@@ -567,11 +600,21 @@ static void handle_auth_proof(dpls_server_t *s, const dpls_frame_t *f) {
                                  s->session.client_nonce, s->session.session_id,
                                  f->payload + DPLS_AUTH_NONCE_SIZE)) {
         bool first_success = !s->session.authenticated;
+
+        /* AUTH_OK is published only after the durable lock state accepted an
+         * unlock stage. Production storage may commit it only after link drain,
+         * but a failed stage can never be hidden behind a successful session. */
+        if (!s->hal.auth.lock_write || !s->hal.auth.lock_write(s->hal.context, false)) {
+            enter_critical_fault(s);
+            send_auth_result(s, f->sequence, DPLS_AUTH_INTERNAL_ERROR, 0);
+            return;
+        }
+
         s->session.authenticated = true;
         s->session.failed_auth_attempts = 0;
         s->session.last_authenticated_activity_ms = s->now_ms;
         send_auth_result(s, f->sequence, DPLS_AUTH_OK, 0);
-        if (s->hal.auth.lock_write) (void)s->hal.auth.lock_write(s->hal.context, false);
+        if (s->critical_fault) return;
         if (first_success) dpls_server_log(s, EVT_AUTH_SUCCESS, 0);
         return;
     }
