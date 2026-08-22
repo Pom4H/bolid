@@ -3,6 +3,7 @@
 #include "dpls_board.h"
 #include "dpls_calib.h"
 #include "dpls_phy6252_events.h"
+#include "dpls_phy6252_power.h"
 #include "dpls_phy6252_storage.h"
 #include "OSAL.h"
 #if defined(__GNUC__)
@@ -10,7 +11,6 @@
 #endif
 #include "adc.h"
 #include "error.h"
-#include "pwrmgr.h"
 #include <string.h>
 
 #define DPLS_ADC_DECIMATE 1u
@@ -48,7 +48,6 @@ static volatile uint16_t cached_vcap_mv;
 static volatile bool adc_busy;
 static volatile uint8_t adc_pending;
 static uint8_t adc_decimate;
-static bool adc_sleep_locked;
 static dpls_power_t power_state = DPLS_POWER_LINE;
 static bool reserve_low_state;
 static bool auto_isolation_active;
@@ -58,17 +57,6 @@ static volatile uint16_t adc_raw[MAX_ADC_SAMPLE_SIZE];
 static volatile uint8_t adc_raw_size;
 static volatile adc_CH_t adc_raw_channel;
 static volatile bool adc_raw_ready;
-
-static bool adc_sleep_guard(bool lock)
-{
-    int rc;
-    if (lock == adc_sleep_locked) return true;
-
-    rc = lock ? hal_pwrmgr_lock(MOD_USR2) : hal_pwrmgr_unlock(MOD_USR2);
-    if (rc != PPlus_SUCCESS) return false;
-    adc_sleep_locked = lock;
-    return true;
-}
 
 static uint16_t fold_window(uint16_t *window, uint8_t *count, uint8_t *pos, uint16_t value)
 {
@@ -85,8 +73,8 @@ static void adc_evt(adc_Evt_t *event)
 {
     uint8_t i, n;
     if (event->type != HAL_ADC_EVT_DATA) {
-        /* Wake the OSAL task so it can release the ADC sleep guard outside IRQ
-         * context. Never call pwrmgr lock/unlock from the ADC callback. */
+        /* IRQ only records facts and wakes OSAL. Power release remains in task
+         * context so ISR and pwrmgr ownership never mix. */
         adc_busy = false;
         adc_pending = 0u;
         osal_set_event(task_id, DPLS_PHY6252_ADC_EVT);
@@ -110,6 +98,14 @@ static void process_adc_channel(adc_CH_t ch, volatile uint16_t *raw, uint8_t siz
     *cached = fold_window(window, wcount, wpos, dpls_calib_apply(calib, pin_mv));
 }
 
+static void adc_abort_series(void)
+{
+    adc_busy = false;
+    adc_pending = 0u;
+    adc_raw_ready = false;
+    (void)dpls_phy6252_power_release(DPLS_POWER_ADC);
+}
+
 static void adc_kick(void)
 {
     adc_Cfg_t cfg;
@@ -118,16 +114,14 @@ static void adc_kick(void)
 
     if (adc_busy || adc_raw_ready) return;
     if (adc_pending == 0u) {
-        (void)adc_sleep_guard(false);
+        (void)dpls_phy6252_power_release(DPLS_POWER_ADC);
         return;
     }
 
-    /* PHY6252 has a documented hardware history of ADC/radio/sleep races. Keep
-     * the core awake only for the short conversion series instead of for the
-     * whole BLE session. MOD_USR2 is dedicated to measurements so this cannot
-     * accidentally release the independent MOD_USR1 power-output guard. */
-    if (!adc_sleep_guard(true)) {
-        adc_pending = 0u;
+    /* ADC is the only owner of this short conversion-series constraint. The
+     * BLE link no longer needs to keep the CPU awake merely because it exists. */
+    if (!dpls_phy6252_power_acquire(DPLS_POWER_ADC)) {
+        adc_abort_series();
         return;
     }
 
@@ -152,16 +146,12 @@ static void adc_kick(void)
     cfg.is_high_resolution = 0u;
     adc_busy = true;
     if (hal_adc_config_channel(cfg, adc_evt) != PPlus_SUCCESS) {
-        adc_busy = false;
-        adc_pending = 0u;
-        (void)adc_sleep_guard(false);
+        adc_abort_series();
         return;
     }
     if (hal_adc_start(INTERRUPT_MODE) != PPlus_SUCCESS) {
         (void)hal_adc_stop();
-        adc_busy = false;
-        adc_pending = 0u;
-        (void)adc_sleep_guard(false);
+        adc_abort_series();
         return;
     }
     adc_pending = (uint8_t)(adc_pending & (uint8_t)~claim);
@@ -202,7 +192,6 @@ void dpls_phy6252_measurements_init(uint8 new_task_id)
     adc_pending = 0u;
     adc_raw_ready = false;
     adc_busy = false;
-    adc_sleep_locked = false;
     power_state = DPLS_POWER_LINE;
     reserve_low_state = false;
     auto_isolation_active = false;
@@ -223,8 +212,6 @@ void dpls_phy6252_measurements_tick(bool connected, dpls_mode_t mode)
             adc_kick();
         }
     }
-    /* Reconcile the already-completed sample before the new conversion series.
-     * Fresh samples are reconciled again immediately in process(). */
     update_power_state(mode);
 }
 
@@ -258,9 +245,6 @@ void dpls_phy6252_measurements_process(dpls_mode_t mode)
         default:
             break;
         }
-        /* Safety-relevant derived facts change at the ADC completion event, not
-         * at an unrelated periodic timer. Runtime evaluates dpls_safety directly
-         * after this function returns. */
         update_power_state(mode);
     }
     adc_kick();
