@@ -145,3 +145,47 @@ if [ ! -s "$OUT" ]; then
     echo "error: firmware build did not produce a non-empty HEX: $OUT" >&2
     exit 1
 fi
+
+# Firmware images may contain XIP/SRAM records, but persistent flash belongs to
+# the running device. A normal build must never emit bytes into SNV or the
+# factory sector; otherwise even a non-erase `wh` can destroy user identity.
+python3 - "$OUT" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+PERSISTENT_START = 0x1103C000
+PERSISTENT_END = 0x11040000  # exclusive: SNV + factory sector
+upper = 0
+
+for line_number, raw in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
+    line = raw.strip()
+    if not line:
+        continue
+    if not line.startswith(":"):
+        raise SystemExit(f"error: invalid Intel HEX line {line_number}")
+    record = bytes.fromhex(line[1:])
+    if len(record) < 5:
+        raise SystemExit(f"error: short Intel HEX record at line {line_number}")
+    length = record[0]
+    address = (record[1] << 8) | record[2]
+    kind = record[3]
+    data = record[4 : 4 + length]
+    if len(data) != length:
+        raise SystemExit(f"error: truncated Intel HEX record at line {line_number}")
+    if kind == 0x04:
+        if length != 2:
+            raise SystemExit(f"error: invalid type-04 record at line {line_number}")
+        upper = int.from_bytes(data, "big") << 16
+    elif kind == 0x00 and length:
+        start = upper + address
+        end = start + length
+        if start < PERSISTENT_END and end > PERSISTENT_START:
+            raise SystemExit(
+                "error: firmware HEX overlaps persistent flash: "
+                f"0x{start:08X}..0x{end - 1:08X} at line {line_number}; "
+                "reserved 0x1103C000..0x1103FFFF"
+            )
+
+print("persistent flash guard: PASS")
+PY
