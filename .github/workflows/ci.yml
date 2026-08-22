@@ -12,9 +12,12 @@ on:
         default: false
         type: boolean
 
+# Each PR synchronization validates exactly that pushed change-set. Do not cancel
+# an older run: otherwise a later firmware-only push could erase the only proof
+# for an earlier mobile change without selecting Android/iOS again.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   smoke:
