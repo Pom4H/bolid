@@ -16,9 +16,7 @@ static const uint8 dpls_rx_uuid[ATT_UUID_SIZE]      = {0x01,0x00,0xf0,0xd5,0xb7,
 static const uint8 dpls_tx_uuid[ATT_UUID_SIZE]      = {0x01,0x00,0xf0,0xd5,0xb7,0x14,0x4c,0x9a,0x2f,0x4d,0x7a,0x5d,0x02,0x10,0x5f,0x7b};
 static gattAttrType_t service_type = {ATT_UUID_SIZE, (uint8 *)dpls_service_uuid};
 static uint8 rx_properties = GATT_PROP_WRITE;
-/* RC9: responses are indications only. Completion is a real ATT confirmation,
- * never an elapsed-time guess. */
-static uint8 tx_properties = GATT_PROP_INDICATE;
+static uint8 tx_properties = GATT_PROP_INDICATE | GATT_PROP_NOTIFY;
 static uint8 rx_value;
 static uint8 tx_value;
 static gattCharCfg_t tx_cccd[GATT_MAX_NUM_CONN];
@@ -39,7 +37,8 @@ static gattAttribute_t attrs[DPLS_ATTR_COUNT] = {
     {{ATT_UUID_SIZE, (uint8 *)dpls_rx_uuid}, GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE, 0, &rx_value},
     {{ATT_BT_UUID_SIZE, characterUUID}, GATT_PERMIT_READ, 0, &tx_properties},
     {{ATT_UUID_SIZE, (uint8 *)dpls_tx_uuid}, 0, 0, &tx_value},
-    /* Pairing is a GATT security property, not an advertising convention. */
+    /* Pairing is a GATT security property, not an advertising convention. This
+     * lets clients discover by Service UUID without relying on manufacturer data. */
     {{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE | GATT_PERMIT_ENCRYPT_WRITE, 0, (uint8 *)&tx_cccd}
 };
 
@@ -69,7 +68,7 @@ static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint
             value,
             len,
             offset,
-            GATT_CLIENT_CFG_INDICATE
+            GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE
         );
         LOG("DPLS CCCD conn=%u cfg=%04x rc=%u\n",
             conn,
@@ -100,7 +99,7 @@ bool dpls_gatt_subscribed(void) {
     uint8 i;
     for (i = 0; i < GATT_MAX_NUM_CONN; ++i) {
         if (tx_cccd[i].connHandle != INVALID_CONNHANDLE &&
-            (tx_cccd[i].value & GATT_CLIENT_CFG_INDICATE) != 0u) {
+            (tx_cccd[i].value & (GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE)) != 0u) {
             return true;
         }
     }
@@ -108,13 +107,14 @@ bool dpls_gatt_subscribed(void) {
 }
 
 bool dpls_gatt_needs_confirmation(uint16 conn) {
-    return (GATTServApp_ReadCharCfg(conn, tx_cccd) & GATT_CLIENT_CFG_INDICATE) != 0u;
+    uint16 cfg = GATTServApp_ReadCharCfg(conn, tx_cccd);
+    return (cfg & GATT_CLIENT_CFG_NOTIFY) == 0u && (cfg & GATT_CLIENT_CFG_INDICATE) != 0u;
 }
 
 bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     uint16 cfg = GATTServApp_ReadCharCfg(conn, tx_cccd);
     bStatus_t rc;
-    if ((cfg & GATT_CLIENT_CFG_INDICATE) == 0u) {
+    if ((cfg & (GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE)) == 0u) {
         rc = bleNotConnected;
     } else if (length + 3u > ATT_GetCurrentMTUSize(conn) || length > sizeof(tx_indication.value)) {
         rc = ATT_ERR_INVALID_VALUE_SIZE;
@@ -122,11 +122,20 @@ bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 lengt
         tx_indication.handle = attrs[DPLS_TX_VALUE_INDEX].handle;
         tx_indication.len = length;
         osal_memcpy(tx_indication.value, data, length);
-        rc = GATT_Indication(conn, &tx_indication, FALSE, task_id);
+        /* Samsung SM-A135F requires CCCD 0x03. In that mode the known-stable
+         * path is notification. RC9 no longer invents an 80 ms completion: a
+         * successful GATT_Notification is complete at the ATT host boundary;
+         * an indication remains in flight until ATT_HANDLE_VALUE_CFM. */
+        if (cfg & GATT_CLIENT_CFG_NOTIFY) {
+            rc = GATT_Notification(conn, (attHandleValueNoti_t *)&tx_indication, FALSE);
+        } else {
+            rc = GATT_Indication(conn, &tx_indication, FALSE, task_id);
+        }
     }
-    LOG("DPLS TX n=%u t=%02x indicate=1 rc=%u\n",
+    LOG("DPLS TX n=%u t=%02x notify=%u rc=%u\n",
         length,
         length > 1u ? data[1] : 0u,
+        (cfg & GATT_CLIENT_CFG_NOTIFY) != 0u,
         rc);
     return rc;
 }
