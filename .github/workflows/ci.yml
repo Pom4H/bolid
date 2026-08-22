@@ -4,6 +4,13 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: Run every production platform check
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -14,54 +21,113 @@ jobs:
     name: Cheap PR smoke
     runs-on: ubuntu-latest
     outputs:
-      mobile: ${{ steps.changes.outputs.mobile }}
+      android: ${{ steps.changes.outputs.android }}
+      ios: ${{ steps.changes.outputs.ios }}
       firmware: ${{ steps.changes.outputs.firmware }}
-      replay: ${{ steps.changes.outputs.replay }}
+      soft_ble: ${{ steps.changes.outputs.soft_ble }}
       release_pr: ${{ steps.changes.outputs.release_pr }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
-      - name: Detect changed areas and RC policy
+      - name: Detect changed areas
         id: changes
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
           HEAD_REF: ${{ github.head_ref }}
+          FULL_MATRIX: ${{ inputs.full_matrix }}
         run: |
           set -euo pipefail
+
           release_pr=false
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "mobile=true" >> "$GITHUB_OUTPUT"
-            echo "firmware=true" >> "$GITHUB_OUTPUT"
-            echo "replay=true" >> "$GITHUB_OUTPUT"
-            echo "release_pr=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          [[ "$HEAD_REF" == release/* ]] && release_pr=true
 
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git diff --name-only "$BASE_SHA" HEAD > /tmp/changed.txt
-          cat /tmp/changed.txt
-
-          mobile=false
+          android=false
+          ios=false
           firmware=false
-          replay=false
-          if grep -qE '^mobile/' /tmp/changed.txt; then mobile=true; fi
-          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract)\.py)' /tmp/changed.txt; then firmware=true; fi
-          if grep -qE '^(tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
+          soft_ble=false
 
-          if [[ "$HEAD_REF" == release/* ]]; then
-            release_pr=true
-            mobile=true
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$FULL_MATRIX" == "true" ]]; then
+            android=true
+            ios=true
             firmware=true
-            replay=true
+            soft_ble=true
+          else
+            head="$CURRENT_SHA"
+            base=""
+
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              head="$PR_HEAD_SHA"
+              # On synchronize GitHub gives the previous PR head. Diff only the
+              # newly pushed commits, so a firmware-only follow-up does not
+              # rebuild unchanged Android/iOS code from the cumulative PR diff.
+              if [[ "$EVENT_ACTION" == "synchronize" && -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+                base="$BEFORE_SHA"
+              else
+                # First/opened/reopened run validates every area changed by the PR.
+                base="$BASE_SHA"
+              fi
+            elif [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+              base="$BEFORE_SHA"
+            fi
+
+            if [[ -z "$base" ]]; then
+              base="${head}^"
+            fi
+
+            git fetch --no-tags --depth=2 origin "$head" "$base" || git fetch --no-tags origin "$head" "$base"
+            git diff --name-only "$base" "$head" > /tmp/changed.txt
+            echo "Changed files ($base..$head):"
+            cat /tmp/changed.txt
+
+            ci_changed=false
+            shared_mobile=false
+            android_only=false
+            ios_only=false
+            soft_ble_only=false
+
+            if grep -qE '^\.github/(workflows/ci\.yml|actions/)' /tmp/changed.txt; then ci_changed=true; fi
+
+            # Shared KMP code/build configuration affects both native platforms.
+            if grep -qE '^(mobile/(wire|runtime)/|mobile/core/(build\.gradle\.kts|src/(commonMain|commonTest)/)|mobile/(build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradle/|gradlew$|interop/))' /tmp/changed.txt; then
+              shared_mobile=true
+            fi
+            if grep -qE '^(mobile/android/|mobile/core/src/(androidMain|androidUnitTest)/)' /tmp/changed.txt; then android_only=true; fi
+            if grep -qE '^(mobile/ios/|mobile/core/src/iosMain/)' /tmp/changed.txt; then ios_only=true; fi
+            if grep -qE '^(mobile/core/src/jvmMain/|tools/soft_ble_e2e\.sh|tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then
+              soft_ble_only=true
+            fi
+
+            if [[ "$shared_mobile" == true || "$android_only" == true ]]; then android=true; fi
+            if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
+            if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
+
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
+              firmware=true
+            fi
+
+            # A CI implementation change validates the whole matrix once.
+            if [[ "$ci_changed" == true ]]; then
+              android=true
+              ios=true
+              firmware=true
+              soft_ble=true
+            fi
           fi
 
-          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "ios=$ios" >> "$GITHUB_OUTPUT"
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
-          echo "replay=$replay" >> "$GITHUB_OUTPUT"
+          echo "soft_ble=$soft_ble" >> "$GITHUB_OUTPUT"
           echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
+          printf 'Selected: android=%s ios=%s firmware=%s soft_ble=%s release_pr=%s\n' \
+            "$android" "$ios" "$firmware" "$soft_ble" "$release_pr"
       - name: Host invariants + sanitizers
         run: bash tools/run_host_invariant_gate.sh
       - name: Verify revision 2 pinout contract
@@ -82,7 +148,7 @@ jobs:
   android:
     name: Android unit tests
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true' || needs.smoke.outputs.mobile == 'true'
+    if: needs.smoke.outputs.android == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -96,22 +162,19 @@ jobs:
         working-directory: mobile
         run: ./gradlew :wire:testDebugUnitTest :runtime:testDebugUnitTest :core:testDebugUnitTest
       - name: Full Android lint + APK
-        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         working-directory: mobile
         run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
       - name: Stage installable APK
-        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p tmp/android
-          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc8-debug.apk
-          sha256sum tmp/android/TestDPLS-1.4.2-rc8-debug.apk > tmp/android/TestDPLS-1.4.2-rc8-debug.apk.sha256
-          printf 'version=1.4.2\nrc=8\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.4.2-rc9-debug.apk
+          sha256sum tmp/android/TestDPLS-1.4.2-rc9-debug.apk > tmp/android/TestDPLS-1.4.2-rc9-debug.apk.sha256
+          printf 'version=1.4.2\nrc=9\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
       - uses: actions/upload-artifact@v6
-        if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
         with:
-          name: test-dpls-android-1.4.2-rc8
+          name: test-dpls-android-1.4.2-rc9
           path: tmp/android
           if-no-files-found: error
           retention-days: 7
@@ -119,7 +182,7 @@ jobs:
   firmverse:
     name: PHY6252 Firmverse
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true' || needs.smoke.outputs.firmware == 'true'
+    if: needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -154,7 +217,7 @@ jobs:
   firmware_quality:
     name: Firmware coverage + cppcheck
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+    if: needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -169,7 +232,7 @@ jobs:
   soft_ble_e2e:
     name: Soft-BLE DplsClient ↔ simulator
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+    if: needs.smoke.outputs.soft_ble == 'true' || needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -185,7 +248,7 @@ jobs:
   firmware_gcc:
     name: PHY6252 GNU Arm GCC
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+    if: needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -200,10 +263,10 @@ jobs:
           mkdir -p tmp/gcc
           bash tools/build_firmware.sh gcc tmp/gcc/test-dpls-gcc.hex 2>&1 | tee tmp/gcc/gcc-build.log
           sha256sum tmp/gcc/test-dpls-gcc.hex > tmp/gcc/test-dpls-gcc.hex.sha256
-          printf 'version=1.4.2\nrc=8\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
+          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-gcc-1.4.2-rc8
+          name: test-dpls-phy6252-gcc-1.4.2-rc9
           path: |
             tmp/gcc
             firmware/targets/phy6252/build/test-dpls.elf
@@ -214,7 +277,7 @@ jobs:
   firmware_keil:
     name: PHY6252 Keil MDK / AC6
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+    if: needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
@@ -237,14 +300,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p tmp/keil
-          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc8.hex 2>&1 | tee tmp/keil/keil-build.log
+          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc9.hex 2>&1 | tee tmp/keil/keil-build.log
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/keil/test-dpls.axf
           cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/keil/test-dpls.map
-          sha256sum tmp/keil/TestDPLS-1.4.2-rc8.hex > tmp/keil/TestDPLS-1.4.2-rc8.hex.sha256
-          printf 'version=1.4.2\nrc=8\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
+          sha256sum tmp/keil/TestDPLS-1.4.2-rc9.hex > tmp/keil/TestDPLS-1.4.2-rc9.hex.sha256
+          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-keil-1.4.2-rc8
+          name: test-dpls-phy6252-keil-1.4.2-rc9
           path: tmp/keil
           if-no-files-found: error
           retention-days: 7
@@ -252,7 +315,7 @@ jobs:
   ios:
     name: iOS adapter + Xcode host
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'
+    if: needs.smoke.outputs.ios == 'true'
     runs-on: macos-latest
     timeout-minutes: 35
     steps:
@@ -306,7 +369,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every RC check to pass
+      - name: Require every affected RC check to pass
         shell: bash
         env:
           SMOKE: ${{ needs.smoke.result }}
@@ -317,18 +380,33 @@ jobs:
           GCC: ${{ needs.firmware_gcc.result }}
           KEIL: ${{ needs.firmware_keil.result }}
           IOS: ${{ needs.ios.result }}
+          NEED_ANDROID: ${{ needs.smoke.outputs.android }}
+          NEED_IOS: ${{ needs.smoke.outputs.ios }}
+          NEED_FIRMWARE: ${{ needs.smoke.outputs.firmware }}
+          NEED_SOFT_BLE: ${{ needs.smoke.outputs.soft_ble }}
         run: |
           set -euo pipefail
-          printf '%-20s %s\n' \
-            smoke "$SMOKE" \
-            android "$ANDROID" \
-            firmverse "$FIRMVERSE" \
-            firmware-quality "$QUALITY" \
-            soft-ble-e2e "$SOFT_BLE" \
-            firmware-gcc "$GCC" \
-            firmware-keil "$KEIL" \
-            ios "$IOS"
-          for result in "$SMOKE" "$ANDROID" "$FIRMVERSE" "$QUALITY" "$SOFT_BLE" "$GCC" "$KEIL" "$IOS"; do
-            [[ "$result" == success ]] || exit 1
-          done
-          echo 'RC production gate: PASS'
+
+          require_if_needed() {
+            local name="$1" result="$2" needed="$3"
+            printf '%-20s %-10s needed=%s\n' "$name" "$result" "$needed"
+            if [[ "$needed" == "true" ]]; then
+              [[ "$result" == "success" ]] || return 1
+            else
+              [[ "$result" == "success" || "$result" == "skipped" ]] || return 1
+            fi
+          }
+
+          [[ "$SMOKE" == "success" ]]
+          require_if_needed android "$ANDROID" "$NEED_ANDROID"
+          require_if_needed ios "$IOS" "$NEED_IOS"
+          require_if_needed firmverse "$FIRMVERSE" "$NEED_FIRMWARE"
+          require_if_needed firmware-quality "$QUALITY" "$NEED_FIRMWARE"
+          require_if_needed firmware-gcc "$GCC" "$NEED_FIRMWARE"
+          require_if_needed firmware-keil "$KEIL" "$NEED_FIRMWARE"
+          if [[ "$NEED_FIRMWARE" == "true" || "$NEED_SOFT_BLE" == "true" ]]; then
+            require_if_needed soft-ble-e2e "$SOFT_BLE" true
+          else
+            require_if_needed soft-ble-e2e "$SOFT_BLE" false
+          fi
+          echo 'RC affected-area production gate: PASS'
