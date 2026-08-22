@@ -31,6 +31,7 @@ for token in (
     "iOS adapter + Xcode host",
     "RC production gate",
     "BLE HCI LE_SetAdvEnable enabled=1",
+    "max-insns: '3000000'",
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
@@ -103,3 +104,4 @@ if "--auto-rst" not in flash:
 
 print("CI/DX contract: PASS")
 print("  one exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
+print("  Firmverse remains strict with a bounded 3,000,000-instruction boot budget")
