@@ -23,8 +23,14 @@ LDSCRIPT := phy6252.ld
 DEBUG_INFO ?= 0
 DPLS_CONNECTED_SLEEP ?= 1
 
+# PHY62XX SDK 3.1.2's own simpleBlePeripheral/gcc/Makefile deliberately builds
+# with -O0. Keep that silicon-proven GCC baseline as the default instead of
+# optimizing vendor timing/low-power code with -Os. `make GCC_OPT=-Os` remains
+# available as an explicit A/B diagnostic once the -O0 image is proven on HW.
+GCC_OPT ?= -O0
+
 ARCH := -mcpu=cortex-m0 -mthumb
-CFLAGS := $(ARCH) -std=c99 -Os -g3 \
+CFLAGS := $(ARCH) -std=c99 $(GCC_OPT) -g3 \
 	-funsigned-char -fshort-enums -fshort-wchar \
 	-ffunction-sections -fdata-sections -fno-common
 VENDOR_CFLAGS := $(CFLAGS) -w
