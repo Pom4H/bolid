@@ -1,0 +1,85 @@
+name: RC9 Firmverse flash harness
+
+on:
+  pull_request:
+    branches:
+      - release/1.4.2-rc9
+    paths:
+      - 'firmware/**'
+      - 'tools/build_firmware.sh'
+      - 'tools/fetch_phy6252_sdk.sh'
+      - '.github/actions/setup-arm-gcc/**'
+      - '.github/workflows/firmverse-flash-harness.yml'
+  push:
+    branches:
+      - release/1.4.2-rc9
+    paths:
+      - 'firmware/**'
+      - 'tools/build_firmware.sh'
+      - 'tools/fetch_phy6252_sdk.sh'
+      - '.github/actions/setup-arm-gcc/**'
+      - '.github/workflows/firmverse-flash-harness.yml'
+  workflow_dispatch:
+
+jobs:
+  flash-production-hex:
+    name: Production HEX -> PHY62xx ROM harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Bolid RC9
+        uses: actions/checkout@v6
+
+      - name: Setup cached ARM GNU Toolchain
+        uses: ./.github/actions/setup-arm-gcc
+
+      - name: Build RC9 production PHY6252 HEX
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          bash tools/build_firmware.sh gcc tmp/test-dpls-1.4.2-rc9.hex
+          test -s tmp/test-dpls-1.4.2-rc9.hex
+          sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
+
+      # Pin the exact Firmverse commit that exposes `phy6252-flash --harness`.
+      # This makes RC9 reproducible even if Firmverse main moves later.
+      - name: Checkout pinned Firmverse flasher harness
+        uses: actions/checkout@v6
+        with:
+          repository: Pom4H/firmverse
+          ref: 6d9264c812739d8f3a0a1d3cf35ab69d5a445f73
+          path: tmp/firmverse
+          submodules: recursive
+
+      - name: Setup Rust for Firmverse
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Program RC9 image through emulated PHY62xx ROM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --locked \
+            --manifest-path tmp/firmverse/Cargo.toml \
+            --bin phy6252-flash -- \
+            tmp/test-dpls-1.4.2-rc9.hex \
+            --harness \
+            --harness-flash-size 262144 \
+            | tee tmp/firmverse-flash-harness.log
+
+          grep -q 'flash=256 KiB' tmp/firmverse-flash-harness.log
+          grep -q 'verified .* image part(s) byte-for-byte in virtual NOR' tmp/firmverse-flash-harness.log
+          grep -q 'reset observed by harness' tmp/firmverse-flash-harness.log
+          grep -q 'harness flash ok' tmp/firmverse-flash-harness.log
+
+      - name: Upload flash-harness evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: rc9-firmverse-flash-harness
+          path: |
+            tmp/test-dpls-1.4.2-rc9.hex
+            tmp/test-dpls-1.4.2-rc9.hex.sha256
+            tmp/firmverse-flash-harness.log
+          if-no-files-found: warn
+          retention-days: 7
