@@ -2,10 +2,9 @@
 """RC9 ownership invariants.
 
 Checks facts that must remain singular: one source graph, one link owner, one
-logical mode owner, one flash writer, one request in flight and fail-safe output
-admission. RC9 makes deadline ownership explicit, so the aggregate PHY budget is
-2200 physical lines while the per-module 600 and total production 5000 limits
-remain unchanged.
+logical mode owner, one flash writer, one power owner, one request in flight and
+fail-safe output admission. The per-module 600 and total production 5000 limits
+remain fixed; aggregate PHY budget includes the explicit power-policy module.
 """
 from __future__ import annotations
 
@@ -27,6 +26,7 @@ RUNTIME = PHY / "dpls_phy6252_runtime.c"
 STORAGE = PHY / "dpls_phy6252_storage.c"
 TRANSPORT = PHY / "dpls_phy6252_transport.c"
 OUTPUTS = PHY / "dpls_phy6252_outputs.c"
+POWER = PHY / "dpls_phy6252_power.c"
 AUTH = PHY / "dpls_phy6252_auth.c"
 CLIENT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt"
 MACHINE = ROOT / "mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/ConnectionMachine.kt"
@@ -36,7 +36,7 @@ TRANSPORT_KT = ROOT / "mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/
 EXPECTED_PHY = {
     "dpls_gatt_service.c", "dpls_ble_identity.c", "dpls_phy6252_auth.c",
     "dpls_phy6252_measurements.c", "dpls_phy6252_outputs.c",
-    "dpls_phy6252_runtime.c", "dpls_phy6252_storage.c",
+    "dpls_phy6252_power.c", "dpls_phy6252_runtime.c", "dpls_phy6252_storage.c",
     "dpls_phy6252_supervisor.c", "dpls_phy6252_transport.c",
 }
 EXPECTED_CORE = {
@@ -80,17 +80,24 @@ for path, actual, expected in (
 ):
     if actual != expected: fail(path, f"source set mismatch: {sorted(actual ^ expected)}")
 
-# Cognitive budget is a release invariant. RC9 spends a bounded extra 200 PHY
-# lines to make scheduler/deadline ownership explicit instead of implicit in a
-# periodic tick. Per-module and whole-production limits do not move.
+# Cognitive budget is a release invariant. Power policy earns one small explicit
+# module instead of hiding lock state in three adapters. Per-module and total
+# production limits do not move.
 phy_lines = 0
 for path in sorted(PHY.glob("*.c")):
     lines = len(text(path).splitlines()); phy_lines += lines
     if lines > 600: fail(path, f"{lines} lines exceeds 600-line module budget")
-if phy_lines > 2200: fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2200")
+if phy_lines > 2300: fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2300")
 production_paths = list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")) + [TARGET]
 production_lines = sum(len(text(path).splitlines()) for path in production_paths)
 if production_lines > 5000: fail("firmware", f"production C is {production_lines} lines; budget 5000")
+
+# Production firmware is statically bounded: no runtime heap API may enter the
+# first-party graph. Vendor BLE internals are outside this architectural surface.
+for path in production_paths:
+    src = text(path)
+    for token in ("malloc(", "calloc(", "realloc(", "free("):
+        if token in src: fail(path, f"runtime heap forbidden in production firmware: {token}")
 
 # Link fact belongs only to transport. Target/runtime may query it; nobody shadows it.
 need(TRANSPORT, "static uint16 connection_handle", "transport must own the physical link fact")
@@ -125,12 +132,20 @@ need(RUNTIME, "dpls_phy6252_transport_tx_idle()", "persistence must wait for TX 
 need(STORAGE, "static uint32_t journal_timestamp[DPLS_EVENT_CAPACITY]", "compact RAM journal missing")
 forbid(STORAGE, "journal_records[DPLS_EVENT_CAPACITY]", "flash record representation leaked into RAM")
 
-# Dangerous GPIO requires a successfully acquired sleep resource before any pin is energized.
-need(OUTPUTS, "if (!control_sleep_guard(true)) return false;", "dangerous mode must require sleep lock")
-lock_pos = text(OUTPUTS).find("if (!control_sleep_guard(true)) return false;")
+# Power manager is the only pwrmgr constraint owner. Dangerous GPIO must acquire
+# its reason before the first energized pin write.
+for path in (TARGET, OUTPUTS, RUNTIME, STORAGE, TRANSPORT, AUTH, PHY / "dpls_phy6252_measurements.c"):
+    if path == POWER: continue
+    for token in ("hal_pwrmgr_lock(", "hal_pwrmgr_unlock(", "hal_pwrmgr_register("):
+        forbid(path, token, f"pwrmgr constraint bypasses power owner: {token}")
+need(POWER, "dpls_phy6252_power_acquire", "central power acquire missing")
+need(POWER, "dpls_phy6252_power_release", "central power release missing")
+lock_token = "if (!dpls_phy6252_power_acquire(DPLS_POWER_OUTPUT)) return false;"
+need(OUTPUTS, lock_token, "dangerous mode must acquire output sleep constraint")
+lock_pos = text(OUTPUTS).find(lock_token)
 first_dangerous_write = text(OUTPUTS).find("hal_gpio_write(DPLS_PIN_ISO_T, 1)")
 if lock_pos < 0 or first_dangerous_write < 0 or lock_pos > first_dangerous_write:
-    fail(OUTPUTS, "dangerous GPIO may be energized before sleep lock")
+    fail(OUTPUTS, "dangerous GPIO may be energized before power constraint")
 
 # Bond erase exists only behind physical factory reset; radio failures never infer key state.
 for path in PHY.glob("*.c"):
@@ -184,5 +199,5 @@ if errors:
     raise SystemExit(1)
 print("Architecture guard: PASS")
 print(f"  first-party firmware: {production_lines} lines; PHY adapter: {phy_lines} lines")
-print("  one link owner, one mode owner, one flash writer, one explicit bond erase")
-print("  one RX transaction; reserved TX; quiescent durable boundary; fail-safe outputs")
+print("  one link owner, one mode owner, one flash writer, one power owner")
+print("  static memory; one RX transaction; reserved TX; fail-safe output admission")
