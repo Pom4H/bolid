@@ -197,10 +197,9 @@ jobs:
           bash tools/build_firmware.sh gcc tmp/test-dpls-firmverse.hex
       - name: Run production HEX in Firmverse
         id: firmverse
-        # Pull the exact Firmverse main revision that adds PHY6252 ROM-UART reset
-        # modelling and the deterministic flasher harness. Pinning the SHA keeps
-        # RC9 release evidence reproducible while allowing it to consume the new model.
-        uses: Pom4H/firmverse@ad7302407c690d4a65399560cf19b9b0f946d5aa
+        # Pin the current Firmverse main revision that proves the complete
+        # PHY6252 ROM-UART flash -> reset -> boot path from programmed virtual NOR.
+        uses: Pom4H/firmverse@0c2e3b915db507448eb158cd0a49ccd1c2362b59
         with:
           firmware: tmp/test-dpls-firmverse.hex
           board: pb03f-kit
