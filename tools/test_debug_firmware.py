@@ -10,6 +10,7 @@ TARGET = ROOT / "firmware/targets/phy6252/source/dplsBLEPeripheral.c"
 RUNTIME = ROOT / "firmware/phy6252/dpls_phy6252_runtime.c"
 STORAGE = ROOT / "firmware/phy6252/dpls_phy6252_storage.c"
 CPROJECT = ROOT / "firmware/targets/phy6252/test-dpls.cproject.yml"
+SCATTER = ROOT / "firmware/targets/phy6252/scatter_load.sct"
 EVENTS = ROOT / "firmware/phy6252/dpls_phy6252_events.h"
 PRODUCTION_BUILD = ROOT / "tools/build_firmware.sh"
 
@@ -21,6 +22,7 @@ target = TARGET.read_text(encoding="utf-8")
 runtime = RUNTIME.read_text(encoding="utf-8")
 storage = STORAGE.read_text(encoding="utf-8")
 cproject = CPROJECT.read_text(encoding="utf-8")
+scatter = SCATTER.read_text(encoding="utf-8")
 events = EVENTS.read_text(encoding="utf-8")
 production_build = PRODUCTION_BUILD.read_text(encoding="utf-8")
 
@@ -45,6 +47,8 @@ for token in ("DPLS_ROM_BOOTINFO_PART_COUNT_ADDR", "flash_write_word", "verify =
     assert token in storage, token
 for token in ('DPLS_DEBUG_UART_ROM: "0"', 'DPLS_POWER_DIAG_LOG: "0"'):
     assert token in cproject, token
+for token in ("uart.o(+RO)", "pwrmgr.o(+RO)"):
+    assert token in scatter, token
 for token in (
     'PROFILE="${DPLS_BUILD_PROFILE:-production}"',
     "debug-rom)",
