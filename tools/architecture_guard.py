@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""RC8 ownership invariants.
+"""RC9 ownership invariants.
 
 Checks facts that must remain singular: one source graph, one link owner, one
 logical mode owner, one flash writer, one request in flight and fail-safe output
-admission.
+admission. RC9 makes deadline ownership explicit, so the aggregate PHY budget is
+2200 physical lines while the per-module 600 and total production 5000 limits
+remain unchanged.
 """
 from __future__ import annotations
 
@@ -78,12 +80,14 @@ for path, actual, expected in (
 ):
     if actual != expected: fail(path, f"source set mismatch: {sorted(actual ^ expected)}")
 
-# Cognitive budget is a release invariant.
+# Cognitive budget is a release invariant. RC9 spends a bounded extra 200 PHY
+# lines to make scheduler/deadline ownership explicit instead of implicit in a
+# periodic tick. Per-module and whole-production limits do not move.
 phy_lines = 0
 for path in sorted(PHY.glob("*.c")):
     lines = len(text(path).splitlines()); phy_lines += lines
     if lines > 600: fail(path, f"{lines} lines exceeds 600-line module budget")
-if phy_lines > 2000: fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2000")
+if phy_lines > 2200: fail("firmware/phy6252", f"adapter is {phy_lines} lines; budget 2200")
 production_paths = list(PHY.glob("*.c")) + list((ROOT / "firmware/src").glob("*.c")) + [TARGET]
 production_lines = sum(len(text(path).splitlines()) for path in production_paths)
 if production_lines > 5000: fail("firmware", f"production C is {production_lines} lines; budget 5000")
