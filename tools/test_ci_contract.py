@@ -99,9 +99,18 @@ if "/Users/" in build or "/Users/" in flash:
     raise SystemExit("local developer path leaked into firmware scripts")
 if (ROOT / "tools/flash_firmware_agent.sh").exists():
     raise SystemExit("separate agent flasher returned")
-if "--auto-rst" not in flash:
-    raise SystemExit("single flasher lost --auto-rst")
+
+# PB-03F kit exposes only TX/RX on its normal USB-UART path. Keep the release
+# contract on the hardware-proven rc3..rc5 flow: manual KEY1 and untouched
+# vendor `wh`. A future auto-reset mode is allowed only when a board revision
+# actually wires RTS/DTR to RST_N/TM; until then its presence is a regression.
+for forbidden in ("--auto-rst", "setRTS", "setDTR", "controlled_connect"):
+    if forbidden in flash:
+        raise SystemExit(f"production flasher regained unsupported auto-reset path: {forbidden}")
+if '-r wh "$HEX"' not in flash or "зажмите KEY1" not in flash:
+    raise SystemExit("production flasher lost manual KEY1 + vendor wh contract")
 
 print("CI/DX contract: PASS")
 print("  one exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
+print("  PB-03F flashing: manual KEY1 + vendor wh, no unsupported auto-reset")
 print("  Firmverse remains strict with a bounded 3,000,000-instruction boot budget")
