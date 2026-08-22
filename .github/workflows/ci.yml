@@ -141,7 +141,9 @@ jobs:
           grep -q 'hal.hardware.port_t_voltage_mv = dpls_phy6252_measurements_port_t_mv' firmware/phy6252/dpls_phy6252_runtime.c
           grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_measurements.c
           grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_measurements.c
-          grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'DANGEROUS_STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'NORMAL_STATE_REFRESH_MS = 5_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'RSSI_SESSION_POLL_MS = 10_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
 
