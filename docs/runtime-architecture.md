@@ -1,6 +1,6 @@
 # Runtime-архитектура RC8
 
-RC8 специально уменьшает количество мест, где может находиться истина. Production-код должен читаться сверху вниз за один проход.
+RC8 уменьшает количество мест, где может находиться истина. Production-код должен читаться сверху вниз за один проход: факт принадлежит одному владельцу, физический ресурс — одному адаптеру, переход состояния — одному reducer/policy.
 
 ## Карта кода
 
@@ -27,58 +27,100 @@ firmware/phy6252
   dpls_ble_identity.c        — chip public MAC + optional DID1 serial
   dpls_gatt_service.c        — RX/TX characteristics + CCCD
   dpls_phy6252_auth.c        — TRNG/HMAC
-  dpls_phy6252_transport.c   — BLE link + RX/TX queues
+  dpls_phy6252_transport.c   — единственный владелец BLE link/RX/TX
   dpls_phy6252_storage.c     — единственный app-owned SNV writer
   dpls_phy6252_measurements.c— ADC / power facts
-  dpls_phy6252_outputs.c     — GPIO / LED / safe output state
+  dpls_phy6252_outputs.c     — GPIO / LED actuator, без копии logical mode
   dpls_phy6252_supervisor.c  — watchdog boundary
-  dpls_phy6252_runtime.c     — OSAL orchestration, без business logic
+  dpls_phy6252_runtime.c     — orchestration физических owners
 
 firmware/targets/phy6252/source/dplsBLEPeripheral.c
   — тонкий vendor GAP/OSAL shell
 ```
 
-Старого `dpls_phy6252_app.c` нет. Второго storage facade нет. Второго BLE lifecycle нет.
+Старого `dpls_phy6252_app.c` нет. Второго storage facade нет. Второго BLE lifecycle нет. Target shell не хранит `link_up`, storage не хранит `link_active`, outputs не хранит копию logical mode.
 
-## Главный поток
+## Кто владеет фактами
+
+| Факт / ресурс | Единственный владелец |
+| --- | --- |
+| Физическое BLE-соединение | `dpls_phy6252_transport.connection_handle` |
+| Lifecycle приложения | `DeviceSession` + `ConnectionMachine.reduce()` |
+| Опасный logical mode | `dpls_safety_t.mode` |
+| Физические силовые GPIO | `dpls_phy6252_outputs.c` |
+| Measurement validity / voltage / power | `dpls_phy6252_measurements.c` |
+| App-owned SNV writes | `dpls_phy6252_storage.c` |
+| Решение о physical disconnect | `dpls_phy6252_runtime.c` |
+| Bond erase | physical factory-reset path |
+| Journal sequence/count | domain + storage ring metadata |
+
+## BLE transaction
+
+Protocol v2 — request/response, поэтому transport не изображает message broker.
 
 ```text
-GATT write callback
-  ↓ copy to RX queue
+GATT write
+  ↓ runtime admission
+1 RX slot
+  ↓
 DPLS_PHY6252_RX_EVT
   ↓
-dpls_phy6252_runtime_process_rx
+dpls_server_receive()
   ↓
-dpls_server_receive
+ровно один response
   ↓
-RAM state / response enqueue
+2 TX slots = in-flight + один следующий response
   ↓
-DPLS_PHY6252_TX_EVT
+ATT indication/notification
+```
+
+До того как GATT принимает request, transport резервирует место под его будущий response. Поэтому состояние «команда выполнена, но ACK некуда положить» архитектурно недостижимо.
+
+Второго RX backlog нет: пока один request ждёт domain processing, следующий получает `ATT_ERR_INSUFFICIENT_RESOURCES` и должен быть повторён клиентом.
+
+## Durable transaction
+
+`osal_snv_write()` существует только в `dpls_phy6252_storage.c`. Storage не знает, подключён ли BLE: право на один физический write ему явно передаёт runtime только после проверки, что radio offline.
+
+Rename/setup/password/auth-lock работают как транзакция через границу радио:
+
+```text
+request
   ↓
-notify/indication
+RAM stage
   ↓
-TX drain
-  ↓ (только если settings/auth dirty)
-controlled disconnect
+response enqueue
   ↓
-DPLS_PHY6252_STORAGE_EVT
+GATT quiesce: новые requests запрещены
   ↓
-одна SNV write за OSAL turn
+TX drain / ATT confirmation
+  ↓
+runtime-controlled disconnect
+  ↓
+radio offline
+  ↓
+не более одной SNV write за OSAL turn
+  ↓
+все dirty records committed
   ↓
 advertising
 ```
 
-## Flash invariant
+Ни таймер в domain, ни storage сами соединение не рвут. Journal dirty не является причиной controlled disconnect: он ждёт естественного link loss.
 
-`osal_snv_write()` разрешён только в `dpls_phy6252_storage.c`.
+## Journal
 
-Во время active BLE link он физически отвергается. Поэтому rename/setup/password работают так:
+В рабочей BLE-сессии journal полностью обслуживается из RAM. На flash запись имеет 12 bytes (`sequence + timestamp + type + parameter + CRC`), но RAM не копирует flash layout:
 
 ```text
-command → RAM stage → SETTINGS/AUTH response → TX drain → disconnect → commit → advertise
+200 × uint32 timestamp = 800 B
+200 × uint8  type      = 200 B
+200 × uint8  parameter = 200 B
+                         ------
+                         1200 B фактов журнала
 ```
 
-Journal проще: все 200 записей (2400 bytes) находятся в RAM во время работы. Append/read никогда не обращаются к flash. Dirty 120-byte blocks сохраняются после естественного disconnect. Journal сам рабочую сессию не рвёт.
+`sequence` однозначно выводится из ring slot + `journal_max_sequence/journal_count`; CRC нужен только на persistence boundary. Dirty mask указывает, какие 120-byte blocks надо сохранить после disconnect.
 
 ## Bond invariant
 
@@ -92,19 +134,88 @@ Journal проще: все 200 записей (2400 bytes) находятся в
 
 После `GAPROLE_STARTED` public controller address синхронизируется с chip MAC. Ошибка identity никогда не блокирует advertising.
 
-DID1 больше не владеет BLE bond identity: его serial используется как product `device_id`, а pairing привязан к стабильному silicon public MAC.
+DID1 не владеет BLE bond identity: serial используется как product `device_id`, pairing привязан к стабильному silicon public MAC.
 
-## Safety
+## Safety invariant
 
-`dpls_safety.c` не знает про OSAL/GATT/GPIO и единолично решает, когда опасный режим обязан вернуться в NORMAL.
+`dpls_safety.c` — pure policy: он не знает про OSAL, GATT, GPIO или PHY6252.
 
-`dpls_phy6252_outputs.c` единолично применяет физические выходы и всегда использует break-before-make.
+Опасный mode допустим только если одновременно истинны:
+
+```text
+connected
+AND authenticated
+AND fresh authenticated activity
+AND required measurements valid
+AND reserve not low
+AND no real short
+AND mode deadline alive
+```
+
+Если любой факт перестаёт быть истинным, policy требует NORMAL. Absolute mode deadline имеет детерминированный приоритет над session timeout, если они наступили одновременно.
+
+Admission проверяется **до** аппаратного переключения. `NORMAL` всегда разрешён.
+
+## Physical output invariant
+
+`dpls_phy6252_outputs.c` не хранит logical mode. Он только исполняет команду GPIO.
+
+Для любого опасного выхода порядок фиксирован:
+
+```text
+all dangerous GPIO LOW
+  ↓ break-before-make
+успешно захватить MOD_USR1 sleep lock
+  ↓ только после success
+energize ровно нужный GPIO
+```
+
+Если sleep lock не удалось захватить, функция возвращает failure, а все опасные GPIO уже LOW. `safe_normal()` сначала физически гасит outputs и только потом пытается освободить sleep lock, поэтому ошибка bookkeeping не может оставить опасный выход включённым.
+
+## Critical fault
+
+Domain critical fault означает «продолжать сессию небезопасно», но domain не умеет физически рвать BLE.
+
+Он делает только:
+
+```text
+safe NORMAL
+clear authenticated session/token
+critical_fault = true
+diagnostic_error(critical=true)
+```
+
+Runtime видит этот факт, запрещает новые GATT requests, ждёт TX drain и только затем вызывает physical disconnect.
+
+## Factory reset
+
+Factory reset не является BLE эвристикой. Это отдельная физическая процедура:
+
+```text
+button active at boot
+  ↓ held 5 s
+safe NORMAL
+  ↓
+stage empty settings/auth state
+  ↓
+quiesce + disconnect
+  ↓
+commit SNV offline
+  ↓
+erase bonds (единственное место)
+  ↓
+NVIC_SystemReset
+```
 
 ## Build invariant
 
 GNU Arm GCC и Arm Compiler 6.24 содержат один и тот же first-party source set. `architecture_guard.py` сравнивает оба списка и падает при расхождении.
 
 Scatter не перечисляет каждый DPLS object вручную: `dpls*.o(+RO)` убирает третий независимый source list.
+
+Toolchain facts pinned exactly: AC6 6.24.0, CMSIS-Toolbox 2.14.1, CMake 3.31.12, Ninja 1.13.2.
+
+Firmverse остаётся strict и обязан увидеть реальный production boot до `LE_SetAdvEnable enabled=1`; instruction budget ограничен, а не бесконечен. Его PHY6252 HCI runtime cache инициализируется явно: erased `0xFF` mailbox bytes не могут изображать существующее BLE connection или cached ATT handle.
 
 ## Budget
 
@@ -116,6 +227,39 @@ Architecture guard ограничивает:
 
 Это не метрика красоты. Это запрет снова превратить адаптер платы в файл, который невозможно удержать в голове.
 
+## Что больше не допускается
+
+- второй `connected` / `link_up` / `link_active`;
+- второй logical mode;
+- RX backlog «на всякий случай»;
+- SNV write во время active BLE;
+- domain-owned physical disconnect;
+- bond erase по timeout/reconnect/auth failure;
+- dangerous GPIO без успешно захваченного sleep lock;
+- неизвестное measurement state, трактуемое как healthy;
+- toolchain/source lists, которые могут незаметно разъехаться.
+
+## Software evidence и hardware evidence
+
+Green CI доказывает source parity, host invariants, fault injection, mobile tests, GCC/AC6 build, strict Firmverse boot и soft-BLE E2E. Он **не доказывает**, что конкретная PB-03F физически проходит RF/pairing/power-cycle.
+
+Release остаётся draft до отдельного реального smoke:
+
+```text
+flash
+→ automatic readback PASS
+→ reset
+→ advertise
+→ pair/auth
+→ rename
+→ reconnect/auth
+→ 10 × link loss/reconnect
+→ power cycle
+→ reconnect
+```
+
+Без ручного `Forget Bluetooth` и без дополнительных действий после прошивки.
+
 ## Правило для нового кода
 
-Новая сущность допустима только если она владеет реальным ресурсом/state либо удаляет недопустимое состояние. Нельзя добавлять второй `connected`, второй `pending`, второй lifecycle, второй source list или эвристику, которая меняет durable state по косвенному сигналу.
+Новая сущность допустима только если она владеет реальным ресурсом/state либо удаляет недопустимое состояние. Нельзя добавлять второй факт, второй lifecycle, второй source list или эвристику, которая меняет durable state по косвенному сигналу.
