@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Инварианты PHY6252 flasher: один wrapper, безопасный erase и readback перед reset."""
+"""Инварианты PHY6252 flasher: проверенный manual KEY1 + vendor backend."""
 from pathlib import Path
 import subprocess
 
@@ -16,50 +16,33 @@ def main() -> int:
     subprocess.run(["bash", "-n", str(FLASH)], check=True)
 
     assert not OLD_AGENT.exists()
-    assert "--auto-rst" in flash
-    assert 'HEX="$ROOT/tmp/test-dpls.hex"' in flash
-    assert 'ARGS=(-p "$PORT")' in flash
-    assert 'ARGS+=(wh "$HEX")' in flash
-    assert "read -r" not in flash
-    assert "factory.bin" not in flash.lower()
-    assert "pyserial==3.5" in flash
 
-    # Полный erase нельзя сделать случайно: он уничтожает factory identity.
+    # RC8 intentionally uses the same simple flashing path proven on hardware
+    # in rc3..rc5. The PB-03F kit does not wire RTS/DTR to reset/test-mode, so
+    # pretending that UART can auto-reset the chip is a regression, not a feature.
+    assert "--auto-rst" not in flash
+    assert "setRTS" not in flash
+    assert "setDTR" not in flash
+    assert "controlled_connect" not in flash
+    assert "enter_rom" not in flash
+    assert "post-flash readback" not in flash
+
+    # One operation: user enters ROM with KEY1 and the untouched vendor utility
+    # performs the regular write-HEX command with reset afterwards.
+    assert 'HEX="${1:?usage: flash_firmware.sh <file.hex> [--erase]}"' in flash
+    assert 'ARGS=(-p "$PORT" -r wh "$HEX")' in flash
+    assert "зажмите KEY1" in flash
+    assert "Turn on the power" in flash
+    assert 'exec python3 "$ROOT/third_party/phy62x2/Utils/rdwr_phy62x2.py" "${ARGS[@]}"' in flash
+
+    # Normal flashing must preserve SNV/factory data. Full-chip erase requires
+    # a deliberate second opt-in in addition to the command-line flag.
+    assert 'if [ "${2:-}" = "--erase" ]' in flash
     assert "DPLS_ALLOW_FACTORY_ERASE" in flash
     assert "factory identity" in flash
+    assert 'ARGS=(-p "$PORT" -a -r wh "$HEX")' in flash
 
-    # Один wrapper меняет только ROM entry; vendor utility остаётся flash backend.
-    assert "def enter_rom(self):" in flash
-    assert "module.phyflasher.Connect = controlled_connect" in flash
-    assert "original_connect(self, module.START_BAUD)" in flash
-    assert 'ARGS+=(wh "$HEX")' in flash
-
-    # Manual mode не ждёт Enter и не требует отдельного скрипта.
-    assert "ROM entry: MANUAL" in flash
-    assert "hold KEY1 and reset/power-cycle" in flash
-
-    # Auto mode: штатная последовательность PHY62x2 + UXTDWU@9600.
-    assert "self._port.setRTS(True)" in flash
-    assert "self._port.setDTR(True)" in flash
-    assert "self._port.setDTR(False)" in flash
-    assert "self._port.setRTS(False)" in flash
-    assert 'self._port.write(b"UXTDWU")' in flash
-    assert "range(250)" in flash
-    assert "TX/RX alone cannot reset" in flash
-
-    # Критический hardware regression: reset после последнего cpbin запрещён.
-    # Сначала ROM остаётся активен, затем отдельный --next read проверяет XIP,
-    # после чего тот же rc-вызов отправляет reset.
-    assert "VERIFY_ADDR=0x11020000" in flash
-    assert "VERIFY_SIZE=16" in flash
-    assert 'ARGS=(-p "$PORT")' in flash
-    assert 'ARGS=(-p "$PORT" -r)' not in flash
-    assert '-p "$PORT" -n -r rc "$VERIFY_ADDR" "$VERIFY_SIZE" "$READBACK"' in flash
-    assert "post-flash readback: PASS" in flash
-    assert "actual != expected" in flash
-    assert "flash finalize: readback verified, reset sent after XIP barrier" in flash
-
-    # Vendor source остаётся источником flash protocol и baud constants.
+    # Vendor source remains the only source of ROM/flash protocol behaviour.
     assert "START_BAUD = 9600" in programmer
     assert "DEF_RUN_BAUD = 115200" in programmer
     assert "def FlashUnlock" in programmer
