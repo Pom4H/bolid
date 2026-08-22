@@ -268,10 +268,14 @@ void dpls_phy6252_runtime_process_rx(void)
     if (!dpls_phy6252_transport_peek_rx(&frame, &length)) return;
 
     now = now_ms();
+    /* Deadline semantics are evaluated before the request is allowed to refresh
+     * authenticated activity or observe an expired IDENTIFY state. Therefore an
+     * RX callback and its already-due timer commute: packet-first and timer-first
+     * converge to the same domain state. */
+    dpls_server_tick(&server, now);
     (void)dpls_server_receive(&server, frame, length, now);
     dpls_phy6252_transport_consume_rx();
-    /* Reconcile after every semantic request. A deadline event racing with a
-     * request therefore converges to the same domain state on the next reduce. */
+    /* The request itself may create a fresh mode/identify/session deadline. */
     dpls_server_tick(&server, now);
     disconnect_if_ready();
 }
