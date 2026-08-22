@@ -5,8 +5,11 @@
 #include "types.h"
 
 void dpls_phy6252_measurements_init(uint8 task_id);
+/* Sampling cadence is scheduled by runtime; this function only starts a due
+ * conversion series. */
 void dpls_phy6252_measurements_tick(bool connected, dpls_mode_t mode);
-void dpls_phy6252_measurements_process(void);
+/* ADC IRQ completion immediately reconciles derived safety facts. */
+void dpls_phy6252_measurements_process(dpls_mode_t mode);
 
 uint16_t dpls_phy6252_measurements_voltage_mv(void *context);
 uint16_t dpls_phy6252_measurements_port1_mv(void *context);
