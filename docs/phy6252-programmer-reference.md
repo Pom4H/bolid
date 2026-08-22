@@ -36,10 +36,26 @@ Visible SRAM:
 | `GOLBAL_CONFIG` | `0x1FFF0400` | `0x400` |
 | `ER_IROM1` | `0x1FFF1838` | `0x77C8` |
 | `ER_IROM2` | `0x1FFFC000` | `0x4000` |
-| XIP linker window | `0x11020000` | `0x20000` |
+| XIP linker window | `0x11020000` | `0x1C000` |
 | SNV filesystem | `0x1103C000` | `0x3000` |
+| Factory sector | `0x1103F000` | `0x1000` |
 
-Linker window и реально записываемые bytes — разные ограничения. `tools/build_firmware.sh` валидирует готовый Intel HEX и отклоняет любой data record, пересекающий `0x1103C000..0x1103FFFF`.
+`0x1103C000..0x1103EFFF` и `0x1103F000..0x1103FFFF` принадлежат persistent data, а не application. `tools/build_firmware.sh` валидирует готовый Intel HEX и отклоняет любой data record, пересекающий `0x1103C000..0x1103FFFF`.
+
+Логические SNV ID не являются абсолютными flash-адресами. Текущая app-owned раскладка:
+
+| SNV ID | Назначение |
+|---:|---|
+| `0x80` | legacy settings, только источник миграции rc3/rc4 |
+| `0x81` | legacy settings state, только источник миграции |
+| `0x82` | fallback BLE MAC |
+| `0x83` | calibration |
+| `0x84` | auth lock |
+| `0x85` | durable settings slot A |
+| `0x86` | durable settings slot B |
+| `0x90..0xA3` | journal blocks |
+
+При обновлении legacy-платы RC8 сначала читает `0x80/0x81`, сохраняет рабочие credentials в RAM и мигрирует их в dual-slot `0x85/0x86`. Обычное обновление firmware не должно возвращать уже настроенное устройство в состояние первичной настройки.
 
 ## Peripheral bases
 
@@ -103,7 +119,7 @@ Boot path не читает произвольный project factory sector raw-
 
 ## ROM UART programmer
 
-Production build создаёт один Intel HEX. Прошивка выполняется штатной операцией `wh`.
+Production build создаёт один Intel HEX. Прошивка выполняется штатной операцией vendor `wh`.
 
 ROM-entry protocol:
 
@@ -114,14 +130,13 @@ UXTDWU → cmd>>:
 flash erase/program
 ```
 
-Один wrapper обслуживает оба режима:
+У PB-03F kit штатный USB-UART не разводит RTS/DTR на `RST_N`/`TM`, поэтому production wrapper использует только проверенный ручной вход:
 
 ```sh
-# Ручной вход: держать KEY1 и сделать reset/power-cycle, Enter не нужен.
+# 1. Зажать KEY1.
+# 2. Запустить скрипт.
+# 3. Отпустить KEY1 на строке «Turn on the power».
 tools/flash_firmware.sh tmp/test-dpls.hex
-
-# Автоматический стенд: нужны физические RTS -> RST_N и DTR -> TM.
-tools/flash_firmware.sh tmp/test-dpls.hex --auto-rst
 ```
 
-`--auto-rst` не может заменить отсутствующую проводку. UART TX/RX сам по себе не способен сбросить уже работающую application в ROM monitor. Если `cmd>>:` не пришёл, wrapper завершится примерно через 10 секунд с явным диагнозом, а не будет ждать бесконечно.
+`--auto-rst` в production wrapper отсутствует. UART TX/RX сам по себе не способен сбросить уже работающую application в ROM monitor. Весь ROM/flash protocol остаётся в `third_party/phy62x2/Utils/rdwr_phy62x2.py`; wrapper только выбирает порт, проверяет опасный full-chip erase и вызывает vendor utility.
