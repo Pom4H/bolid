@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIRMVERSE_SHA = "0c2e3b915db507448eb158cd0a49ccd1c2362b59"
+FIRMVERSE_SHA = "03422429fe25382ed95b2d96a7482bd43907b6eb"
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
@@ -192,4 +192,4 @@ print("  reproducible GCC A/B pair isolates connected-sleep delta")
 print("  manual full_matrix remains available for final release evidence")
 print("  exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
 print("  PB-03F flashing: manual KEY1 + vendor wh, no unsupported auto-reset")
-print(f"  Firmverse pinned at {FIRMVERSE_SHA[:8]} (ROM-UART flash/reset/boot proof)")
+print(f"  Firmverse pinned at {FIRMVERSE_SHA[:8]} (ROM-UART flash/reset/boot + OTP UID proof)")
