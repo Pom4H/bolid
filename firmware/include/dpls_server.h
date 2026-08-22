@@ -11,8 +11,8 @@
 #define DPLS_COMMAND_CACHE_SIZE 8u
 #define DPLS_NAME_MAX 31u
 #define DPLS_FW_VERSION_MAJOR 1u
-#define DPLS_FW_VERSION_MINOR 4u
-#define DPLS_FW_VERSION_PATCH 2u
+#define DPLS_FW_VERSION_MINOR 5u
+#define DPLS_FW_VERSION_PATCH 0u
 #define DPLS_TIME_MIN_UNIX_SECONDS 1577836800u
 #define DPLS_TIME_MAX_UNIX_SECONDS 4102444799u
 
@@ -71,11 +71,13 @@ typedef enum {
     DPLS_RETURN_LOW_RESERVE = 4,
     DPLS_RETURN_INTERNAL_ERROR = 5,
     DPLS_RETURN_BOOT = 6,
-    DPLS_RETURN_AUTO_ISOLATION = 7
+    DPLS_RETURN_AUTO_ISOLATION = 7,
+    DPLS_RETURN_MEASUREMENT_LOST = 8
 } dpls_return_reason_t;
 
 typedef struct {
     uint32_t sequence;
+    /* 0 = calendar time unknown; otherwise Unix UTC seconds. */
     uint32_t timestamp_seconds;
     uint8_t event_type;
     uint8_t parameter;
@@ -93,7 +95,6 @@ typedef struct {
 typedef struct {
     bool (*encrypted)(void *context);
     bool (*indicate)(void *context, const uint8_t *frame, size_t length);
-    void (*disconnect)(void *context);
 } dpls_link_hal_t;
 
 typedef struct {
@@ -157,12 +158,13 @@ typedef struct {
     bool connected;
     bool authenticated;
     bool hello_received;
+    bool setup_completed;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
     uint32_t last_auth_proof_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
-    uint32_t setup_disconnect_deadline_ms;
+    uint32_t setup_fingerprint;
     uint8_t device_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t client_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t token[DPLS_SESSION_TOKEN_SIZE];

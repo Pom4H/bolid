@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="${DPLS_HOST_BUILD_DIR:-$ROOT/firmware/build-invariants}"
+
+if [[ -z "${ASAN_OPTIONS+x}" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # Current AppleClang ASan aborts when leak detection is requested. Address
+    # and UB checks remain enabled; Linux CI additionally runs leak detection.
+    export ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:abort_on_error=1"
+  else
+    export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1"
+  fi
+fi
+export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
+
+cd "$ROOT"
+
+bash tools/check_repo_layout.sh
+python3 tools/test_ci_contract.py
+python3 tools/test_flash_firmware.py
+python3 tools/test_debug_firmware.py
+python3 tools/test_ble_timeout_contract.py
+python3 tools/test_dpls_protocol_crc.py
+python3 tools/session_capture/test_session_capture.py
+python3 tools/architecture_guard.py
+
+rm -rf "$BUILD_DIR"
+cmake \
+  -S firmware \
+  -B "$BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DENABLE_SANITIZERS=ON
+cmake --build "$BUILD_DIR" --parallel "${DPLS_BUILD_JOBS:-2}"
+ctest --test-dir "$BUILD_DIR" --output-on-failure --timeout 45
+
+DPLS_SIMULATOR="$BUILD_DIR/dpls_simulator" \
+  python3 tools/session_capture/test_differential_replay.py
+
+echo 'Host gate: PASS'

@@ -27,6 +27,15 @@ import platform.darwin.dispatch_time
 
 /** Thin CoreBluetooth implementation of the shared [DplsTransport] boundary. */
 internal class IosBleTransport : DplsTransport {
+    /** CoreBluetooth does not expose bond state. The protected RX write itself is
+     * the observable security transition, so its blocked frame is the state. */
+    private sealed interface SecurityState {
+        data object Idle : SecurityState
+        data class Pairing(val blockedWrite: ByteArray) : SecurityState
+        data class Resuming(val blockedWrite: ByteArray) : SecurityState
+        data object Failed : SecurityState
+    }
+
     private var listener: DplsTransportListener? = null
     private val serviceUuid = CBUUID.UUIDWithString(DplsBle.SERVICE_UUID)
     private val rxUuid = CBUUID.UUIDWithString(DplsBle.RX_UUID)
@@ -39,14 +48,16 @@ internal class IosBleTransport : DplsTransport {
     private val writeQueue = ArrayDeque<ByteArray>()
     private var writeInProgress = false
     private var inFlightWrite: ByteArray? = null
-    private var pairingRetryCount = 0
     private var subscribed = false
+    private var securityState: SecurityState = SecurityState.Idle
+    private var securityEpoch = 0L
 
     private val delegate = object : NSObject(), CBCentralManagerDelegateProtocol, CBPeripheralDelegateProtocol {
         override fun centralManagerDidUpdateState(central: CBCentralManager) {
             if (central.state == CBManagerStatePoweredOn) {
                 listener?.onBluetoothAvailable()
             } else {
+                clearSecurityState()
                 peripheral = null
                 rx = null
                 subscribed = false
@@ -93,7 +104,11 @@ internal class IosBleTransport : DplsTransport {
             error: NSError?,
         ) {
             if (!isSelected(didFailToConnectPeripheral)) return
-            deliverLinkFailure(didFailToConnectPeripheral, error)
+            if (securityState is SecurityState.Pairing || securityState is SecurityState.Resuming) {
+                scheduleSecurityReconnect(didFailToConnectPeripheral)
+                return
+            }
+            deliverLinkFailure(didFailToConnectPeripheral, "connect", error)
         }
 
         @ObjCSignatureOverride
@@ -103,11 +118,24 @@ internal class IosBleTransport : DplsTransport {
             error: NSError?,
         ) {
             if (!isSelected(didDisconnectPeripheral)) return
+            if (error != null && isStaleBondError(error)) {
+                reportStaleBond(didDisconnectPeripheral)
+                return
+            }
+            val securityHandshake = securityState is SecurityState.Pairing ||
+                securityState is SecurityState.Resuming
             peripheral = null
             rx = null
             subscribed = false
             resetWrites()
-            deliverLinkFailure(didDisconnectPeripheral, error)
+            if (securityHandshake) {
+                /* SMP may tear down the ACL and finish key establishment around
+                 * that disconnect. Preserve the blocked HELLO and reconnect; the
+                 * protected-write result, not the disconnect status, decides. */
+                scheduleSecurityReconnect(didDisconnectPeripheral)
+                return
+            }
+            deliverLinkFailure(didDisconnectPeripheral, "disconnect", error)
         }
 
         @ObjCSignatureOverride
@@ -193,20 +221,18 @@ internal class IosBleTransport : DplsTransport {
                 reportStaleBond(peripheral)
                 return
             }
-            if (error != null && isPairingWriteError(error) && pairingRetryCount < PAIRING_WRITE_RETRIES) {
-                pairingRetryCount++
-                inFlightWrite?.let { writeQueue.addFirst(it.copyOf()) }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, PAIRING_RETRY_NS), dispatch_get_main_queue()) {
-                    drainWrites()
-                }
-                return
-            }
             if (error != null && isPairingWriteError(error)) {
-                reportStaleBond(peripheral)
+                val blocked = inFlightWrite ?: run {
+                    listener?.onWriteComplete(error.code)
+                    return
+                }
+                inFlightWrite = null
+                securityState = SecurityState.Pairing(blocked.copyOf())
+                scheduleSecurityRetry(peripheral)
                 return
             }
-            pairingRetryCount = 0
             inFlightWrite = null
+            if (error == null) clearSecurityState()
             listener?.onWriteComplete(error?.code)
             drainWrites()
         }
@@ -250,6 +276,7 @@ internal class IosBleTransport : DplsTransport {
             central.cancelPeripheralConnection(previous)
         }
         selectedAddress = address
+        clearSecurityState()
         peripheral = target
         rx = null
         subscribed = false
@@ -262,13 +289,6 @@ internal class IosBleTransport : DplsTransport {
             }
             CBPeripheralStateConnecting -> Unit
             else -> central.connectPeripheral(target, options = null)
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, GAP_CONNECT_NUDGE_NS), dispatch_get_main_queue()) {
-            val pending = peripheral ?: return@dispatch_after
-            if (!isSelected(pending)) return@dispatch_after
-            if (pending.state == CBPeripheralStateConnecting) {
-                central.connectPeripheral(pending, options = null)
-            }
         }
         return true
     }
@@ -292,6 +312,7 @@ internal class IosBleTransport : DplsTransport {
 
     override fun disconnect(clearSelection: Boolean) {
         stopScan()
+        clearSecurityState()
         peripheral?.let(central::cancelPeripheralConnection)
         peripheral = null
         rx = null
@@ -327,13 +348,23 @@ internal class IosBleTransport : DplsTransport {
     }
 
     private fun completeSubscribe() {
-        if (subscribed) return
-        subscribed = true
-        listener?.onSubscribed(writeLimit)
+        if (!subscribed) {
+            subscribed = true
+            listener?.onSubscribed(writeLimit)
+        }
+        when (securityState) {
+            is SecurityState.Pairing -> scheduleSecurityRetry(peripheral ?: return)
+            is SecurityState.Resuming -> resumeSecurityWrite()
+            else -> Unit
+        }
     }
 
     private fun drainWrites() {
-        if (writeInProgress) return
+        if (writeInProgress || securityState is SecurityState.Pairing ||
+            securityState is SecurityState.Resuming
+        ) {
+            return
+        }
         val target = peripheral ?: return
         val characteristic = rx ?: return
         val next = writeQueue.removeFirstOrNull() ?: return
@@ -346,22 +377,70 @@ internal class IosBleTransport : DplsTransport {
         writeQueue.clear()
         writeInProgress = false
         inFlightWrite = null
-        pairingRetryCount = 0
+    }
+
+    private fun clearSecurityState() {
+        securityEpoch++
+        securityState = SecurityState.Idle
+    }
+
+    private fun scheduleSecurityRetry(target: CBPeripheral) {
+        val state = securityState as? SecurityState.Pairing ?: return
+        val epoch = ++securityEpoch
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, SECURITY_RETRY_NS), dispatch_get_main_queue()) {
+            if (epoch != securityEpoch || !isSelected(target)) return@dispatch_after
+            val currentState = securityState as? SecurityState.Pairing ?: return@dispatch_after
+            if (target.state != CBPeripheralStateConnected || peripheral !== target || !subscribed || rx == null) {
+                scheduleSecurityReconnect(target)
+                return@dispatch_after
+            }
+            securityState = SecurityState.Resuming(currentState.blockedWrite)
+            resumeSecurityWrite()
+        }
+        check(state.blockedWrite.isNotEmpty())
+    }
+
+    private fun resumeSecurityWrite() {
+        if (writeInProgress || peripheral == null || rx == null || !subscribed) return
+        val state = securityState as? SecurityState.Resuming ?: return
+        securityState = SecurityState.Idle
+        writeQueue.addFirst(state.blockedWrite)
+        drainWrites()
+    }
+
+    private fun scheduleSecurityReconnect(target: CBPeripheral) {
+        val state = securityState
+        if (state !is SecurityState.Pairing && state !is SecurityState.Resuming) return
+        val epoch = ++securityEpoch
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, SECURITY_RECONNECT_NS), dispatch_get_main_queue()) {
+            if (epoch != securityEpoch || !isSelected(target)) return@dispatch_after
+            if (target.state == CBPeripheralStateConnected) {
+                peripheral = target
+                target.delegate = delegate
+                target.discoverServices(listOf(serviceUuid))
+            } else if (target.state != CBPeripheralStateConnecting) {
+                peripheral = target
+                target.delegate = delegate
+                central.connectPeripheral(target, options = null)
+            }
+        }
     }
 
     private fun reportStaleBond(peripheral: CBPeripheral) {
-        pairingRetryCount = 0
+        securityEpoch++
+        securityState = SecurityState.Failed
         inFlightWrite = null
         listener?.onStaleBond()
         central.cancelPeripheralConnection(peripheral)
     }
 
-    private fun deliverLinkFailure(peripheral: CBPeripheral, error: NSError?) {
+    private fun deliverLinkFailure(peripheral: CBPeripheral, stage: String, error: NSError?) {
         if (error != null && isStaleBondError(error)) {
             reportStaleBond(peripheral)
             return
         }
-        listener?.onDisconnected(error?.localizedDescription)
+        val detail = error?.let { "$stage: ${it.domain}/${it.code}: ${it.localizedDescription}" }
+        listener?.onDisconnected(detail)
     }
 
     private fun deliverNsError(peripheral: CBPeripheral, prefix: String, error: NSError) {
@@ -369,7 +448,7 @@ internal class IosBleTransport : DplsTransport {
             reportStaleBond(peripheral)
             return
         }
-        listener?.onTransportError("$prefix: ${error.localizedDescription}")
+        listener?.onTransportError("$prefix: ${error.domain}/${error.code}: ${error.localizedDescription}")
     }
 
     private fun isPairingWriteError(error: NSError): Boolean {
@@ -379,22 +458,17 @@ internal class IosBleTransport : DplsTransport {
             error.code == CBATT_INSUFFICIENT_ENCRYPTION
     }
 
-    private fun isStaleBondError(error: NSError): Boolean {
-        if (error.domain == "CBErrorDomain" &&
-            (error.code == CBERROR_PEER_REMOVED_PAIRING || error.code == CBERROR_ENCRYPTION_TIMED_OUT)
-        ) {
-            return true
-        }
-        return looksLikeStaleBondError(error.localizedDescription)
-    }
+    /* encryptionTimedOut is not proof of stale keys: it can happen during a
+     * perfectly fresh pairing on a slow/noisy link. Only the explicit
+     * peerRemovedPairing signal is deterministic stale-bond evidence here. */
+    private fun isStaleBondError(error: NSError): Boolean =
+        error.domain == "CBErrorDomain" && error.code == CBERROR_PEER_REMOVED_PAIRING
 
     companion object {
         private const val CBATT_INSUFFICIENT_AUTHENTICATION = 5L
         private const val CBATT_INSUFFICIENT_ENCRYPTION = 15L
         private const val CBERROR_PEER_REMOVED_PAIRING = 14L
-        private const val CBERROR_ENCRYPTION_TIMED_OUT = 15L
-        private const val PAIRING_WRITE_RETRIES = 60
-        private const val PAIRING_RETRY_NS = 50_000_000L
-        private const val GAP_CONNECT_NUDGE_NS = 2_000_000_000L
+        private const val SECURITY_RETRY_NS = 500_000_000L
+        private const val SECURITY_RECONNECT_NS = 500_000_000L
     }
 }

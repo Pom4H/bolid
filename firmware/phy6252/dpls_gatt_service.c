@@ -81,7 +81,9 @@ static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint
         if (offset != 0) return ATT_ERR_ATTR_NOT_LONG;
         LOG("DPLS RX n=%u t=%02x\n", len, len > 1u ? value[1] : 0u);
         rc = app_rx ? app_rx(value, len) : SUCCESS;
-        if (rc != SUCCESS) LOG("DPLS RX reject %u\n", rc);
+        if (rc != SUCCESS) {
+            LOG("DPLS RX reject %u\n", rc);
+        }
         return rc;
     }
     return ATT_ERR_ATTR_NOT_FOUND;
@@ -108,13 +110,13 @@ bool dpls_gatt_subscribed(void) {
 
 bool dpls_gatt_needs_confirmation(uint16 conn) {
     uint16 cfg = GATTServApp_ReadCharCfg(conn, tx_cccd);
-    return (cfg & GATT_CLIENT_CFG_NOTIFY) == 0 && (cfg & GATT_CLIENT_CFG_INDICATE) != 0;
+    return (cfg & GATT_CLIENT_CFG_NOTIFY) == 0u && (cfg & GATT_CLIENT_CFG_INDICATE) != 0u;
 }
 
 bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 length, uint8 task_id) {
     uint16 cfg = GATTServApp_ReadCharCfg(conn, tx_cccd);
     bStatus_t rc;
-    if ((cfg & (GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE)) == 0) {
+    if ((cfg & (GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE)) == 0u) {
         rc = bleNotConnected;
     } else if (length + 3u > ATT_GetCurrentMTUSize(conn) || length > sizeof(tx_indication.value)) {
         rc = ATT_ERR_INVALID_VALUE_SIZE;
@@ -122,8 +124,10 @@ bStatus_t dpls_gatt_send_indication(uint16 conn, const uint8 *data, uint16 lengt
         tx_indication.handle = attrs[DPLS_TX_VALUE_INDEX].handle;
         tx_indication.len = length;
         osal_memcpy(tx_indication.value, data, length);
-        /* Samsung writes CCCD 0x03 then delivers Handle Value as a notification and
-         * never sends ATT confirmation. Indications then sit blePending forever. */
+        /* Samsung SM-A135F requires CCCD 0x03. In that mode the known-stable
+         * path is notification. RC9 no longer invents an 80 ms completion: a
+         * successful GATT_Notification is complete at the ATT host boundary;
+         * an indication remains in flight until ATT_HANDLE_VALUE_CFM. */
         if (cfg & GATT_CLIENT_CFG_NOTIFY) {
             rc = GATT_Notification(conn, (attHandleValueNoti_t *)&tx_indication, FALSE);
         } else {

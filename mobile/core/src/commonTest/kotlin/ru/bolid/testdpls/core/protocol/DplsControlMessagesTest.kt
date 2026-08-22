@@ -20,15 +20,15 @@ class DplsControlMessagesTest {
 
     @Test
     fun failedAuthHasNoToken() {
-        val result = requireNotNull(parseAuthResult(byteArrayOf(2, 5, 0)))
+        val raw = byteArrayOf(2, 5, 0) + ByteArray(8)
+        val result = requireNotNull(parseAuthResult(raw))
         assertEquals(2, result.status)
         assertEquals(5, result.retryAfterSeconds)
         assertNull(result.sessionToken)
     }
 
     @Test
-    @Suppress("DEPRECATION")
-    fun challengeAndCommandLayoutsMatchWireContract() {
+    fun challengeAndCommandLayoutsMatchV2WireContract() {
         val challenge = ByteArray(37)
         putU32(challenge, 0, 0x78563412)
         repeat(16) { challenge[4 + it] = it.toByte() }
@@ -38,15 +38,21 @@ class DplsControlMessagesTest {
         assertEquals(0x78563412, parsedChallenge.sessionId)
         assertTrue(parsedChallenge.initialized)
 
-        val command = ByteArray(8)
-        putU32(command, 0, 0x11223344)
-        command[4] = 0
-        command[5] = DplsMode.SHORT_1.wire.toByte()
-        putU16(command, 6, 30)
+        val command = byteArrayOf(
+            0,
+            DplsMode.SHORT_1.wire.toByte(),
+            30,
+            0,
+        )
         val parsedCommand = requireNotNull(parseCommandResult(command))
-        assertEquals(0x11223344, parsedCommand.commandId)
         assertEquals(DplsMode.SHORT_1, parsedCommand.mode)
         assertEquals(30, parsedCommand.automaticReturnSeconds)
+    }
+
+    @Test
+    fun legacyCommandAndSettingsLayoutsAreRejected() {
+        assertNull(parseCommandResult(ByteArray(8)))
+        assertNull(parseSettingsResult(ByteArray(5)))
     }
 
     @Test

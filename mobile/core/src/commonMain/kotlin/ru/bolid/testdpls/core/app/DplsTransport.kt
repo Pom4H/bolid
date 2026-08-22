@@ -48,6 +48,12 @@ data class DplsTransportDevice(
 
 /** Tiny platform surface that cannot be made deterministic in commonMain. */
 interface DplsPlatformServices {
+    /**
+     * Epoch milliseconds on a monotonic process-local timeline. Android/iOS
+     * anchor wall time once and then advance it from elapsedRealtime/systemUptime.
+     * This keeps TIME_SYNC epoch-compatible while elapsed-time decisions cannot
+     * jump when NTP or the operator changes the wall clock.
+     */
     fun nowMillis(): Long
     fun secureRandomBytes(count: Int): ByteArray
     fun readUiTheme(): UiTheme = UiTheme.SYSTEM
@@ -66,19 +72,19 @@ interface DplsPlatformServices {
     fun keepConnectionAlive(active: Boolean) = Unit
     fun notifyOperator(title: String, body: String) = Unit
 
-    /**
-     * Optional real-time session breadcrumb for capture tools.
-     * Default is silent; Android mirrors selected messages to logcat for
-     * `tools/session_capture` and phone E2E timelines.
-     */
+    /** Optional real-time session breadcrumb for capture tools. */
     fun sessionTrace(message: String) = Unit
 }
 
+/**
+ * Stale bond is a destructive conclusion: never infer it from a timeout, RSSI or
+ * generic disconnect text. Platform transports should call onStaleBond() only on
+ * an explicit OS signal that the peer removed pairing information.
+ */
 internal fun looksLikeStaleBondError(message: String?): Boolean {
     if (message.isNullOrBlank()) return false
     val text = message.lowercase()
     return text.contains("peer removed pairing") ||
         text.contains("removed pairing information") ||
-        text.contains("encryption timed out") ||
         (text.contains("сопряжен") && (text.contains("удалил") || text.contains("удалён") || text.contains("удален")))
 }

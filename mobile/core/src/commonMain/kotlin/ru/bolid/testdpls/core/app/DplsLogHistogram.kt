@@ -20,32 +20,26 @@ internal data class JournalTimeline(
     }
 }
 
-internal fun buildJournalTimeline(
-    records: List<EventRecord>,
-    sessions: List<JournalBootSession> = emptyList(),
-): JournalTimeline {
+internal fun buildJournalTimeline(records: List<EventRecord>): JournalTimeline {
     if (records.isEmpty()) return JournalTimeline(emptyList())
     val timeline = LongArray(records.size)
     val order = records.indices.sortedBy { records[it].sequence }
-    val gaps = journalSessionGaps(sessions)
-    var bootOffset = 0L
-    var prevUptime = records[order.first()].timestampSeconds
-    var prevSessionFirst = journalSessionFor(records[order.first()].sequence, sessions)?.firstSequence
+    var cursor = 0L
+    var previousUtc: Long? = null
+    var hasPrevious = false
     for (index in order) {
-        val record = records[index]
-        val uptime = record.timestampSeconds
-        val session = journalSessionFor(record.sequence, sessions)
-        val sessionFirst = session?.firstSequence
-        if (sessions.isNotEmpty() && sessionFirst != null && prevSessionFirst != null && sessionFirst != prevSessionFirst) {
-            val olderIndex = sessions.indexOfFirst { it.firstSequence == prevSessionFirst }
-            val gap = gaps.getOrNull(olderIndex) ?: 1L
-            bootOffset += prevUptime + gap
-            prevSessionFirst = sessionFirst
-        } else if (sessions.isEmpty() && uptime + 1L < prevUptime) {
-            bootOffset += prevUptime + 1L
+        val timestamp = records[index].timestampSeconds
+        val utc = timestamp.takeIf { eventTimestampBasis(it) == "utc" }
+        if (hasPrevious) {
+            cursor += if (utc != null && previousUtc != null) {
+                (utc - previousUtc).coerceAtLeast(1L)
+            } else {
+                1L
+            }
         }
-        timeline[index] = bootOffset + uptime
-        prevUptime = uptime
+        timeline[index] = cursor
+        previousUtc = utc
+        hasPrevious = true
     }
     return JournalTimeline(timeline.toList())
 }
@@ -227,11 +221,12 @@ internal fun buildLogHistogram(
     targetBars: Int = 32,
     bucketSeconds: Long? = null,
 ): LogTimeHistogram? {
-    if (records.isEmpty()) return null
+    val dated = records.filter { eventTimestampBasis(it.timestampSeconds) == "utc" }
+    if (dated.isEmpty()) return null
     return buildLogHistogram(
-        records,
-        records.minOf { it.timestampSeconds },
-        records.maxOf { it.timestampSeconds },
+        dated,
+        dated.minOf { it.timestampSeconds },
+        dated.maxOf { it.timestampSeconds },
         targetBars,
         bucketSeconds,
     )

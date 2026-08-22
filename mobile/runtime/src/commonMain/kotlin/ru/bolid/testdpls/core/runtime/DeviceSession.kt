@@ -2,7 +2,7 @@ package ru.bolid.testdpls.core.runtime
 
 import ru.bolid.testdpls.core.protocol.putU32
 
-/** Wire challenge owned by the lifecycle state that received it. */
+/** Challenge протокола хранится прямо в состоянии соединения, которое его получило. */
 data class SessionChallenge(
     val sessionId: Long,
     val clientNonce: ByteArray,
@@ -17,7 +17,7 @@ data class SessionChallenge(
     }
 }
 
-/** Authenticated wire material. There is no second copy in the controller/UI. */
+/** Данные подтверждённой сессии. Второй копии в controller/UI нет. */
 data class AuthSession(
     val sessionId: Long,
     val token: ByteArray,
@@ -35,11 +35,10 @@ data class AuthSession(
 }
 
 /**
- * The only owner of link/auth lifecycle.
+ * Единственное значение, описывающее link/auth lifecycle.
  *
- * [candidateNodeId] is an untrusted discovery hint. It is used only to check that
- * authenticated DEVICE_INFO agrees with the advertisement; credentials are never
- * selected by this value before identity proof.
+ * candidateNodeId приходит из advertising и остаётся неподтверждённой подсказкой,
+ * пока DEVICE_INFO не вернёт стабильный NodeId после аутентификации.
  */
 sealed interface DeviceSession {
     data object Offline : DeviceSession
@@ -54,7 +53,7 @@ sealed interface DeviceSession {
         val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
-    /** Link is usable and owns the nonce that will start HELLO/auth. */
+    /** BLE готов к протоколу; nonce принадлежит текущей попытке соединения. */
     data class Linked(
         val endpoint: LinkEndpoint,
         val clientNonce: ByteArray,
@@ -63,33 +62,31 @@ sealed interface DeviceSession {
         init { require(clientNonce.size == 16) }
     }
 
-    data class Commissioning(
+    /**
+     * Получен AUTH_CHALLENGE. challenge.initialized определяет, нужна первичная
+     * настройка или обычная аутентификация; отдельные состояния для этого не нужны.
+     */
+    data class Securing(
         val endpoint: LinkEndpoint,
         val challenge: SessionChallenge,
         val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
-    data class Authenticating(
-        val endpoint: LinkEndpoint,
-        val challenge: SessionChallenge,
-        val candidateNodeId: NodeId? = null,
-    ) : DeviceSession
-
-    /** Authentication succeeded; DEVICE_INFO must still prove the stable identity. */
+    /** Аутентификация прошла, но стабильный NodeId ещё не подтверждён. */
     data class Synchronizing(
         val endpoint: LinkEndpoint,
         val auth: AuthSession,
         val candidateNodeId: NodeId? = null,
     ) : DeviceSession
 
-    /** Fully usable session. A valid stable node identity is mandatory here. */
+    /** Полностью готовая сессия с подтверждённым стабильным NodeId. */
     data class Online(
         val nodeId: NodeId,
         val endpoint: LinkEndpoint,
         val auth: AuthSession,
     ) : DeviceSession
 
-    /** The physical route is known, but link/auth state must be rebuilt. */
+    /** Маршрут известен, физическое соединение и auth нужно построить заново. */
     data class Recovering(
         val nodeId: NodeId?,
         val endpoint: LinkEndpoint,
@@ -105,25 +102,12 @@ val DeviceSession.isAuthenticated: Boolean
     get() = this is DeviceSession.Synchronizing || this is DeviceSession.Online
 
 val DeviceSession.credentialsReady: Boolean
-    get() = this is DeviceSession.Commissioning ||
-        this is DeviceSession.Authenticating ||
+    get() = this is DeviceSession.Securing ||
         this is DeviceSession.Synchronizing ||
         this is DeviceSession.Online
 
-val DeviceSession.initializedOrNull: Boolean?
-    get() = when (this) {
-        is DeviceSession.Commissioning -> challenge.initialized
-        is DeviceSession.Authenticating -> challenge.initialized
-        is DeviceSession.Synchronizing, is DeviceSession.Online -> true
-        else -> null
-    }
-
 val DeviceSession.challengeOrNull: SessionChallenge?
-    get() = when (this) {
-        is DeviceSession.Commissioning -> challenge
-        is DeviceSession.Authenticating -> challenge
-        else -> null
-    }
+    get() = (this as? DeviceSession.Securing)?.challenge
 
 val DeviceSession.authOrNull: AuthSession?
     get() = when (this) {
@@ -138,15 +122,14 @@ val DeviceSession.endpointOrNull: LinkEndpoint?
         is DeviceSession.Connecting -> endpoint
         is DeviceSession.Discovering -> endpoint
         is DeviceSession.Linked -> endpoint
-        is DeviceSession.Commissioning -> endpoint
-        is DeviceSession.Authenticating -> endpoint
+        is DeviceSession.Securing -> endpoint
         is DeviceSession.Synchronizing -> endpoint
         is DeviceSession.Online -> endpoint
         is DeviceSession.Recovering -> endpoint
         is DeviceSession.Failed -> endpoint
     }
 
-/** Verified identity only. Never falls back to discovery/UI state. */
+/** Только подтверждённый identity. Discovery/UI fallback здесь запрещён. */
 val DeviceSession.nodeIdOrNull: NodeId?
     get() = when (this) {
         is DeviceSession.Online -> nodeId
@@ -154,14 +137,13 @@ val DeviceSession.nodeIdOrNull: NodeId?
         else -> null
     }
 
-/** Untrusted discovery hint used only for identity consistency checks. */
+/** Неподтверждённая подсказка из advertising для проверки identity consistency. */
 val DeviceSession.candidateNodeIdOrNull: NodeId?
     get() = when (this) {
         is DeviceSession.Connecting -> candidateNodeId
         is DeviceSession.Discovering -> candidateNodeId
         is DeviceSession.Linked -> candidateNodeId
-        is DeviceSession.Commissioning -> candidateNodeId
-        is DeviceSession.Authenticating -> candidateNodeId
+        is DeviceSession.Securing -> candidateNodeId
         is DeviceSession.Synchronizing -> candidateNodeId
         is DeviceSession.Online -> nodeId
         is DeviceSession.Recovering -> nodeId

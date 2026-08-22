@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Line-coverage gate for firmware/src (portable DPLS core).
+"""Line-coverage gate for the complete portable firmware core.
 
-Reads gcov intermediate notes produced next to the instrumented objects and
-fails if the aggregated line coverage of firmware/src is below the threshold.
+Reads gcov notes produced next to instrumented objects and fails if aggregated
+coverage of production firmware/src drops below the threshold. Safety,
+cryptography and durable storage are deliberately included; excluding critical
+modules would make a green release gate misleading.
 """
 from __future__ import annotations
 
@@ -14,7 +16,15 @@ import sys
 from pathlib import Path
 
 DEFAULT_THRESHOLD = 80.0
-SRC_NAMES = ("dpls_protocol.c", "dpls_server.c", "dpls_led.c", "dpls_calib.c")
+SRC_NAMES = (
+    "dpls_protocol.c",
+    "dpls_server.c",
+    "dpls_safety.c",
+    "dpls_led.c",
+    "dpls_calib.c",
+    "dpls_hmac.c",
+    "dpls_durable_settings.c",
+)
 
 
 def find_gcov() -> list[str]:
@@ -157,14 +167,14 @@ def main() -> int:
     for name in SRC_NAMES:
         hit, total = results.get(name, (0, 0))
         pct = (100.0 * hit / total) if total else 0.0
-        lines.append(f"  {name:18} {hit:4}/{total:<4}  {pct:5.1f}%")
+        lines.append(f"  {name:24} {hit:4}/{total:<4}  {pct:5.1f}%")
         hit_sum += hit
         total_sum += total
     overall = (100.0 * hit_sum / total_sum) if total_sum else 0.0
     report = (
         "firmware/src line coverage\n"
         + "\n".join(lines)
-        + f"\n  {'TOTAL':18} {hit_sum:4}/{total_sum:<4}  {overall:5.1f}%\n"
+        + f"\n  {'TOTAL':24} {hit_sum:4}/{total_sum:<4}  {overall:5.1f}%\n"
         + f"threshold: {args.threshold:.0f}%\n"
     )
     report_path = root / args.report

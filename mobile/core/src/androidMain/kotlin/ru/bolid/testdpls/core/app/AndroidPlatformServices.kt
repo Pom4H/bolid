@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -28,8 +29,14 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
     private val random = SecureRandom()
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val verifierStore = AndroidVerifierStore(prefs)
+    /* Wall time is sampled once. All later elapsed-time decisions use the
+     * monotonic boot clock, while the resulting value is still an epoch time
+     * suitable for TIME_SYNC. NTP/manual clock jumps cannot reorder deadlines. */
+    private val epochBaseMillis = System.currentTimeMillis()
+    private val elapsedBaseMillis = SystemClock.elapsedRealtime()
 
-    override fun nowMillis(): Long = System.currentTimeMillis()
+    override fun nowMillis(): Long =
+        epochBaseMillis + (SystemClock.elapsedRealtime() - elapsedBaseMillis)
 
     override fun secureRandomBytes(count: Int): ByteArray =
         ByteArray(count).also(random::nextBytes)
@@ -126,7 +133,7 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
 
     override fun sessionTrace(message: String) {
         android.util.Log.i(SESSION_TAG, message)
-        // Phone E2E and session_capture multiplex these tags from logcat.
+        // Phone E2E и session_capture читают эти теги из logcat.
         if (
             message.startsWith("E2E ") ||
             message.startsWith("LOG_") ||
@@ -155,8 +162,8 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
 }
 
 /**
- * Verifiers are authentication-equivalent secrets: possession is enough to build AUTH_PROOF.
- * Keep only AES-GCM ciphertext in SharedPreferences; the AES key itself never leaves Android Keystore.
+ * Verifier эквивалентен секрету аутентификации. В SharedPreferences хранится
+ * только AES-GCM ciphertext, а AES-ключ остаётся в Android Keystore.
  */
 private class AndroidVerifierStore(
     private val prefs: SharedPreferences,
@@ -164,7 +171,10 @@ private class AndroidVerifierStore(
     fun read(deviceKey: String): ByteArray? {
         val prefKey = DplsPlatformPrefs.verifierKey(deviceKey)
         val stored = prefs.getString(prefKey, null) ?: return null
-        if (!stored.startsWith(FORMAT_PREFIX)) return migrateLegacy(prefKey, deviceKey, stored)
+        if (!stored.startsWith(FORMAT_PREFIX)) {
+            prefs.edit { remove(prefKey) }
+            return null
+        }
 
         return runCatching {
             val parts = stored.removePrefix(FORMAT_PREFIX).split(':', limit = 2)
@@ -196,22 +206,6 @@ private class AndroidVerifierStore(
             "$FORMAT_PREFIX$iv:$body"
         }.getOrNull() ?: return
         prefs.edit { putString(prefKey, encoded) }
-    }
-
-    private fun migrateLegacy(prefKey: String, deviceKey: String, stored: String): ByteArray? {
-        val legacy = runCatching {
-            android.util.Base64.decode(stored, android.util.Base64.NO_WRAP)
-        }.getOrNull()
-        if (legacy == null || legacy.size != 32) {
-            prefs.edit { remove(prefKey) }
-            return null
-        }
-        write(deviceKey, legacy)
-        // Never retain the old unprotected form if Keystore migration failed.
-        if (prefs.getString(prefKey, null)?.startsWith(FORMAT_PREFIX) != true) {
-            prefs.edit { remove(prefKey) }
-        }
-        return legacy
     }
 
     private fun getOrCreateKey(): SecretKey {

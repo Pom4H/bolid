@@ -1,72 +1,90 @@
 # Firmware Test-DPLS
 
-PHY6252 firmware версии **1.4.2**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. Быстрый host simulator живёт в `sim/`, а реальный target HEX исполняется внешним Firmverse.
+PHY6252 firmware версии **1.5.0**. Код разделён на переносимый C99 server и узкий PHY6252 adapter. `firmware/sim` — быстрый protocol/UI simulator; production HEX исполняется внешним Firmverse.
 
 ## Структура
 
 | Путь | Назначение |
 |---|---|
 | `src/`, `include/` | protocol, server, safety, LED, HMAC, calibration |
-| `sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE; private ATT transport внутри этого каталога |
-| `tests/` | host behavioral/edge-case tests |
+| `sim/` | Test-DPLS simulator для lab/replay/Soft-BLE |
+| `tests/` | host behavioral/fault tests |
 | `phy6252/` | HAL/GATT/ADC/persistence/board mapping |
-| `targets/phy6252/` | Keil и GNU Arm target builds |
+| `targets/phy6252/` | единственный production target: CMSIS project + scatter file |
 | `sdk/phy6252-sdk.env` | pin PHY62XX SDK 3.1.2 |
 
-Полный vendor SDK не хранится в репозитории. Собственного PHY6252/ZMU emulator stack также нет: production target emulation выполняет [Firmverse](https://github.com/Pom4H/firmverse).
+## Production build
+
+```sh
+tools/build_firmware.sh
+tools/flash_firmware.sh
+```
+
+`tools/build_firmware.sh` всегда собирает один и тот же target Arm Compiler 6.24.0 через CMSIS-Toolbox 2.14.1. Селекторов toolchain и второго target source graph нет.
+
+По умолчанию создаётся:
+
+```text
+tmp/test-dpls.hex
+```
+
+Другой output path можно передать единственным аргументом:
+
+```sh
+tools/build_firmware.sh tmp/rc9.hex
+```
+
+CI публикует этот artifact и передаёт его же Firmverse. На PB-03F прошивается тот же HEX.
 
 ## Safety invariants
 
-- startup и BLE disconnect принудительно возвращают `NORMAL`;
-- опасные режимы имеют hard timeout;
-- session timeout возвращает `NORMAL`;
-- low reserve и real-short isolation имеют приоритет над requested mode;
+- startup/disconnect/error → `NORMAL`;
+- dangerous mode и authenticated session имеют hard timeout;
+- low reserve / real-short override requested mode;
 - силовые выходы переключаются break-before-make;
-- application auth lock переживает reconnect/reboot;
-- session token/nonces очищаются при reset link state;
-- TX сериализован: один ATT PDU in flight;
-- аппаратная ошибка применения режима переводит physical и logical state в `NORMAL`.
+- auth lock хранится durable;
+- один ATT request in flight;
+- hardware apply error переводит physical и logical state в `NORMAL`.
 
-## Сборка и host tests
+## Boot / BLE
 
-```sh
-cmake -S firmware -B firmware/build
-cmake --build firmware/build
-ctest --test-dir firmware/build --output-on-failure
-bash tools/lint_firmware.sh
-bash tools/coverage_firmware.sh
+```text
+power/reset
+  ↓
+RAM retention + SNV mount
+  ↓
+BLE identity prepare
+  ↓
+DPLS init
+  ↓
+GAPRole_StartDevice
+  ↓
+GAPROLE_STARTED
+  ↓
+advertising ON
+  ↓
+idle/deferred flash work
 ```
 
-Soft-BLE продуктовый сценарий:
+Текущие правила:
+
+- XIP window: `0x11020000 + 0x20000`;
+- application HEX обязан заканчиваться до SNV `0x1103C000`;
+- identity использует factory PHY6252 MAC → SNV fallback → однократную генерацию;
+- controller address задаётся до запуска GAP role;
+- ошибка identity не блокирует advertising;
+- blocking flash не выполняется при active BLE link.
+
+## Проверки
 
 ```sh
+bash tools/run_host_invariant_gate.sh
+bash tools/coverage_firmware.sh
+bash tools/lint_firmware.sh
 bash tools/soft_ble_e2e.sh
 ```
 
-## PHY6252 target builds
-
-```sh
-tools/build_firmware.sh keil tmp/test-dpls.hex
-tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
-```
-
-Относительный output path всегда нормализуется относительно корня репозитория, поэтому `make -C firmware/targets/phy6252` не может случайно положить HEX внутрь target build directory.
-
-## Firmverse в CI
-
-Для pull request с изменениями firmware GitHub Actions собирает настоящий GCC Intel HEX и передаёт его в Firmverse:
-
-```yaml
-- uses: Pom4H/firmverse@v1
-  with:
-    firmware: tmp/test-dpls-firmverse.hex
-    board: pb03f-kit
-    strict: 'true'
-```
-
-Bolid больше не содержит standalone `firmware/phy6252_emu`, `firmware/zmu`, `tools/zmu_*` или vendored guest emulator. `firmware/sim` остаётся только быстрым продуктовым mock для UI/protocol сценариев и не считается PHY6252 acceptance gate.
-
-Текущая проверка не подменяет production provisioning: factory identity находится в отдельном flash sector и пока не передаётся в Action. Подробно: [`../docs/chip-emulator.md`](../docs/chip-emulator.md).
+Release CI отдельно проверяет host invariants, static analysis, один production target, strict Firmverse boot и mobile integration.
 
 ## BLE/GATT
 
@@ -76,54 +94,18 @@ Bolid больше не содержит standalone `firmware/phy6252_emu`, `fir
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-CCCD защищён `GATT_PERMIT_ENCRYPT_WRITE`. Advertising содержит Service UUID, scan response — `Test-DPLS-XXXX`. Manufacturer Specific Data отсутствуют.
+CCCD доступен до SMP; encrypted RX — security boundary protocol layer.
 
-Полная информация о приборе приходит через `DEVICE_INFO_REPORT`: 32-битный serial/deviceId, firmware version, hardware revision, capabilities и пользовательское имя.
+## Persistent data
 
-## Factory identity
-
-Серийный прибор обязан иметь валидный record в `0x1103F000..0x1103FFFF`.
-
-Record содержит serial, hardware revision, IRK/CSRK, optional static-random BLE address и CRC. Без record firmware не начинает advertising. Runtime fallback на SNV MAC или случайную identity отсутствует.
-
-Подробнее: [`../docs/factory-identity.md`](../docs/factory-identity.md).
-
-## Flash layout
-
-```text
-0x11020000 .. 0x1103BFFF   application XIP (0x1C000)
-0x1103C000 .. 0x1103EFFF   SNV filesystem, 3 × 4 KiB
-0x1103F000 .. 0x1103FFFF   factory identity, 4 KiB
-```
-
-Linker/scatter не позволяют application image занять SNV/factory sectors.
-
-### SNV allocation
-
-| Record/range | Данные |
+| SNV | Данные |
 |---|---|
-| `0x20..0x5F` | BLE bonds |
-| `0x80` | settings |
-| `0x81` | initialization marker |
-| `0x82` | **не используется новой identity-схемой** |
+| `0x20..0x5F` | BLE bonds/keys vendor stack |
+| `0x82` | fallback BLE MAC |
 | `0x83` | ADC calibration |
 | `0x84` | authentication lock |
+| `0x85..0x86` | durable settings A/B |
 | `0x90..0xA3` | event journal |
-
-## Provisioning
-
-```sh
-python3 tools/make_factory_identity.py \
-  --serial 12874 \
-  --hw-revision 2 \
-  --binary-output tmp/factory-00012874.bin \
-  --metadata tmp/factory-00012874.json
-
-tools/flash_firmware.sh tmp/test-dpls.hex
-tools/flash_factory_identity.sh tmp/factory-00012874.bin
-```
-
-`flash_factory_identity.sh` пишет ровно 64 байта через raw `we 0x3F000`. Полный chip erase удаляет SNV и factory identity; после erase provisioning обязателен заново.
 
 ## Hardware revision 2
 

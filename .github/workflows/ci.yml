@@ -1,131 +1,141 @@
 name: CI
 
 on:
-  pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.png"
-      - "**/*.jpg"
-      - "**/*.pdf"
-      - "**/*.docx"
-  workflow_dispatch:
   push:
-    tags:
-      - "v*"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: Run every production platform check
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   smoke:
     name: Cheap PR smoke
     runs-on: ubuntu-latest
     outputs:
-      mobile: ${{ steps.changes.outputs.mobile }}
+      android: ${{ steps.changes.outputs.android }}
+      ios: ${{ steps.changes.outputs.ios }}
       firmware: ${{ steps.changes.outputs.firmware }}
-      replay: ${{ steps.changes.outputs.replay }}
+      soft_ble: ${{ steps.changes.outputs.soft_ble }}
+      release_pr: ${{ steps.changes.outputs.release_pr }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
-
       - name: Detect changed areas
         id: changes
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          FULL_MATRIX: ${{ inputs.full_matrix }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            echo "mobile=true" >> "$GITHUB_OUTPUT"
-            echo "firmware=true" >> "$GITHUB_OUTPUT"
-            echo "replay=true" >> "$GITHUB_OUTPUT"
-            exit 0
+
+          release_pr=false
+          [[ "$HEAD_REF" == release/* ]] && release_pr=true
+
+          android=false
+          ios=false
+          firmware=false
+          soft_ble=false
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$FULL_MATRIX" == "true" ]]; then
+            android=true
+            ios=true
+            firmware=true
+            soft_ble=true
+          else
+            head="$CURRENT_SHA"
+            base=""
+
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              head="$PR_HEAD_SHA"
+              if [[ "$EVENT_ACTION" == "synchronize" && -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+                base="$BEFORE_SHA"
+              else
+                base="$BASE_SHA"
+              fi
+            elif [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+              base="$BEFORE_SHA"
+            fi
+
+            if [[ -z "$base" ]]; then base="${head}^"; fi
+            git fetch --no-tags --depth=2 origin "$head" "$base" || git fetch --no-tags origin "$head" "$base"
+            git diff --name-only "$base" "$head" > /tmp/changed.txt
+            echo "Changed files ($base..$head):"
+            cat /tmp/changed.txt
+
+            ci_changed=false
+            shared_mobile=false
+            android_only=false
+            ios_only=false
+            soft_ble_only=false
+
+            if grep -qE '^\.github/workflows/ci\.yml' /tmp/changed.txt; then ci_changed=true; fi
+            if grep -qE '^(mobile/(wire|runtime)/|mobile/core/(build\.gradle\.kts|src/(commonMain|commonTest)/)|mobile/(build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradle/|gradlew$|interop/))' /tmp/changed.txt; then shared_mobile=true; fi
+            if grep -qE '^(mobile/android/|mobile/core/src/(androidMain|androidUnitTest)/)' /tmp/changed.txt; then android_only=true; fi
+            if grep -qE '^(mobile/ios/|mobile/core/src/iosMain/)' /tmp/changed.txt; then ios_only=true; fi
+            if grep -qE '^(mobile/core/src/jvmMain/|tools/soft_ble_e2e\.sh|tools/session_capture/|firmware/(sim|src|include)/)' /tmp/changed.txt; then soft_ble_only=true; fi
+
+            if [[ "$shared_mobile" == true || "$android_only" == true ]]; then android=true; fi
+            if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
+            if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
+
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_debug_firmware|flash_debug_firmware|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_debug_firmware|test_ble_timeout_contract)\.py|\.github/workflows/(firmware-dx|firmverse-flash-harness)\.yml)' /tmp/changed.txt; then
+              firmware=true
+            fi
+
+            if [[ "$ci_changed" == true ]]; then
+              android=true
+              ios=true
+              firmware=true
+              soft_ble=true
+            fi
           fi
 
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git diff --name-only "$BASE_SHA" HEAD > /tmp/changed.txt
-          cat /tmp/changed.txt
-
-          mobile=false
-          firmware=false
-          replay=false
-          if grep -qE '^mobile/' /tmp/changed.txt; then mobile=true; fi
-          if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk)\.sh)' /tmp/changed.txt; then firmware=true; fi
-          if grep -qE '^(tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then replay=true; fi
-
-          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "ios=$ios" >> "$GITHUB_OUTPUT"
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
-          echo "replay=$replay" >> "$GITHUB_OUTPUT"
+          echo "soft_ble=$soft_ble" >> "$GITHUB_OUTPUT"
+          echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
+          printf 'Selected: android=%s ios=%s firmware=%s soft_ble=%s release_pr=%s\n' "$android" "$ios" "$firmware" "$soft_ble" "$release_pr"
 
-      - name: Verify repository layout
-        run: bash tools/check_repo_layout.sh
-      - name: Verify language-neutral wire contract
-        run: python3 tools/test_dpls_protocol_crc.py
-      - name: Verify session capture smoke
-        run: python3 tools/session_capture/test_session_capture.py
-      - name: Verify architecture ownership
-        run: python3 tools/architecture_guard.py
+      - name: Host invariants + sanitizers
+        run: bash tools/run_host_invariant_gate.sh
 
       - name: Verify revision 2 pinout contract
-        shell: bash
         run: |
-          set -euo pipefail
-          grep -q '#define DPLS_PIN_PORT1_ADC GPIO_P20' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT2_ADC GPIO_P15' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_PORT_T_ADC GPIO_P24' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_VCAP_ADC GPIO_P23' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_KZ_1 GPIO_P14' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_RED GPIO_P07' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_GREEN GPIO_P11' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_LED_BLUE GPIO_P18' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_PIN_FACTORY_RESET GPIO_P34' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P20 ADC_CH3P_P20' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P15 ADC_CH3N_P15' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P24 ADC_CH2N_P24' firmware/phy6252/dpls_board.h
-          grep -q '#define DPLS_ADC_CHANNEL_GPIO_P23 ADC_CH1P_P23' firmware/phy6252/dpls_board.h
           grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_app.c
-          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port2_voltage_mv = port2_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'hal.hardware.port_t_voltage_mv = port_t_voltage_mv' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_app.c
-          grep -q 'STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_PORT1_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'ADC_BIT(DPLS_ADC_CHANNEL(DPLS_PIN_VCAP_ADC))' firmware/phy6252/dpls_phy6252_measurements.c
+          ! grep -q 'ADC_CH1N_P11' firmware/phy6252/dpls_board.h firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_ADC_NEED_ALL' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'hal.hardware.port2_voltage_mv = dpls_phy6252_measurements_port2_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'hal.hardware.port_t_voltage_mv = dpls_phy6252_measurements_port_t_mv' firmware/phy6252/dpls_phy6252_runtime.c
+          grep -q 'DPLS_STATE_PORT_2_VALID' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DPLS_STATE_PORT_T_VALID' firmware/phy6252/dpls_phy6252_measurements.c
+          grep -q 'DANGEROUS_STATE_REFRESH_MS = 1_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'NORMAL_STATE_REFRESH_MS = 5_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
+          grep -q 'RSSI_SESSION_POLL_MS = 10_000L' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
           grep -q 'port2VoltageValid' mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/domain/DeviceModel.kt
           test -f docs/live-voltage-requirements.md
-
-      - name: Fast firmware host tests
-        if: steps.changes.outputs.firmware == 'true' || steps.changes.outputs.replay == 'true'
-        run: |
-          cmake -S firmware -B firmware/build -DCMAKE_BUILD_TYPE=Debug
-          cmake --build firmware/build --parallel 2
-          ctest --test-dir firmware/build --output-on-failure
-
-      - name: Differential captured-session replay
-        if: steps.changes.outputs.replay == 'true'
-        shell: bash
-        run: |
-          if [[ -f tools/session_capture/test_differential_replay.py ]]; then
-            DPLS_SIMULATOR="$PWD/firmware/build/dpls_simulator" \
-              python3 tools/session_capture/test_differential_replay.py
-          else
-            echo "differential replay test not present on this branch"
-          fi
 
   android:
     name: Android unit tests
     needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.mobile == 'true'
+    if: needs.smoke.outputs.android == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
@@ -137,100 +147,32 @@ jobs:
         working-directory: mobile
         run: ./gradlew :wire:testDebugUnitTest :runtime:testDebugUnitTest :core:testDebugUnitTest
       - name: Full Android lint + APK
-        if: github.event_name != 'pull_request'
         working-directory: mobile
         run: ./gradlew :wire:lintDebug :runtime:lintDebug :core:lintDebug :android:lintDebug :android:assembleDebug
-
-  firmverse:
-    name: PHY6252 Firmverse
-    needs: smoke
-    if: github.event_name != 'pull_request' || needs.smoke.outputs.firmware == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup cached ARM GNU Toolchain
-        uses: ./.github/actions/setup-arm-gcc
-      - name: Build production PHY6252 HEX
+      - name: Stage installable APK
+        shell: bash
         run: |
-          mkdir -p tmp
-          bash tools/build_firmware.sh gcc tmp/test-dpls-firmverse.hex
-      - name: Run production HEX in Firmverse
-        id: firmverse
-        uses: Pom4H/firmverse@v1
-        with:
-          firmware: tmp/test-dpls-firmverse.hex
-          board: pb03f-kit
-          strict: 'true'
-          log: tmp/firmverse.log
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: test-dpls-firmverse
-          path: |
-            tmp/test-dpls-firmverse.hex
-            ${{ steps.firmverse.outputs.log }}
-          if-no-files-found: warn
-          retention-days: 3
-
-  firmware-quality:
-    name: Firmware coverage + cppcheck
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install cppcheck
-        run: sudo apt-get update && sudo apt-get install -y cppcheck
-      - name: Tests + coverage
-        run: bash tools/coverage_firmware.sh
-      - name: cppcheck
-        run: bash tools/lint_firmware.sh
-
-  soft-ble-e2e:
-    name: Soft-BLE DplsClient ↔ simulator
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v5
-      - name: Run soft-BLE phone E2E scenarios
-        run: bash tools/soft_ble_e2e.sh
-
-  firmware-gcc:
-    name: PHY6252 GNU Arm GCC
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup cached ARM GNU Toolchain
-        uses: ./.github/actions/setup-arm-gcc
-      - name: Fetch pinned PHY62XX SDK 3.1.2
-        run: bash tools/fetch_phy6252_sdk.sh
-      - name: Build
-        run: |
-          set -o pipefail
-          mkdir -p tmp
-          bash tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex 2>&1 | tee tmp/gcc-build.log
+          set -euo pipefail
+          mkdir -p tmp/android
+          cp mobile/android/build/outputs/apk/debug/android-debug.apk tmp/android/TestDPLS-1.5.0-debug.apk
+          sha256sum tmp/android/TestDPLS-1.5.0-debug.apk > tmp/android/TestDPLS-1.5.0-debug.apk.sha256
+          printf 'version=1.5.0\ncommit=%s\nvariant=debug\n' "$GITHUB_SHA" > tmp/android/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-gcc
-          path: |
-            tmp/test-dpls-gcc.hex
-            firmware/targets/phy6252/build/test-dpls.elf
-            firmware/targets/phy6252/build/test-dpls.map
+          name: test-dpls-android-1.5.0
+          path: tmp/android
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
 
-  firmware-keil:
-    name: PHY6252 Keil MDK / AC6
-    if: github.event_name != 'pull_request'
+  firmware_image:
+    name: PHY6252 firmware / Arm Compiler 6.24
+    needs: smoke
+    if: needs.smoke.outputs.firmware == 'true'
     runs-on: ubuntu-22.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
-      - name: Install AC6 runtime dependencies
+      - name: Install runtime dependencies
         run: |
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update
@@ -241,30 +183,103 @@ jobs:
         uses: ARM-software/cmsis-actions/vcpkg@v1
         with:
           config: firmware/targets/phy6252/vcpkg-configuration.json
-          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+          cache: phy6252-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
-      - name: Build
+      - name: Build production image
         run: |
-          set -o pipefail
-          mkdir -p tmp
-          bash tools/build_firmware.sh keil tmp/test-dpls.hex 2>&1 | tee tmp/keil-build.log
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/test-dpls.axf
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/test-dpls.map
+          set -euo pipefail
+          mkdir -p tmp/firmware
+          bash tools/build_firmware.sh tmp/firmware/TestDPLS-1.5.0.hex 2>&1 | tee tmp/firmware/build.log
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/firmware/test-dpls.axf
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/firmware/test-dpls.map
+          sha256sum tmp/firmware/TestDPLS-1.5.0.hex > tmp/firmware/TestDPLS-1.5.0.hex.sha256
+          printf 'version=1.5.0\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\n' "$GITHUB_SHA" > tmp/firmware/BUILD.txt
       - uses: actions/upload-artifact@v6
         with:
-          name: test-dpls-phy6252-keil
-          path: |
-            tmp/test-dpls.hex
-            tmp/test-dpls.axf
-            tmp/test-dpls.map
+          name: test-dpls-phy6252-1.5.0
+          path: tmp/firmware
           if-no-files-found: error
+          retention-days: 7
+      - name: Build opt-in UART/power diagnostic image
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/debug-firmware
+          bash tools/build_debug_firmware.sh tmp/debug-firmware/TestDPLS-1.5.0-debug-rom.hex
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-1.5.0-debug-rom
+          path: tmp/debug-firmware
+          if-no-files-found: error
+          retention-days: 7
+
+  firmverse:
+    name: PHY6252 Firmverse
+    needs: [smoke, firmware_image]
+    if: needs.smoke.outputs.firmware == 'true' && needs.firmware_image.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: test-dpls-phy6252-1.5.0
+          path: tmp/firmware
+      - name: Run the production image in Firmverse
+        id: firmverse
+        uses: Pom4H/firmverse@64aff0828bf9930db5fc3b339d72edc5ee2cc5a5
+        with:
+          firmware: tmp/firmware/TestDPLS-1.5.0.hex
+          board: pb03f-kit
+          strict: 'true'
+          max-insns: '3000000'
+          expect: |
+            BLE HCI LE_SetAdvEnable enabled=1
+          log: tmp/firmverse.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: test-dpls-firmverse
+          path: ${{ steps.firmverse.outputs.log }}
+          if-no-files-found: warn
           retention-days: 3
+
+  firmware_quality:
+    name: Firmware coverage + cppcheck
+    needs: smoke
+    if: needs.smoke.outputs.firmware == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Tests + coverage
+        run: bash tools/coverage_firmware.sh
+      - name: cppcheck
+        run: bash tools/lint_firmware.sh
+
+  soft_ble_e2e:
+    name: Soft-BLE DplsClient ↔ simulator
+    needs: smoke
+    if: needs.smoke.outputs.soft_ble == 'true' || needs.smoke.outputs.firmware == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Run soft-BLE phone E2E scenarios
+        run: bash tools/soft_ble_e2e.sh
 
   ios:
     name: iOS adapter + Xcode host
-    if: github.event_name != 'pull_request'
+    needs: smoke
+    if: needs.smoke.outputs.ios == 'true'
     runs-on: macos-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-java@v5
@@ -300,3 +315,57 @@ jobs:
             -scheme TestDPLS \
             -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
             CODE_SIGNING_ALLOWED=NO
+
+  release_gate:
+    name: RC production gate
+    needs:
+      - smoke
+      - android
+      - firmware_image
+      - firmverse
+      - firmware_quality
+      - soft_ble_e2e
+      - ios
+    if: always() && needs.smoke.outputs.release_pr == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every affected RC check to pass
+        shell: bash
+        env:
+          SMOKE: ${{ needs.smoke.result }}
+          ANDROID: ${{ needs.android.result }}
+          FIRMWARE_IMAGE: ${{ needs.firmware_image.result }}
+          FIRMVERSE: ${{ needs.firmverse.result }}
+          QUALITY: ${{ needs.firmware_quality.result }}
+          SOFT_BLE: ${{ needs.soft_ble_e2e.result }}
+          IOS: ${{ needs.ios.result }}
+          NEED_ANDROID: ${{ needs.smoke.outputs.android }}
+          NEED_IOS: ${{ needs.smoke.outputs.ios }}
+          NEED_FIRMWARE: ${{ needs.smoke.outputs.firmware }}
+          NEED_SOFT_BLE: ${{ needs.smoke.outputs.soft_ble }}
+        run: |
+          set -euo pipefail
+
+          require_if_needed() {
+            local name="$1" result="$2" needed="$3"
+            printf '%-20s %-10s needed=%s\n' "$name" "$result" "$needed"
+            if [[ "$needed" == "true" ]]; then
+              [[ "$result" == "success" ]] || return 1
+            else
+              [[ "$result" == "success" || "$result" == "skipped" ]] || return 1
+            fi
+          }
+
+          [[ "$SMOKE" == "success" ]]
+          require_if_needed android "$ANDROID" "$NEED_ANDROID"
+          require_if_needed ios "$IOS" "$NEED_IOS"
+          require_if_needed firmware-image "$FIRMWARE_IMAGE" "$NEED_FIRMWARE"
+          require_if_needed firmverse "$FIRMVERSE" "$NEED_FIRMWARE"
+          require_if_needed firmware-quality "$QUALITY" "$NEED_FIRMWARE"
+          if [[ "$NEED_FIRMWARE" == "true" || "$NEED_SOFT_BLE" == "true" ]]; then
+            require_if_needed soft-ble-e2e "$SOFT_BLE" true
+          else
+            require_if_needed soft-ble-e2e "$SOFT_BLE" false
+          fi
+          echo 'RC affected-area production gate: PASS'

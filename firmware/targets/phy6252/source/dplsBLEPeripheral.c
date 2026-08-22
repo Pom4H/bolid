@@ -5,34 +5,99 @@
 #include "gapgattserver.h"
 #include "gatt.h"
 #include "gattservapp.h"
+#include "linkdb.h"
 #include "peripheral.h"
 #include "ll.h"
 #include "ll_common.h"
-#include "linkdb.h"
 #include "dpls_ble_identity.h"
-#include "dpls_phy6252_app.h"
-#include "dpls_server.h"
+#include "dpls_phy6252_events.h"
+#include "dpls_phy6252_power.h"
+#include "dpls_phy6252_runtime.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
+#include "log.h"
+#include "gpio.h"
+#include "uart.h"
 
-#define DEFAULT_MIN_CONN_INTERVAL 24
-#define DEFAULT_MAX_CONN_INTERVAL 80
-#define DEFAULT_CONN_TIMEOUT 3000
-/* Housekeeping and ADC sampling share this tick. Connected sessions stay at
- * 1 Hz so STATE_REPORT and mode deadlines are live; idle advertising is 5 s. */
-#define DPLS_TICK_MS 1000u
-#define DPLS_TICK_IDLE_MS 5000u
-/* 0.625 ms units — 500 ms, slow enough to be cheap, fast enough to find. */
+#ifndef DPLS_DEBUG_UART_ROM
+#define DPLS_DEBUG_UART_ROM 0
+#endif
+
+#if DPLS_DEBUG_UART_ROM
+#define DPLS_DEBUG_UART_AWAKE_MS 750u
+static const uint8 debug_uart_boot_token[] = {
+    0x00u, 0xd5u, 'D', 'P', 'L', 'S', '-', 'R', 'O', 'M',
+    0xa5u, 0x5au, 0xc3u, 0x3cu, 0x7eu, 0x81u
+};
+static uint8 debug_uart_boot_match;
+#endif
+
+/* BLE units are 1.25 ms for connection interval and 10 ms for supervision
+ * timeout. ACTIVE keeps pairing/control responsive. IDLE allows up to ~600 ms
+ * effective peripheral latency, still below the 1 s product control budget. */
+#define DPLS_ACTIVE_MIN_CONN_INTERVAL 24u
+#define DPLS_ACTIVE_MAX_CONN_INTERVAL 40u
+#define DPLS_ACTIVE_SLAVE_LATENCY 0u
+#define DPLS_IDLE_MIN_CONN_INTERVAL 96u
+#define DPLS_IDLE_MAX_CONN_INTERVAL 120u
+#define DPLS_IDLE_SLAVE_LATENCY 3u
+#define DPLS_CONN_TIMEOUT 3000u
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
-static uint8 link_up;
+static bool link_profile_known;
+static dpls_link_profile_t applied_link_profile;
 
-/* The air contract intentionally uses only the project 128-bit service UUID
- * plus the human-readable Test-DPLS-XXXX name. Do not put an unassigned or a
- * third-party Bluetooth SIG Company Identifier into Manufacturer Specific Data.
- * Full serial/status/firmware are read through the authenticated GATT protocol. */
+#if DPLS_DEBUG_UART_ROM
+static void debug_uart_rx(uart_Evt_t *event)
+{
+    uint8 i;
+    if (event == NULL || event->data == NULL) return;
+    for (i = 0u; i < event->len; ++i) {
+        uint8 byte = event->data[i];
+        if (byte == debug_uart_boot_token[debug_uart_boot_match]) {
+            ++debug_uart_boot_match;
+            if (debug_uart_boot_match == sizeof(debug_uart_boot_token)) {
+                debug_uart_boot_match = 0u;
+                osal_set_event(app_task_id, DPLS_PHY6252_DEBUG_UART_BOOT_EVT);
+            }
+        } else {
+            debug_uart_boot_match = byte == debug_uart_boot_token[0] ? 1u : 0u;
+        }
+    }
+}
+
+static void debug_uart_wake(gpio_pin_e pin, gpio_polarity_e polarity)
+{
+    (void)pin;
+    (void)polarity;
+    osal_set_event(app_task_id, DPLS_PHY6252_DEBUG_UART_WAKE_EVT);
+}
+
+static void debug_uart_init(void)
+{
+    uart_Cfg_t config = {
+        .tx_pin = P9,
+        .rx_pin = P10,
+        .rts_pin = GPIO_DUMMY,
+        .cts_pin = GPIO_DUMMY,
+        .baudrate = 115200u,
+        .use_fifo = TRUE,
+        .hw_fwctrl = FALSE,
+        .use_tx_buf = FALSE,
+        .parity = FALSE,
+        .evt_handler = debug_uart_rx,
+    };
+    debug_uart_boot_match = 0u;
+    (void)hal_gpioin_register(P10, NULL, debug_uart_wake);
+    (void)hal_uart_deinit(UART0);
+    (void)hal_uart_init(config, UART0);
+    LOG("DPLS DBG uart-rom=1 power-diag=1 reset=%lu\n",
+        (unsigned long)g_system_reset_cause);
+}
+#endif
+
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
     'T','e','s','t','-','D','P','L','S','-','0','0','0','0'
@@ -51,84 +116,120 @@ static uint8 device_name[GAP_DEVICE_NAME_LEN] = "Test-DPLS-0000";
 static void apply_identity_to_adv(void)
 {
     static const char HEX[] = "0123456789ABCDEF";
-    uint32 id = dpls_ble_identity_device_id();
-    uint16 tag = (uint16)(id & 0xffffu);
-    char suffix[4];
+    uint16 tag = (uint16)(dpls_ble_identity_device_id() & 0xffffu);
     uint8 i;
+    char suffix[4];
 
     suffix[0] = HEX[(tag >> 12) & 0xfu];
     suffix[1] = HEX[(tag >> 8) & 0xfu];
     suffix[2] = HEX[(tag >> 4) & 0xfu];
     suffix[3] = HEX[tag & 0xfu];
-    for (i = 0; i < 4u; ++i) {
+    for (i = 0u; i < 4u; ++i) {
         scan_response[12 + i] = (uint8)suffix[i];
         device_name[10 + i] = (uint8)suffix[i];
     }
     device_name[14] = '\0';
 }
 
-/* Refresh every identity-bearing GAP value immediately before advertising.
- * A failed early PHY6252 HCI address update must never leak a controller
- * default address or Test-DPLS-0000 into the air. */
-static bool enable_advertising_if_identity_ready(void)
+static void enable_advertising(void)
 {
     uint8 enabled = TRUE;
-    if (!dpls_ble_identity_is_ready()) return false;
     apply_identity_to_adv();
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
-    return true;
 }
 
-/* Steps the LED and re-arms the timer only while there is something to show, so
- * Norma costs no wake-ups. Call from anywhere the scene can change. */
-static void schedule_led_if_needed(void)
+static void schedule_runtime_timer(void)
 {
-    uint32 next_ms = dpls_phy6252_led_tick();
+    uint32 next_ms = dpls_phy6252_runtime_next_wakeup_ms();
+    /* There is exactly one application timer. LED edges, ADC cadence and every
+     * semantic/transport deadline are merged by runtime. */
+    (void)osal_stop_timerEx(app_task_id, SBP_DPLS_TIMER_EVT);
     if (next_ms != 0u)
-        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+        (void)osal_start_timerEx(app_task_id, SBP_DPLS_TIMER_EVT, next_ms);
+}
+
+static void apply_link_profile_if_needed(void)
+{
+    dpls_link_profile_t desired;
+    uint16 min_interval;
+    uint16 max_interval;
+    uint16 latency;
+    bStatus_t rc;
+
+    if (!dpls_phy6252_runtime_link_active()) return;
+    desired = dpls_phy6252_runtime_link_profile();
+    if (link_profile_known && desired == applied_link_profile) return;
+
+    if (desired == DPLS_LINK_PROFILE_IDLE) {
+        min_interval = DPLS_IDLE_MIN_CONN_INTERVAL;
+        max_interval = DPLS_IDLE_MAX_CONN_INTERVAL;
+        latency = DPLS_IDLE_SLAVE_LATENCY;
+    } else {
+        min_interval = DPLS_ACTIVE_MIN_CONN_INTERVAL;
+        max_interval = DPLS_ACTIVE_MAX_CONN_INTERVAL;
+        latency = DPLS_ACTIVE_SLAVE_LATENCY;
+    }
+
+    rc = GAPRole_SendUpdateParam(min_interval, max_interval, latency,
+                                 DPLS_CONN_TIMEOUT, GAPROLE_NO_ACTION);
+    if (rc == SUCCESS || rc == bleAlreadyInRequestedMode) {
+        applied_link_profile = desired;
+        link_profile_known = true;
+        LOG("DPLS BLE profile=%u min=%u max=%u lat=%u\n",
+            (unsigned)desired, min_interval, max_interval, latency);
+    } else {
+        /* Transient host pressure is retried on the next real runtime event; no
+         * dedicated polling timer exists for connection-parameter updates. */
+        LOG("DPLS BLE profile retry=%u rc=%u\n", (unsigned)desired, rc);
+    }
 }
 
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED:
-        /* HCI_EXT_SetBDADDRCmd may reject a pre-start request. Identity is
-         * applied after GAP is live and advertising stays disabled until ready. */
         dpls_ble_identity_on_stack_started();
-        (void)enable_advertising_if_identity_ready();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
-        schedule_led_if_needed();
+        enable_advertising();
+        schedule_runtime_timer();
         break;
+
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
-        link_up = TRUE;
-        dpls_phy6252_connected(handle);
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
+        link_profile_known = false;
+        dpls_phy6252_power_link_connected();
+        dpls_phy6252_runtime_connected(handle);
+        apply_link_profile_if_needed();
+        schedule_runtime_timer();
         break;
     }
+
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT:
-        link_up = FALSE;
-        dpls_phy6252_disconnected();
-        schedule_led_if_needed(); /* turn an interrupted identify off immediately */
-        (void)enable_advertising_if_identity_ready();
+        dpls_phy6252_runtime_disconnected();
+        dpls_phy6252_power_link_disconnected();
+        link_profile_known = false;
+        schedule_runtime_timer();
+        if (!dpls_phy6252_runtime_flash_pending()) enable_advertising();
         break;
+
     default:
         break;
     }
 }
 
-static void rssi_changed(int8 rssi) { (void)rssi; }
+static void rssi_changed(int8 rssi)
+{
+    (void)rssi;
+}
 
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
     (void)conn_handle;
-    if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS) {
-        GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS, 0, NULL);
-    }
+    (void)state;
+    (void)status;
 }
 
 static gapRolesCBs_t role_callbacks = { state_changed, rssi_changed };
@@ -141,39 +242,36 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 channels = GAP_ADVCHAN_37 | GAP_ADVCHAN_38 | GAP_ADVCHAN_39;
     uint8 advertising_type = LL_ADV_CONNECTABLE_UNDIRECTED_EVT;
     uint16 advertising_off_time = 0;
-    uint16 min_interval = DEFAULT_MIN_CONN_INTERVAL;
-    uint16 max_interval = DEFAULT_MAX_CONN_INTERVAL;
-    uint16 latency = 0;
-    uint16 timeout = DEFAULT_CONN_TIMEOUT;
+    uint16 min_interval = DPLS_ACTIVE_MIN_CONN_INTERVAL;
+    uint16 max_interval = DPLS_ACTIVE_MAX_CONN_INTERVAL;
+    uint16 latency = DPLS_ACTIVE_SLAVE_LATENCY;
+    uint16 timeout = DPLS_CONN_TIMEOUT;
     uint16 advertising_interval = DPLS_ADV_INTERVAL;
     uint32 passkey = 0;
     uint8 pairing_mode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
     uint8 mitm = FALSE;
     uint8 io_capability = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
     uint8 bonding = TRUE;
-    uint8 bond_fail = GAPBOND_FAIL_TERMINATE_ERASE_BONDS;
+    uint8 bond_fail = GAPBOND_FAIL_TERMINATE_LINK;
     uint8 key_distribution = GAPBOND_KEYDIST_SENCKEY |
                              GAPBOND_KEYDIST_SIDKEY |
                              GAPBOND_KEYDIST_MENCKEY |
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
-    /* The scatter puts the ER_IROM1 tail in SRAM1 and ER_IROM2 in SRAM2, so all
-     * three banks must survive sleep or a wakeup lands on dead code. */
+    link_profile_known = false;
+
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
-    /* Cheaper retention regulator. Costs nothing in timing and is the only
-     * saving that does not depend on how often we wake. */
     (void)hal_pwrmgr_LowCurrentLdo_enable();
-    /* hal_pwrmgr_lock() is a no-op for an unregistered module, so reserve the
-     * slot the sleep guard in dpls_phy6252_app.c takes while a mode is live. */
-    (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
-    /* osal_snv is fs-backed and the SDK's main.c does not mount the region, so
-     * without this every SNV read and write fails. */
+    dpls_phy6252_power_init();
+
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
+
     dpls_ble_identity_prepare();
     apply_identity_to_adv();
+
     (void)LL_EXT_SetSCA(500);
     GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, 2);
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
@@ -182,6 +280,8 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertising_data), advertising_data);
+    /* Runtime owns profile changes; disable the vendor's independent automatic
+     * timer so connection policy still has one semantic owner. */
     GAPRole_SetParameter(GAPROLE_PARAM_UPDATE_ENABLE, sizeof(update_enabled), &update_enabled);
     GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(min_interval), &min_interval);
     GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(max_interval), &max_interval);
@@ -201,7 +301,10 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, device_name);
     GGS_AddService(GATT_ALL_SERVICES);
     GATTServApp_AddService(GATT_ALL_SERVICES);
-    dpls_phy6252_init(app_task_id);
+    dpls_phy6252_runtime_init(app_task_id);
+#if DPLS_DEBUG_UART_ROM
+    debug_uart_init();
+#endif
     ATT_SetMTUSizeMax(247);
     llInitFeatureSetDLE(TRUE);
     osal_set_event(app_task_id, SBP_START_DEVICE_EVT);
@@ -210,53 +313,91 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
 uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 {
     (void)task_id;
+
     if (events & SYS_EVENT_MSG) {
         uint8 *message = osal_msg_receive(app_task_id);
         if (message) {
             osal_event_hdr_t *hdr = (osal_event_hdr_t *)message;
             if (hdr->event == GATT_MSG_EVENT &&
                 ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
-                dpls_phy6252_tx_confirmed();
+                dpls_phy6252_runtime_tx_confirmed();
+                schedule_runtime_timer();
             }
             osal_msg_deallocate(message);
         }
         return events ^ SYS_EVENT_MSG;
     }
+
     if (events & SBP_START_DEVICE_EVT) {
         GAPRole_StartDevice(&role_callbacks);
         GAPBondMgr_Register(&bond_callbacks);
         return events ^ SBP_START_DEVICE_EVT;
     }
-    /* RX before TICK: AUTH_PROOF must be processed before the encrypt-timeout
-     * tick. Do not pump TX here and do not clear TX_EVT — rc1 sent from the
-     * dedicated TX turn so GATT_Notification is not nested under the write. */
+
     if (events & DPLS_PHY6252_RX_EVT) {
-        dpls_phy6252_process_rx();
-        schedule_led_if_needed();
+        dpls_phy6252_runtime_process_rx();
+        apply_link_profile_if_needed();
+        schedule_runtime_timer();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
-    if (events & SBP_DPLS_TICK_EVT) {
-        if (!link_up && !dpls_ble_identity_is_ready()) {
-            dpls_ble_identity_on_stack_started();
-            (void)enable_advertising_if_identity_ready();
-        }
-        dpls_phy6252_tick();
-        schedule_led_if_needed();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
-                           link_up ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
-        return events ^ SBP_DPLS_TICK_EVT;
+
+    if (events & SBP_DPLS_TIMER_EVT) {
+        dpls_phy6252_runtime_process_timer();
+        apply_link_profile_if_needed();
+        schedule_runtime_timer();
+        return events ^ SBP_DPLS_TIMER_EVT;
     }
-    if (events & SBP_DPLS_LED_EVT) {
-        schedule_led_if_needed();
-        return events ^ SBP_DPLS_LED_EVT;
-    }
+
     if (events & DPLS_PHY6252_TX_EVT) {
-        dpls_phy6252_process_tx();
+        dpls_phy6252_runtime_process_tx();
+        schedule_runtime_timer();
         return events ^ DPLS_PHY6252_TX_EVT;
     }
+
     if (events & DPLS_PHY6252_ADC_EVT) {
-        dpls_phy6252_process_adc();
+        dpls_phy6252_runtime_process_adc();
+        apply_link_profile_if_needed();
+        schedule_runtime_timer();
         return events ^ DPLS_PHY6252_ADC_EVT;
     }
-    return 0;
+
+    if (events & DPLS_PHY6252_STORAGE_EVT) {
+        dpls_phy6252_runtime_process_storage();
+        schedule_runtime_timer();
+        if (!dpls_phy6252_runtime_link_active() && !dpls_phy6252_runtime_flash_pending())
+            enable_advertising();
+        return events ^ DPLS_PHY6252_STORAGE_EVT;
+    }
+
+#if DPLS_DEBUG_UART_ROM
+    if (events & DPLS_PHY6252_DEBUG_UART_WAKE_EVT) {
+        (void)dpls_phy6252_power_acquire(DPLS_POWER_DEBUG_UART);
+        (void)osal_start_timerEx(app_task_id, DPLS_PHY6252_DEBUG_UART_SLEEP_EVT,
+                                 DPLS_DEBUG_UART_AWAKE_MS);
+        return events ^ DPLS_PHY6252_DEBUG_UART_WAKE_EVT;
+    }
+
+    if (events & DPLS_PHY6252_DEBUG_UART_BOOT_EVT) {
+        static const uint8 ack[] = "\r\n[DPLS ROM PREPARE]\r\n";
+        static const uint8 error[] = "\r\n[DPLS ROM ERROR]\r\n";
+        (void)osal_stop_timerEx(app_task_id, DPLS_PHY6252_DEBUG_UART_SLEEP_EVT);
+        (void)dpls_phy6252_power_acquire(DPLS_POWER_DEBUG_UART);
+        if (dpls_phy6252_runtime_request_rom_boot()) {
+            (void)hal_uart_send_buff(UART0, (uint8 *)ack, (uint16)(sizeof(ack) - 1u));
+            schedule_runtime_timer();
+        } else {
+            (void)hal_uart_send_buff(UART0, (uint8 *)error, (uint16)(sizeof(error) - 1u));
+            (void)dpls_phy6252_power_release(DPLS_POWER_DEBUG_UART);
+        }
+        return events & (uint16)~(DPLS_PHY6252_DEBUG_UART_BOOT_EVT |
+                                 DPLS_PHY6252_DEBUG_UART_SLEEP_EVT);
+    }
+
+    if (events & DPLS_PHY6252_DEBUG_UART_SLEEP_EVT) {
+        (void)dpls_phy6252_power_release(DPLS_POWER_DEBUG_UART);
+        return events ^ DPLS_PHY6252_DEBUG_UART_SLEEP_EVT;
+    }
+#endif
+
+    return 0u;
 }

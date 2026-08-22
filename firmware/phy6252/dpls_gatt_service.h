@@ -10,13 +10,10 @@
 typedef uint8 (*dpls_gatt_rx_cb_t)(const uint8 *data, uint16 length);
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback);
-/* SUCCESS: the ATT PDU left the stack. If dpls_gatt_needs_confirmation() is
- * true, wait for ATT_HANDLE_VALUE_CFM (or the TX confirm timeout) before the
- * next frame; notifications do not confirm. Transient errors (blePending /
- * bleMemAllocError / MSG_BUFFER_NOT_AVAIL / bleNotConnected) mean retry;
- * ATT_ERR_INVALID_VALUE_SIZE is the only drop. */
+/* SUCCESS means the ATT host accepted the PDU. Indications remain in flight
+ * until ATT_HANDLE_VALUE_CFM. The Samsung-compatible notification path is
+ * complete immediately on SUCCESS; there is no fixed pacing timeout in RC9. */
 bStatus_t dpls_gatt_send_indication(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
-/* True only for indicate-only CCCD. Samsung writes 0x03 then never confirms. */
 bool dpls_gatt_needs_confirmation(uint16 conn_handle);
 bool dpls_gatt_subscribed(void);
 

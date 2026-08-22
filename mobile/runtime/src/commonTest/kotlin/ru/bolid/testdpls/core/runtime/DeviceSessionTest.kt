@@ -20,16 +20,16 @@ class DeviceSessionTest {
             initialized = true,
         )
 
-        val authenticating: DeviceSession = DeviceSession.Authenticating(
+        val securing: DeviceSession = DeviceSession.Securing(
             endpoint = endpoint,
             challenge = challenge,
             candidateNodeId = candidate,
         )
-        assertFalse(authenticating.isAuthenticated)
-        assertTrue(authenticating.credentialsReady)
-        assertEquals(challenge, authenticating.challengeOrNull)
-        assertEquals(candidate, authenticating.candidateNodeIdOrNull)
-        assertNull(authenticating.nodeIdOrNull)
+        assertFalse(securing.isAuthenticated)
+        assertTrue(securing.credentialsReady)
+        assertEquals(challenge, securing.challengeOrNull)
+        assertEquals(candidate, securing.candidateNodeIdOrNull)
+        assertNull(securing.nodeIdOrNull)
 
         val token = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
         val auth = AuthSession(challenge.sessionId, token, challenge.authSalt)

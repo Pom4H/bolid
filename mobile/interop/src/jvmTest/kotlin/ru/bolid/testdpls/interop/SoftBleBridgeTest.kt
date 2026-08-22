@@ -14,6 +14,7 @@ import ru.bolid.testdpls.core.app.DplsClient
 import ru.bolid.testdpls.core.domain.ConnectionPhase
 import ru.bolid.testdpls.core.domain.DplsMode
 import ru.bolid.testdpls.core.domain.SettingsOp
+import ru.bolid.testdpls.core.protocol.DplsProtocol
 
 /**
  * Phone-E2E-like scenarios over soft-BLE: real `dpls_simulator` + real `DplsClient`.
@@ -122,16 +123,7 @@ class SoftBleBridgeTest {
         bringToReady(dpls)
 
         for (mode in PHONE_E2E_MODES) {
-            dpls.requestMode(mode)
-            dpls.confirmMode()
-            awaitCondition("mode $mode applied") {
-                dpls.uiState.value.state?.mode == mode && !dpls.uiState.value.commandInProgress
-            }
-            dpls.returnToNormal()
-            awaitCondition("return to NORMAL after $mode") {
-                dpls.uiState.value.state?.mode == DplsMode.NORMAL &&
-                    !dpls.uiState.value.commandInProgress
-            }
+            roundTripMode(dpls, mode)
         }
     }
 
@@ -148,20 +140,72 @@ class SoftBleBridgeTest {
     }
 
     @Test
-    fun journalLoadReturnsEvents() {
+    fun journalPostSyncDatesAndIncrementalRefreshAreEndToEnd() {
         val dpls = client ?: return
+        val services = requireNotNull(platform)
         bringToReady(dpls)
-        dpls.requestMode(DplsMode.SHORT_1)
-        dpls.confirmMode()
-        awaitCondition("short_1 live") { dpls.uiState.value.state?.mode == DplsMode.SHORT_1 }
-        dpls.returnToNormal()
-        awaitCondition("back to normal") { dpls.uiState.value.state?.mode == DplsMode.NORMAL }
+        roundTripMode(dpls, DplsMode.SHORT_1)
 
         dpls.loadEventLog()
-        awaitCondition("journal loaded") {
+        awaitCondition("journal first page loaded") {
             dpls.uiState.value.logProgress == null && dpls.uiState.value.eventLog.isNotEmpty()
         }
-        assertTrue(dpls.uiState.value.eventLog.isNotEmpty())
+        val first = dpls.uiState.value
+        val unknown = first.eventLog.firstOrNull { event -> event.timestampSeconds == 0L }
+            ?: fail("journal contains no pre-TIME_SYNC event: ${first.eventLog}")
+        assertEquals("Время не установлено", dpls.formatEventTime(unknown))
+        assertTrue(
+            first.eventLog.all { event ->
+                event.timestampSeconds == 0L ||
+                    event.timestampSeconds in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS
+            },
+            "journal must contain only UTC or zero: ${first.eventLog}",
+        )
+        val synced = first.eventLog.firstOrNull { event ->
+            event.timestampSeconds in DplsProtocol.TIME_MIN_UNIX_SECONDS..DplsProtocol.TIME_MAX_UNIX_SECONDS
+        } ?: fail("journal contains no post-TIME_SYNC event: ${first.eventLog}")
+        val caption = dpls.formatEventTime(synced)
+        assertEquals(services.formatLocalDateTime(synced.timestampSeconds), caption)
+        assertFalse(caption.contains("2083"), "post-sync timestamp was transformed twice: $caption")
+
+        val previousHead = first.eventLog.maxOf { it.sequence }
+        roundTripMode(dpls, DplsMode.SHORT_2)
+        dpls.refreshEventLog()
+        awaitCondition("journal incremental refresh") {
+            val state = dpls.uiState.value
+            state.logProgress == null &&
+                (state.eventLog.maxOfOrNull { it.sequence } ?: 0L) > previousHead
+        }
+        val refreshed = dpls.uiState.value.eventLog
+        assertEquals(refreshed.size, refreshed.map { it.sequence }.distinct().size)
+        assertEquals(refreshed.sortedByDescending { it.sequence }, refreshed)
+    }
+
+    @Test
+    fun journalPaginationLoadsEveryEventWithoutDuplicates() {
+        val dpls = client ?: return
+        bringToReady(dpls)
+        repeat(8) { index ->
+            roundTripMode(dpls, if (index % 2 == 0) DplsMode.SHORT_1 else DplsMode.OPEN_T)
+        }
+
+        dpls.loadEventLog()
+        awaitCondition("journal newest page loaded") {
+            val state = dpls.uiState.value
+            state.logProgress == null && state.eventLog.isNotEmpty() && state.logTotal > 15
+        }
+        assertTrue(dpls.uiState.value.logHasMore)
+
+        dpls.loadRemainingEventLog()
+        awaitCondition("journal all pages loaded") {
+            val state = dpls.uiState.value
+            state.logProgress == null && !state.logHasMore &&
+                state.logTotal > 15 && state.eventLog.size == state.logTotal
+        }
+        val records = dpls.uiState.value.eventLog
+        assertTrue(records.size > 15)
+        assertEquals(records.size, records.map { it.sequence }.distinct().size)
+        assertEquals(records.sortedByDescending { it.sequence }, records)
     }
 
     @Test
@@ -193,18 +237,31 @@ class SoftBleBridgeTest {
     }
 
     @Test
-    fun lowReserveForcesReturnToNormal() {
+    fun lowReserveDisablesTestControlsAndForcesReturnToNormal() {
         val dpls = client ?: return
         val ble = requireNotNull(transport)
         bringToReady(dpls)
         dpls.requestMode(DplsMode.SHORT_2)
         dpls.confirmMode()
         awaitCondition("short_2 live") { dpls.uiState.value.state?.mode == DplsMode.SHORT_2 }
+
         ble.inject("RESERVE_LOW 1")
         ble.tick(20)
         dpls.refreshState()
-        awaitCondition("normal after low reserve") {
-            dpls.uiState.value.state?.mode == DplsMode.NORMAL
+        awaitCondition("normal and controls disabled after low reserve") {
+            val state = dpls.uiState.value
+            state.state?.mode == DplsMode.NORMAL &&
+                state.state?.reserveLow == true &&
+                !state.controlsEnabled
+        }
+        assertFalse(dpls.uiState.value.controlsEnabled)
+
+        ble.inject("RESERVE_LOW 0")
+        ble.tick(20)
+        dpls.refreshState()
+        awaitCondition("controls restored after reserve recovery") {
+            val state = dpls.uiState.value
+            state.state?.reserveLow == false && state.controlsEnabled
         }
     }
 
@@ -214,6 +271,19 @@ class SoftBleBridgeTest {
         bringToReady(dpls)
         dpls.disconnect()
         assertFalse(dpls.uiState.value.authenticated)
+    }
+
+    private fun roundTripMode(dpls: DplsClient, mode: DplsMode) {
+        dpls.requestMode(mode)
+        dpls.confirmMode()
+        awaitCondition("mode $mode applied") {
+            dpls.uiState.value.state?.mode == mode && !dpls.uiState.value.commandInProgress
+        }
+        dpls.returnToNormal()
+        awaitCondition("return to NORMAL after $mode") {
+            dpls.uiState.value.state?.mode == DplsMode.NORMAL &&
+                !dpls.uiState.value.commandInProgress
+        }
     }
 
     private fun bringToReady(dpls: DplsClient) {

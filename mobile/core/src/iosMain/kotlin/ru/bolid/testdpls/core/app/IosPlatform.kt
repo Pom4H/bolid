@@ -23,6 +23,7 @@ import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
 import platform.Foundation.NSMutableData
+import platform.Foundation.NSProcessInfo
 import platform.Foundation.NSUserDefaults
 import platform.Foundation.dateWithTimeIntervalSince1970
 import platform.UserNotifications.UNAuthorizationOptionAlert
@@ -55,11 +56,22 @@ import platform.posix.timeval
 import ru.bolid.testdpls.core.domain.UiTheme
 
 internal object IosPlatformServices : DplsPlatformServices {
-    override fun nowMillis(): Long = memScoped {
+    private fun wallClockMillis(): Long = memScoped {
         val tv = alloc<timeval>()
         gettimeofday(tv.ptr, null)
         tv.tv_sec * 1_000L + tv.tv_usec / 1_000L
     }
+
+    private fun uptimeMillis(): Long =
+        (NSProcessInfo.processInfo.systemUptime * 1_000.0).toLong()
+
+    /* Same contract as Android: epoch-compatible, but progression comes from a
+     * monotonic clock so NTP/manual wall-clock changes cannot reorder events. */
+    private val epochBaseMillis = wallClockMillis()
+    private val uptimeBaseMillis = uptimeMillis()
+
+    override fun nowMillis(): Long =
+        epochBaseMillis + (uptimeMillis() - uptimeBaseMillis)
 
     override fun secureRandomBytes(count: Int): ByteArray {
         require(count >= 0)
@@ -94,31 +106,12 @@ internal object IosPlatformServices : DplsPlatformServices {
 
     override fun writeHapticsEnabled(enabled: Boolean) = writeFlag(DplsPlatformPrefs.HAPTICS, enabled)
 
-    override fun readDeviceVerifier(deviceKey: String): ByteArray? {
-        IosVerifierKeychain.read(deviceKey)?.let { return it }
-
-        // One-time migration from the pre-Keychain build. The legacy value is
-        // removed even if Keychain storage fails; keeping plaintext is worse
-        // than losing persistence for a future launch.
-        val defaults = NSUserDefaults.standardUserDefaults
-        val legacyKey = DplsPlatformPrefs.verifierKey(deviceKey)
-        val legacy = defaults.dataForKey(legacyKey)?.toByteArrayCopy()?.takeIf { it.size == 32 } ?: return null
-        IosVerifierKeychain.write(deviceKey, legacy)
-        defaults.removeObjectForKey(legacyKey)
-        return legacy
-    }
+    override fun readDeviceVerifier(deviceKey: String): ByteArray? =
+        IosVerifierKeychain.read(deviceKey)
 
     override fun writeDeviceVerifier(deviceKey: String, verifier: ByteArray?) {
-        val defaults = NSUserDefaults.standardUserDefaults
-        val legacyKey = DplsPlatformPrefs.verifierKey(deviceKey)
-        if (verifier == null) {
-            IosVerifierKeychain.delete(deviceKey)
-            defaults.removeObjectForKey(legacyKey)
-            return
-        }
-        if (IosVerifierKeychain.write(deviceKey, verifier)) {
-            defaults.removeObjectForKey(legacyKey)
-        }
+        if (verifier == null) IosVerifierKeychain.delete(deviceKey)
+        else IosVerifierKeychain.write(deviceKey, verifier)
     }
 
     override fun readDeviceString(key: String): String? =
@@ -165,8 +158,8 @@ internal object IosPlatformServices : DplsPlatformServices {
 }
 
 /**
- * The DPLS verifier is authentication-equivalent, so it belongs in Keychain rather than NSUserDefaults.
- * Service/account are byte-stable private identifiers; the value is a generic-password item protected by iOS.
+ * Verifier эквивалентен секрету аутентификации, поэтому хранится только в
+ * Keychain как generic-password item с доступом после разблокировки устройства.
  */
 private object IosVerifierKeychain {
     private const val SERVICE = "ru.bolid.testdpls.device-verifier.v1"

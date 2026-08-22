@@ -4,133 +4,97 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-required=(
-  firmware
-  mobile/android
-  mobile/wire
-  mobile/runtime
-  mobile/core
-  mobile/ios
-  docs
-  tools
-  third_party/phy62x2
-)
-legacy=(
-  Firmware
-  TestDPLS
-  TestDPLS-iOS
-  pvvx-PHY62x2
-)
-
-for path in "${required[@]}"; do
+for path in firmware mobile/wire mobile/runtime mobile/core mobile/android mobile/ios docs tools third_party/phy62x2; do
   test -d "$path" || { echo "missing required directory: $path" >&2; exit 1; }
 done
 
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-
-legacy_is_required() {
-  local candidate="$1"
-  local req
-  for req in "${required[@]}"; do
-    if [[ "$(lower "$candidate")" == "$(lower "$req")" ]]; then return 0; fi
-  done
-  return 1
-}
-
-for path in "${legacy[@]}"; do
-  if legacy_is_required "$path"; then continue; fi
-  if git ls-files -- "$path" | grep -q .; then
-    echo "legacy path must not be tracked: $path" >&2
-    exit 1
-  fi
-done
-
+# One shared KMP application stack.
 grep -q 'include(":wire")' mobile/settings.gradle.kts
 grep -q 'include(":runtime")' mobile/settings.gradle.kts
 grep -q 'include(":core")' mobile/settings.gradle.kts
 grep -q 'include(":android")' mobile/settings.gradle.kts
-! grep -q 'include(":app")' mobile/settings.gradle.kts
-! grep -q 'include(":shared")' mobile/settings.gradle.kts
-
-test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
-test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsEncode.kt
-test -f mobile/wire/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsDecode.kt
-test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/Link.kt
-test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/runtime/DeviceSession.kt
-test -f mobile/runtime/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
-
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsApp.kt
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsClient.kt
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsTransport.kt
-test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsProtocol.kt
-test ! -e mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSession.kt
-
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsBle.kt
-test -f mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/app/DplsPlatformEffects.kt
-test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidBleTransport.kt
-test -f mobile/core/src/androidMain/kotlin/ru/bolid/testdpls/core/app/AndroidPlatformServices.kt
-test -f mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosBleTransport.kt
-test -f mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosPlatform.kt
-test -f mobile/ios/TestDPLS/TestDPLSApp.swift
-test ! -e mobile/android/src/main/java/ru/bolid/testdpls/ble
-test ! -e mobile/android/src/main/java/ru/bolid/testdpls/ui/MainViewModel.kt
-
-duplicates=(
-  mobile/android/src/main/java/ru/bolid/testdpls/ble/BleClient.kt
-  mobile/android/src/main/java/ru/bolid/testdpls/ble/DplsModels.kt
-  mobile/android/src/main/java/ru/bolid/testdpls/ble/DplsWire.kt
-  mobile/android/src/main/java/ru/bolid/testdpls/protocol/DplsProtocol.kt
-  mobile/android/src/main/java/ru/bolid/testdpls/ui/DplsScreen.kt
-  mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsInterop.kt
-  mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/protocol/DplsMessageBridge.kt
-  mobile/core/src/commonMain/kotlin/ru/bolid/testdpls/core/session/DplsSessionBridge.kt
-  mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosDplsController.kt
-  mobile/ios/TestDPLS/BLE
-  mobile/ios/TestDPLS/Protocol
-  mobile/ios/TestDPLS/UI
-)
-for path in "${duplicates[@]}"; do
-  test ! -e "$path" || { echo "duplicate application layer must not exist: $path" >&2; exit 1; }
+for path in \
+  mobile/android/src/main/java/ru/bolid/testdpls/ble \
+  mobile/android/src/main/java/ru/bolid/testdpls/ui/MainViewModel.kt \
+  mobile/core/src/iosMain/kotlin/ru/bolid/testdpls/core/app/IosDplsController.kt \
+  mobile/ios/TestDPLS/BLE \
+  mobile/ios/TestDPLS/Protocol \
+  mobile/ios/TestDPLS/UI; do
+  test ! -e "$path" || { echo "duplicate application layer: $path" >&2; exit 1; }
 done
 
 test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
-identity=firmware/phy6252/dpls_ble_identity.c
-gnu_target=firmware/targets/phy6252/Makefile
-ac6_target=firmware/targets/phy6252/test-dpls.cproject.yml
-grep -q 'HCI_EXT_SetBDADDRCmd' "$identity"
-grep -q 'check_chip_mAddr' "$identity"
-! grep -q '0x1fff0965' "$identity"
-! grep -q 'DPLS_CHIP_MAC_FLASH_ADDR' "$identity"
-! grep -q '0x4000u' "$identity"
-grep -q 'components/driver/key' "$gnu_target"
-grep -q 'components/driver/key' "$ac6_target"
-grep -q 'src/dpls_safety.c' "$gnu_target"
-grep -q 'src/dpls_safety.c' "$ac6_target"
-for source in 'key/key.c' 'pwm/pwm.c' 'led_light/led_light.c'; do
-  ! grep -q "components/driver/$source" "$gnu_target"
-  ! grep -q "components/driver/$source" "$ac6_target"
+# Split PHY6252 runtime plus one CMSIS/AC6 target description.
+for path in \
+  firmware/phy6252/dpls_phy6252_runtime.c \
+  firmware/phy6252/dpls_phy6252_transport.c \
+  firmware/phy6252/dpls_phy6252_storage.c \
+  firmware/phy6252/dpls_phy6252_measurements.c \
+  firmware/phy6252/dpls_phy6252_outputs.c \
+  firmware/phy6252/dpls_phy6252_auth.c \
+  firmware/phy6252/dpls_phy6252_supervisor.c \
+  firmware/targets/phy6252/test-dpls.cproject.yml \
+  firmware/targets/phy6252/test-dpls.csolution.yml \
+  firmware/targets/phy6252/scatter_load.sct \
+  firmware/targets/phy6252/vcpkg-configuration.json; do
+  test -f "$path" || { echo "missing production source: $path" >&2; exit 1; }
 done
 
-test -f tools/dpls_lab.sh
-test -f tools/dpls-lab/hub.ts
-test -f tools/dpls-lab/server.ts
-test -f mobile/web/src/wasmJsMain/kotlin/ru/bolid/testdpls/web/LabBleTransport.kt
-test -f firmware/sim/dpls_sim_transport.c
-test -f firmware/sim/dpls_sim_transport.h
+for path in \
+  firmware/phy6252/dpls_phy6252_app.c \
+  firmware/phy6252/dpls_phy6252_app.h \
+  firmware/phy6252/dpls_phy6252_snv_guard.c \
+  firmware/phy6252/dpls_phy6252_snv_guard.h \
+  firmware/phy6252/dpls_phy6252_storage_ble.c \
+  firmware/phy6252/dpls_phy6252_storage_ble.h; do
+  test ! -e "$path" || { echo "legacy PHY6252 layer returned: $path" >&2; exit 1; }
+done
 
-# Production HEX emulation belongs only to the external Firmverse Action.
-test ! -e .gitmodules
-test ! -e third_party/phy6252-emu
-test ! -e firmware/phy6252_emu
-test ! -e firmware/zmu
-test ! -e tools/fetch_zmu.sh
-test ! -e tools/zmu_e2e.sh
-test ! -e tools/zmu_firmware_tests.sh
-test ! -e tools/zmu_run_all.sh
-test ! -e mobile/interop/src/jvmTest/kotlin/ru/bolid/testdpls/interop/ZmuInteropTest.kt
-grep -q 'uses: Pom4H/firmverse@v1' .github/workflows/ci.yml
+for path in .gitmodules third_party/phy6252-emu firmware/phy6252_emu firmware/zmu; do
+  test -z "$(git ls-files -- "$path")" || {
+    echo "removed production path returned to git: $path" >&2
+    exit 1
+  }
+done
+
+# Firmverse executes the production artifact.
+grep -q 'uses: Pom4H/firmverse@64aff0828bf9930db5fc3b339d72edc5ee2cc5a5' .github/workflows/ci.yml
+grep -q 'actions/download-artifact@v7' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
+
+# One application flasher; PB-03F uses manual KEY1 + vendor wh.
+test -f tools/flash_firmware.sh
+test ! -e tools/flash_firmware_agent.sh
+! grep -q -- '--auto-rst' tools/flash_firmware.sh
+! grep -q 'setRTS\|setDTR\|controlled_connect' tools/flash_firmware.sh
+! grep -q 'factory.bin\|0x3F000\|-r we' tools/flash_firmware.sh
+! grep -q 'ARGS=(-p "$PORT" -a\|cmd_erase_all_flash' tools/flash_firmware.sh
+grep -q 'er 0x3C000 0x3000' tools/flash_firmware.sh
+grep -q -- '-r wh' tools/flash_firmware.sh
+
+# Reject the removed second target toolchain anywhere in first-party tracked text.
+legacy="$(printf '%s%s%s' g c c)"
+while IFS= read -r path; do
+  case "$path" in
+    third_party/*) continue ;;
+  esac
+  lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *"$legacy"* ]]; then
+    echo "legacy target toolchain filename remains: $path" >&2
+    exit 1
+  fi
+  case "$path" in
+    *.yml|*.yaml|*.sh|*.py|*.md|*.c|*.h|*.kt|*.kts|*.swift|*.pbxproj|*.json|*.toml|*.txt|*.env|*.sct|Makefile)
+      if grep -qi "$legacy" "$path"; then
+        echo "legacy target toolchain reference remains: $path" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done < <(git ls-files)
+
+echo 'Repository layout: PASS'

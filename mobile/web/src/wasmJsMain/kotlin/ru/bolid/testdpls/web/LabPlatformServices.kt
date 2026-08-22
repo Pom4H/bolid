@@ -5,7 +5,11 @@ import ru.bolid.testdpls.core.app.DplsPlatformServices
 import ru.bolid.testdpls.core.domain.UiTheme
 
 class LabPlatformServices : DplsPlatformServices {
-    override fun nowMillis(): Long = dateNow().toLong()
+    private val epochBaseMillis = dateNow()
+    private val performanceBaseMillis = performanceNow()
+
+    override fun nowMillis(): Long =
+        (epochBaseMillis + (performanceNow() - performanceBaseMillis)).toLong()
 
     override fun secureRandomBytes(count: Int): ByteArray =
         ByteArray(count).also { Random.Default.nextBytes(it) }

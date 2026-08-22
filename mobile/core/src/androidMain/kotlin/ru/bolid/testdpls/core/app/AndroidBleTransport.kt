@@ -32,6 +32,26 @@ import java.util.UUID
  */
 @SuppressLint("MissingPermission")
 class AndroidBleTransport(context: Context) : DplsTransport {
+    private enum class PairingTrigger {
+        LINK,
+        CCCD,
+        RX_WRITE,
+    }
+
+    /**
+     * Single owner of Android SMP state. A frame blocked by the encrypted RX
+     * boundary lives in this state until bonding succeeds, fails or is cancelled.
+     */
+    private sealed interface SecurityState {
+        data object Idle : SecurityState
+        data class Pairing(
+            val trigger: PairingTrigger,
+            val blockedWrite: ByteArray? = null,
+        ) : SecurityState
+        data class Resuming(val blockedWrite: ByteArray) : SecurityState
+        data object Failed : SecurityState
+    }
+
     private val appContext = context.applicationContext
     private val adapter = appContext.getSystemService(BluetoothManager::class.java).adapter
     private val handler = Handler(Looper.getMainLooper())
@@ -43,15 +63,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var scanning = false
     private var selectedAddress: String? = null
     private var negotiatedMtu = 23
-    private var pairing = false
+    private var securityState: SecurityState = SecurityState.Idle
     private var subscribed = false
-    private var servicesDiscovered = false
 
     private val writeQueue = ArrayDeque<ByteArray>()
-    private var writeInProgress = false
     private var pendingWrite: ByteArray? = null
     private var writeRetryCount = 0
-    private var pairingTimeout: Runnable? = null
     private var pairingPoll: Runnable? = null
     private var closingGatt: BluetoothGatt? = null
     private var closeTimeout: Runnable? = null
@@ -60,8 +77,10 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private var connectAttempts = 0
     private var cccdRetryCount = 0
     private var suppressDisconnectEvent = false
-    private var pairingFailed = false
     private var cccdValue = DplsBle.CCCD_ENABLE_INDICATE_NOTIFY
+
+    private val pairing: Boolean
+        get() = securityState is SecurityState.Pairing
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = acceptScan(result)
@@ -88,24 +107,8 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     ) ?: return
                     if (device.address != selectedAddress) return
                     when (device.bondState) {
-                        BluetoothDevice.BOND_BONDED -> {
-                            pairing = false
-                            cancelPairingTimeout()
-                            if (gatt != null) {
-                                beginGattNegotiation()
-                            } else {
-                                Log.i(TAG, "bond complete, reopening GATT")
-                                scheduleOpenGatt(REOPEN_DELAY_MS)
-                            }
-                        }
-                        BluetoothDevice.BOND_NONE -> if (pairing && !pairingFailed) {
-                            if (gatt != null) {
-                                Log.i(TAG, "bond cleared while connected — continue GATT")
-                                beginGattNegotiation()
-                            } else {
-                                failPairingNotConfirmed()
-                            }
-                        }
+                        BluetoothDevice.BOND_BONDED -> handleBonded()
+                        BluetoothDevice.BOND_NONE -> if (pairing) failPairingNotConfirmed()
                     }
                 }
                 BluetoothAdapter.ACTION_STATE_CHANGED -> when (
@@ -115,11 +118,12 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     BluetoothAdapter.STATE_OFF,
                     -> {
                         suppressDisconnectEvent = true
+                        securityState = SecurityState.Idle
+                        cancelPairingWatch()
                         releaseGatt()
                         rx = null
                         tx = null
                         subscribed = false
-                        servicesDiscovered = false
                         resetWrites()
                         emit { onBluetoothUnavailable() }
                     }
@@ -205,16 +209,15 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     override fun disconnect(clearSelection: Boolean) {
         stopScan()
         handler.post {
-            cancelPairingTimeout()
+            securityState = SecurityState.Idle
+            cancelPairingWatch()
             cancelReopen()
             connectAttempts = 0
             suppressDisconnectEvent = true
             releaseGatt()
             rx = null
             tx = null
-            pairing = false
             subscribed = false
-            servicesDiscovered = false
             resetWrites()
             if (clearSelection) selectedAddress = null
         }
@@ -254,7 +257,7 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(current: BluetoothGatt, status: Int, newState: Int) {
-            Log.i(TAG, "gatt state=$newState status=$status pairing=$pairing")
+            Log.i(TAG, "gatt state=$newState status=$status security=${securityState::class.simpleName}")
             if (current === closingGatt) {
                 finishClosed(current)
                 return
@@ -264,34 +267,35 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                 return
             }
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                connectAttempts = 0
+                /* Do not reset connectAttempts here. A physical link that always
+                 * fails service/CCCD negotiation must remain bounded. The attempt
+                 * budget resets only after a usable subscription exists. */
                 suppressDisconnectEvent = false
                 emit { onConnected() }
                 when (current.device.bondState) {
-                    BluetoothDevice.BOND_BONDED -> beginGattNegotiation()
+                    BluetoothDevice.BOND_BONDED -> {
+                        if (securityState is SecurityState.Pairing) handleBonded()
+                        else beginGattNegotiation()
+                    }
                     BluetoothDevice.BOND_BONDING -> {
-                        pairing = true
-                        schedulePairingTimeout()
+                        if (!pairing) securityState = SecurityState.Pairing(PairingTrigger.LINK)
+                        watchPairing()
                     }
-                    else -> {
-                        // Current firmware expresses the security boundary in GATT:
-                        // encrypted CCCD write returns auth/encryption error and starts pairing.
-                        beginGattNegotiation()
-                    }
+                    else -> beginGattNegotiation()
                 }
                 return
             }
 
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 val bonded = current.device.bondState == BluetoothDevice.BOND_BONDED
-                val wasPairing = pairing
-                val wasSubscribed = subscribed
+                val securityAtDisconnect = securityState
+                val wasSecurityHandshake = securityAtDisconnect is SecurityState.Pairing ||
+                    securityAtDisconnect is SecurityState.Resuming
                 current.close()
                 if (gatt === current) gatt = null
                 rx = null
                 tx = null
                 subscribed = false
-                servicesDiscovered = false
                 resetWrites()
                 cancelCccdRetry()
                 if (closingGatt === current) {
@@ -299,23 +303,22 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     return
                 }
 
-                if (!wasSubscribed && status == GATT_CONN_TERMINATE_PEER) {
-                    failPairingNotConfirmed()
-                    return
-                }
-
-                if (wasPairing && status in PAIRING_DISCONNECT_STATUSES) {
-                    Log.i(TAG, "pairing disconnect status=$status bonded=$bonded")
-                    if (bonded) {
-                        pairing = false
-                        cancelPairingTimeout()
-                        scheduleOpenGatt(REOPEN_DELAY_MS)
+                /* ACL loss is not a security outcome. Pairing waits for the bond
+                 * event; Resuming already owns a bonded blocked frame and must
+                 * explicitly reopen GATT so that frame cannot be stranded. */
+                if (wasSecurityHandshake) {
+                    Log.i(TAG, "security disconnect status=$status bonded=$bonded state=$securityAtDisconnect")
+                    when (securityAtDisconnect) {
+                        is SecurityState.Pairing -> if (bonded) handleBonded()
+                        is SecurityState.Resuming -> {
+                            cancelPairingWatch()
+                            scheduleOpenGatt(REOPEN_DELAY_MS)
+                        }
                     }
                     return
                 }
 
-                pairing = false
-                cancelPairingTimeout()
+                cancelPairingWatch()
                 if (suppressDisconnectEvent) {
                     suppressDisconnectEvent = false
                     return
@@ -325,17 +328,14 @@ class AndroidBleTransport(context: Context) : DplsTransport {
                     scheduleOpenGatt(REOPEN_DELAY_MS)
                     return
                 }
-                if (status == GATT_ERROR && bonded) {
-                    emit { onStaleBond() }
-                    return
-                }
+                /* Android GATT 133 is a generic controller/stack failure and is
+                 * not evidence that persisted SMP keys are stale. Stale-bond is
+                 * reported only when a bonded peer still gets 5/15 on protected
+                 * RX in startPairing(). */
                 emit {
                     onDisconnected(
-                        if (status == BluetoothGatt.GATT_SUCCESS) {
-                            null
-                        } else {
-                            "Не удалось подключиться по Bluetooth (GATT $status)"
-                        },
+                        if (status == BluetoothGatt.GATT_SUCCESS) null
+                        else "Не удалось подключиться по Bluetooth (GATT $status)",
                     )
                 }
             }
@@ -346,32 +346,26 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (gatt !== this@AndroidBleTransport.gatt) return
             negotiatedMtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
             Log.i(TAG, "MTU changed mtu=$negotiatedMtu status=$status")
-            if (servicesDiscovered || subscribed) {
-                Log.i(TAG, "skip rediscovery after MTU update")
-                return
-            }
-            if (!gatt.discoverServices()) {
-                emit { onTransportError("Не удалось запустить поиск BLE-службы") }
-            }
+            if (rx != null || subscribed) return
+            if (!gatt.discoverServices()) retryLinkOrFail("Не удалось запустить поиск BLE-службы")
         }
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (gatt !== this@AndroidBleTransport.gatt) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                retryLinkOrFail("Не удалось получить BLE-службу (GATT $status)")
+                return
+            }
             val service = gatt.getService(SERVICE_UUID)
             rx = service?.getCharacteristic(RX_UUID)
             tx = service?.getCharacteristic(TX_UUID)
-            if (status != BluetoothGatt.GATT_SUCCESS || rx == null || tx == null) {
+            if (rx == null || tx == null) {
                 emit { onTransportError("Служба Test-DPLS не найдена") }
                 return
             }
             Log.i(TAG, "Services discovered")
-            servicesDiscovered = true
-            if (subscribed) {
-                Log.i(TAG, "CCCD already written; skip duplicate subscribe")
-                return
-            }
-            writeCccd()
+            if (!subscribed) writeCccd()
         }
 
         @SuppressLint("MissingPermission")
@@ -383,32 +377,23 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             if (gatt !== this@AndroidBleTransport.gatt || descriptor.uuid != CCCD_UUID) return
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 cccdRetryCount = 0
-                if (subscribed) {
-                    Log.i(TAG, "CCCD written (duplicate ignored)")
-                    return
-                }
+                connectAttempts = 0
+                if (subscribed) return
                 subscribed = true
                 Log.i(TAG, "CCCD written")
+                if (securityState is SecurityState.Resuming) resumeSecurityWrite()
                 emit { onSubscribed((negotiatedMtu - ATT_HEADER_BYTES).coerceAtLeast(20)) }
                 return
             }
             Log.i(TAG, "CCCD write status=$status")
-            if (status in CCCD_AUTH_STATUSES) {
-                pairing = true
-                schedulePairingTimeout()
-                if (gatt.device.bondState == BluetoothDevice.BOND_NONE && !gatt.device.createBond()) {
-                    Log.i(TAG, "CCCD auth createBond refused — retry CCCD")
-                    scheduleCccdRetry()
-                    return
-                }
-                scheduleCccdRetry()
+            if (AndroidGattSecurityPolicy.requiresPairing(status)) {
+                startPairing(PairingTrigger.CCCD, null)
                 return
             }
             if (status == GATT_CCCD_REJECTED &&
                 !cccdValue.contentEquals(DplsBle.CCCD_ENABLE_NOTIFY)
             ) {
                 cccdValue = DplsBle.CCCD_ENABLE_NOTIFY
-                Log.i(TAG, "CCCD $status — fallback notify-only")
                 scheduleCccdRetry()
                 return
             }
@@ -447,20 +432,11 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     @SuppressLint("MissingPermission")
     private fun beginGattNegotiation() {
         val current = gatt ?: return
-        pairing = false
-        cancelPairingTimeout()
-        handler.postDelayed(
-            {
-                if (gatt !== current) return@postDelayed
-                if (!current.requestMtu(PREFERRED_MTU)) {
-                    negotiatedMtu = 23
-                    if (!current.discoverServices()) {
-                        emit { onTransportError("Не удалось запустить поиск BLE-службы") }
-                    }
-                }
-            },
-            POST_BOND_SETTLE_MS,
-        )
+        if (!pairing) cancelPairingWatch()
+        if (!current.requestMtu(PREFERRED_MTU)) {
+            negotiatedMtu = 23
+            if (!current.discoverServices()) retryLinkOrFail("Не удалось запустить поиск BLE-службы")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -477,12 +453,8 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             return
         }
         val result = current.writeDescriptor(cccd, cccdValue)
-        Log.i(
-            TAG,
-            "CCCD write submit result=$result value=${cccdValue.toHexUpper()}",
-        )
+        Log.i(TAG, "CCCD write submit result=$result value=${cccdValue.toHexUpper()}")
         if (result == BluetoothStatusCodes.SUCCESS) return
-        Log.i(TAG, "CCCD submit result=$result retry=$cccdRetryCount")
         if (result in TRANSIENT_CCCD_SUBMIT && cccdRetryCount < MAX_CCCD_RETRIES) {
             scheduleCccdRetry()
             return
@@ -515,13 +487,9 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     }
 
     private fun failPairingNotConfirmed() {
-        if (pairingFailed) {
-            suppressDisconnectEvent = true
-            return
-        }
-        pairingFailed = true
-        pairing = false
-        cancelPairingTimeout()
+        if (securityState is SecurityState.Failed) return
+        securityState = SecurityState.Failed
+        cancelPairingWatch()
         cancelReopen()
         cancelCccdRetry()
         emit { onTransportError(PAIRING_NOT_CONFIRMED) }
@@ -530,12 +498,62 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     }
 
     @SuppressLint("MissingPermission")
+    private fun startPairing(trigger: PairingTrigger, blockedWrite: ByteArray?) {
+        val current = gatt ?: run {
+            failPairingNotConfirmed()
+            return
+        }
+        securityState = SecurityState.Pairing(trigger, blockedWrite?.copyOf())
+        watchPairing()
+        when (current.device.bondState) {
+            BluetoothDevice.BOND_BONDING -> Unit
+            BluetoothDevice.BOND_NONE -> if (!current.device.createBond()) failPairingNotConfirmed()
+            BluetoothDevice.BOND_BONDED -> {
+                /* Protected RX still returning 5/15 with a pre-existing bond is
+                 * a real phone/peripheral key mismatch, not a retry condition. */
+                securityState = SecurityState.Failed
+                cancelPairingWatch()
+                emit { onStaleBond() }
+                suppressDisconnectEvent = true
+                releaseGatt()
+            }
+        }
+    }
+
+    private fun handleBonded() {
+        val state = securityState as? SecurityState.Pairing ?: return
+        cancelPairingWatch()
+        securityState = state.blockedWrite?.let(SecurityState::Resuming) ?: SecurityState.Idle
+        if (gatt == null) {
+            scheduleOpenGatt(REOPEN_DELAY_MS)
+            return
+        }
+        when {
+            state.trigger == PairingTrigger.RX_WRITE && subscribed &&
+                securityState is SecurityState.Resuming -> resumeSecurityWrite()
+            state.trigger == PairingTrigger.CCCD && !subscribed -> writeCccd()
+            else -> beginGattNegotiation()
+        }
+    }
+
+    private fun resumeSecurityWrite() {
+        if (pendingWrite != null || gatt == null || rx == null || !subscribed) return
+        val state = securityState as? SecurityState.Resuming ?: return
+        securityState = SecurityState.Idle
+        writeQueue.addFirst(state.blockedWrite)
+        drainWriteQueue()
+    }
+
+    @SuppressLint("MissingPermission")
     private fun drainWriteQueue() {
-        if (writeInProgress) return
+        if (pendingWrite != null || securityState is SecurityState.Pairing ||
+            securityState is SecurityState.Resuming
+        ) {
+            return
+        }
         val current = gatt ?: return
         val characteristic = rx ?: return
         val bytes = writeQueue.removeFirstOrNull() ?: return
-        writeInProgress = true
         pendingWrite = bytes
         Log.i(TAG, "TX write bytes=${bytes.size} hex=${bytes.toHexUpper()}")
         val result = current.writeCharacteristic(
@@ -543,70 +561,72 @@ class AndroidBleTransport(context: Context) : DplsTransport {
             bytes,
             BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
         )
-        if (result != BluetoothStatusCodes.SUCCESS) {
-            writeInProgress = false
-            completeWrite(result)
-        }
+        if (result != BluetoothStatusCodes.SUCCESS) completeWrite(result)
     }
 
     private fun completeWrite(status: Int) {
-        writeInProgress = false
-        if (status == BluetoothGatt.GATT_SUCCESS) {
-            pendingWrite = null
-            writeRetryCount = 0
-            listener?.onWriteComplete(null)
-            drainWriteQueue()
-            return
-        }
-        val retry = pendingWrite
-        pendingWrite = null
-        if (retry != null &&
-            status in TRANSIENT_WRITE_STATUSES &&
-            writeRetryCount < MAX_WRITE_RETRIES
+        when (
+            AndroidGattSecurityPolicy.classifyWrite(
+                status = status,
+                retryCount = writeRetryCount,
+                maxRetries = MAX_WRITE_RETRIES,
+            )
         ) {
-            writeRetryCount++
-            writeQueue.addFirst(retry)
-            handler.postDelayed(::drainWriteQueue, WRITE_RETRY_BASE_MS * writeRetryCount)
-            return
+            WriteDisposition.COMPLETE -> {
+                pendingWrite = null
+                writeRetryCount = 0
+                listener?.onWriteComplete(null)
+                drainWriteQueue()
+            }
+            WriteDisposition.PAIRING_REQUIRED -> {
+                val blocked = pendingWrite
+                pendingWrite = null
+                writeRetryCount = 0
+                if (blocked == null) {
+                    listener?.onWriteComplete(status.toLong())
+                    return
+                }
+                startPairing(PairingTrigger.RX_WRITE, blocked)
+            }
+            WriteDisposition.RETRY -> {
+                val retry = pendingWrite
+                pendingWrite = null
+                if (retry == null) {
+                    writeRetryCount = 0
+                    listener?.onWriteComplete(status.toLong())
+                    return
+                }
+                writeRetryCount++
+                writeQueue.addFirst(retry)
+                handler.postDelayed(::drainWriteQueue, WRITE_RETRY_BASE_MS * writeRetryCount)
+            }
+            WriteDisposition.FAIL -> {
+                pendingWrite = null
+                writeRetryCount = 0
+                listener?.onWriteComplete(status.toLong())
+            }
         }
-        writeRetryCount = 0
-        listener?.onWriteComplete(status.toLong())
     }
 
     private fun resetWrites() {
         writeQueue.clear()
-        writeInProgress = false
         pendingWrite = null
         writeRetryCount = 0
     }
 
-    private fun schedulePairingTimeout() {
-        cancelPairingTimeout()
+    private fun watchPairing() {
+        cancelPairingWatch()
         pairingPoll = object : Runnable {
             @SuppressLint("MissingPermission")
             override fun run() {
                 if (!pairing) return
-                if (gatt?.device?.bondState == BluetoothDevice.BOND_BONDED) {
-                    beginGattNegotiation()
-                } else {
-                    handler.postDelayed(this, PAIRING_POLL_MS)
-                }
+                if (gatt?.device?.bondState == BluetoothDevice.BOND_BONDED) handleBonded()
+                else handler.postDelayed(this, PAIRING_POLL_MS)
             }
         }.also { handler.postDelayed(it, PAIRING_POLL_MS) }
-        pairingTimeout = Runnable {
-            if (!pairing) return@Runnable
-            if (gatt != null) {
-                Log.i(TAG, "pairing timeout — continue GATT")
-                beginGattNegotiation()
-            } else {
-                failPairingNotConfirmed()
-            }
-        }.also { handler.postDelayed(it, PAIRING_TIMEOUT_MS) }
     }
 
-    private fun cancelPairingTimeout() {
-        pairingTimeout?.let(handler::removeCallbacks)
-        pairingTimeout = null
+    private fun cancelPairingWatch() {
         pairingPoll?.let(handler::removeCallbacks)
         pairingPoll = null
     }
@@ -614,15 +634,13 @@ class AndroidBleTransport(context: Context) : DplsTransport {
     @SuppressLint("MissingPermission")
     private fun connectOnMain(address: String) {
         selectedAddress = address
-        pairing = false
+        securityState = SecurityState.Idle
         subscribed = false
-        servicesDiscovered = false
         negotiatedMtu = 23
         resetWrites()
-        cancelPairingTimeout()
+        cancelPairingWatch()
         cancelReopen()
         suppressDisconnectEvent = true
-        pairingFailed = false
         cccdRetryCount = 0
         cancelCccdRetry()
         connectAttempts = 0
@@ -661,15 +679,13 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         }
         connectAttempts++
         cccdRetryCount = 0
-        pairingFailed = false
-        servicesDiscovered = false
         subscribed = false
         rx = null
         tx = null
         negotiatedMtu = 23
         cccdValue = DplsBle.CCCD_ENABLE_INDICATE_NOTIFY
         resetWrites()
-        Log.i(TAG, "connectGatt $address attempt=$connectAttempts")
+        Log.i(TAG, "connectGatt $address attempt=$connectAttempts security=$securityState")
         gatt = device.connectGatt(
             appContext,
             false,
@@ -731,19 +747,14 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private const val TAG = "TestDplsBle"
         private const val PREFERRED_MTU = DplsBle.PREFERRED_MTU
         private const val ATT_HEADER_BYTES = DplsBle.ATT_HEADER_BYTES
-        private const val PAIRING_TIMEOUT_MS = 45_000L
         private const val PAIRING_POLL_MS = 250L
-        private const val POST_BOND_SETTLE_MS = 280L
         private const val MAX_WRITE_RETRIES = 3
         private const val WRITE_RETRY_BASE_MS = 150L
         private const val MAX_CCCD_RETRIES = 8
         private const val CCCD_RETRY_BASE_MS = 180L
         private const val GATT_CONN_TIMEOUT = 8
-        private const val GATT_CONN_TERMINATE_PEER = 19
         private const val GATT_CONN_TERMINATE_LOCAL = 22
         private const val GATT_ERROR = 133
-        private const val GATT_INSUFFICIENT_AUTHENTICATION = 5
-        private const val GATT_INSUFFICIENT_ENCRYPTION = 15
         private const val GATT_CCCD_REJECTED = 245
         private const val CLOSE_TIMEOUT_MS = 1_200L
         private const val REOPEN_DELAY_MS = 500L
@@ -751,11 +762,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private const val MAX_CONNECT_ATTEMPTS = 4
         private const val PAIRING_NOT_CONFIRMED =
             "Сопряжение не подтверждено. Повторите попытку и подтвердите системный диалог Bluetooth"
-        private val TRANSIENT_WRITE_STATUSES = setOf(8, 14, 17, 143, 201)
-        private val CCCD_AUTH_STATUSES = setOf(
-            GATT_INSUFFICIENT_AUTHENTICATION,
-            GATT_INSUFFICIENT_ENCRYPTION,
-        )
         private val TRANSIENT_CCCD_STATUSES = setOf(
             GATT_CONN_TIMEOUT,
             GATT_ERROR,
@@ -767,11 +773,6 @@ class AndroidBleTransport(context: Context) : DplsTransport {
         private val TRANSIENT_CCCD_SUBMIT = setOf(
             BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY,
             BluetoothStatusCodes.ERROR_GATT_WRITE_NOT_ALLOWED,
-        )
-        private val PAIRING_DISCONNECT_STATUSES = setOf(
-            BluetoothGatt.GATT_SUCCESS,
-            GATT_CONN_TIMEOUT,
-            GATT_CONN_TERMINATE_LOCAL,
         )
         private val TRANSIENT_CONNECT_STATUSES = setOf(
             GATT_CONN_TIMEOUT,

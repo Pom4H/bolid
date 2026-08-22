@@ -38,6 +38,28 @@ static bool indicate(void *context, const uint8_t *frame, size_t length)
     return true;
 }
 
+static bool events_init(void *context, uint16_t *count, uint32_t *next_sequence)
+{
+    (void)context;
+    *count = 0u;
+    *next_sequence = 1u;
+    return true;
+}
+
+static bool events_append(void *context, const dpls_event_t *event)
+{
+    (void)context;
+    return event != NULL;
+}
+
+static bool events_read(void *context, uint32_t sequence, dpls_event_t *event)
+{
+    (void)context;
+    (void)sequence;
+    (void)event;
+    return false;
+}
+
 static dpls_hal_t make_hal(fake_t *fake)
 {
     dpls_hal_t hal;
@@ -50,6 +72,12 @@ static dpls_hal_t make_hal(fake_t *fake)
     hal.hardware.reserve_low = false_input;
     hal.hardware.real_short_active = false_input;
     hal.hardware.identify_led = identify_led;
+    /* Audit persistence is a mandatory server invariant. IDENTIFY must be
+     * tested with a valid event store rather than accidentally exercising the
+     * critical-fault response produced by an incomplete fake HAL. */
+    hal.events.init = events_init;
+    hal.events.append = events_append;
+    hal.events.read = events_read;
     return hal;
 }
 
@@ -78,6 +106,7 @@ int main(void)
     fake.encrypted = true;
     hal = make_hal(&fake);
     dpls_server_init(&server, &hal, 0u);
+    assert(!server.critical_fault);
     dpls_server_connected(&server, 1u);
 
     request_len = identify_request(sequence, request);
