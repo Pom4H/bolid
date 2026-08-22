@@ -4,7 +4,8 @@
 AC6 bootstrap has one owner: GitHub Actions. build_firmware.sh only consumes an
 already activated toolchain; it must not grow a second installer/license path.
 Long Android/iOS jobs are selected by the latest pushed change set, not by the
-cumulative lifetime of a release PR.
+cumulative lifetime of a release PR. Incremental runs are never cancelled, so a
+later unrelated push cannot erase the only proof for an earlier mobile change.
 """
 import json
 import subprocess
@@ -27,6 +28,7 @@ for token in (
     "full_matrix:",
     "EVENT_ACTION:",
     "BEFORE_SHA:",
+    "cancel-in-progress: false",
     "shared_mobile=false",
     "android_only=false",
     "ios_only=false",
@@ -56,6 +58,9 @@ for token in (
 ):
     if token not in ci:
         raise SystemExit(f"incremental PR diff contract missing: {token}")
+
+if "cancel-in-progress: true" in ci:
+    raise SystemExit("incremental affected-area CI must not cancel unvalidated earlier change sets")
 
 # Release branches no longer force unrelated platforms. The release gate knows
 # whether a skipped job was intentionally unaffected and still fails if an
@@ -147,6 +152,7 @@ if '-r wh "$HEX"' not in flash or "зажмите KEY1" not in flash:
 
 print("CI/DX contract: PASS")
 print("  affected-area CI: synchronize diffs previous PR head -> new head")
+print("  incremental runs are not cancelled; every changed area keeps its proof")
 print("  Android/iOS run only for shared or platform-specific mobile changes")
 print("  manual full_matrix remains available for final release evidence")
 print("  one exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
