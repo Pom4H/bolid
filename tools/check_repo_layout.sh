@@ -60,10 +60,14 @@ grep -q 'uses: Pom4H/firmverse@v1' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
 
-# Один application flasher; factory sector не трогается обычной прошивкой.
+# Один application flasher; проверенный PB-03F path — ручной KEY1 + vendor wh.
+# У штатного адаптера кита RTS/DTR не разведены, поэтому auto-reset в wrapper
+# запрещён. Обычная прошивка не трогает factory sector.
 test -f tools/flash_firmware.sh
 test ! -e tools/flash_firmware_agent.sh
-grep -q -- '--auto-rst' tools/flash_firmware.sh
+! grep -q -- '--auto-rst' tools/flash_firmware.sh
+! grep -q 'setRTS\|setDTR\|controlled_connect' tools/flash_firmware.sh
 ! grep -q 'factory.bin\|0x3F000\|-r we' tools/flash_firmware.sh
+grep -q -- '-r wh' tools/flash_firmware.sh
 
 echo 'Repository layout: PASS'
