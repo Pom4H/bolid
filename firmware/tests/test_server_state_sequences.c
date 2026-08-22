@@ -40,7 +40,6 @@ static bool indicate(void *ctx, const uint8_t *frame, size_t length)
     f->tx_len = length;
     return true;
 }
-static void disconnect_link(void *ctx) { (void)ctx; }
 static bool apply_mode(void *ctx, dpls_mode_t mode)
 {
     ((fake_t *)ctx)->normal_output = mode == DPLS_MODE_NORMAL;
@@ -111,7 +110,6 @@ static dpls_hal_t make_hal(fake_t *fake)
     memset(&hal, 0, sizeof(hal));
     hal.link.encrypted = link_encrypted;
     hal.link.indicate = indicate;
-    hal.link.disconnect = disconnect_link;
     hal.hardware.apply_mode = apply_mode;
     hal.hardware.safe_normal = safe_normal;
     hal.hardware.voltage_mv = voltage;
