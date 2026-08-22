@@ -313,6 +313,9 @@ class DplsClient(
     }
 
     override fun requestMode(mode: DplsMode) {
+        /* The UI mirrors the firmware low-reserve interlock, but keep the same
+         * invariant at the command boundary for non-UI callers too. */
+        if (mode.dangerous && state.state?.reserveLow == true) return
         val controlsReady = session is DeviceSession.Online &&
             state.state != null &&
             !state.commandInProgress
@@ -693,10 +696,13 @@ class DplsClient(
         armConnectTimeout()
         scheduleRssiPoll()
         if (identify.afterConnect) {
+            /* Measure from before frame encoding/queueing. The device LED starts on
+             * the outbound ATT leg, so sampling after request() biased the preview late. */
+            val sentAtMillis = platform.nowMillis()
             val sequence = request(DplsProtocol.Type.IDENTIFY_START) ?: return
             identify = Identify(
                 responseSequence = sequence,
-                sentAtMillis = platform.nowMillis(),
+                sentAtMillis = sentAtMillis,
             )
             updateState { it.copy(statusText = "Показать на объекте…", awaitingUserPassword = false) }
         } else {
