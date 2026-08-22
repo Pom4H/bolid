@@ -215,7 +215,7 @@ jobs:
           path: tmp/firmware
       - name: Run the production image in Firmverse
         id: firmverse
-        uses: Pom4H/firmverse@7b6b480ab887151ebe657f15bf109ec8b8c4a56f
+        uses: Pom4H/firmverse@b1a92e3e6f941bf0f55049087d6cb10dd76f1045
         with:
           firmware: tmp/firmware/TestDPLS-1.4.2-rc9.hex
           board: pb03f-kit

@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIRMVERSE_SHA = "7b6b480ab887151ebe657f15bf109ec8b8c4a56f"
+FIRMVERSE_SHA = "b1a92e3e6f941bf0f55049087d6cb10dd76f1045"
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 harness = (ROOT / ".github/workflows/firmverse-flash-harness.yml").read_text(encoding="utf-8")
@@ -41,6 +41,9 @@ for token in (
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
+
+if f"ref: {FIRMVERSE_SHA}" not in harness:
+    raise SystemExit("flash harness is not pinned to the same Firmverse revision")
 
 for token in (
     '"$EVENT_ACTION" == "synchronize"',
@@ -132,5 +135,6 @@ for path in ROOT.rglob("*"):
 print("CI/DX contract: PASS")
 print("  one production PHY6252 image and one compiler path")
 print("  Firmverse consumes the exact production artifact")
+print("  Firmverse action and flash harness share one immutable revision")
 print("  Arm Compiler 6.24.0 + CMSIS-Toolbox 2.14.1 are pinned")
 print("  PB-03F flashing: manual KEY1 + vendor wh")

@@ -59,7 +59,7 @@ test ! -e firmware/phy6252_emu
 test ! -e firmware/zmu
 
 # Firmverse executes the production artifact.
-grep -q 'uses: Pom4H/firmverse@7b6b480ab887151ebe657f15bf109ec8b8c4a56f' .github/workflows/ci.yml
+grep -q 'uses: Pom4H/firmverse@b1a92e3e6f941bf0f55049087d6cb10dd76f1045' .github/workflows/ci.yml
 grep -q 'actions/download-artifact@v7' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml

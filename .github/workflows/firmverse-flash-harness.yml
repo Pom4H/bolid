@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: 7b6b480ab887151ebe657f15bf109ec8b8c4a56f
+          ref: b1a92e3e6f941bf0f55049087d6cb10dd76f1045
           path: tmp/firmverse
           submodules: recursive
 
