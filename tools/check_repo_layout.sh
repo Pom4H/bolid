@@ -56,18 +56,21 @@ test ! -e firmware/phy6252_emu
 test ! -e firmware/zmu
 
 # Production target behavior проверяется внешним emulator.
-grep -q 'uses: Pom4H/firmverse@ad7302407c690d4a65399560cf19b9b0f946d5aa' .github/workflows/ci.yml
+grep -q 'uses: Pom4H/firmverse@0c2e3b915db507448eb158cd0a49ccd1c2362b59' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
 
 # Один application flasher; проверенный PB-03F path — ручной KEY1 + vendor wh.
 # У штатного адаптера кита RTS/DTR не разведены, поэтому auto-reset в wrapper
-# запрещён. Обычная прошивка не трогает factory sector.
+# запрещён. Обычная прошивка не трогает factory sector, а --erase чистит только
+# SNV work area и никогда не вызывает vendor all-chip erase.
 test -f tools/flash_firmware.sh
 test ! -e tools/flash_firmware_agent.sh
 ! grep -q -- '--auto-rst' tools/flash_firmware.sh
 ! grep -q 'setRTS\|setDTR\|controlled_connect' tools/flash_firmware.sh
 ! grep -q 'factory.bin\|0x3F000\|-r we' tools/flash_firmware.sh
+! grep -q 'ARGS=(-p "$PORT" -a\|cmd_erase_all_flash' tools/flash_firmware.sh
+grep -q 'er 0x3C000 0x3000' tools/flash_firmware.sh
 grep -q -- '-r wh' tools/flash_firmware.sh
 
 echo 'Repository layout: PASS'
