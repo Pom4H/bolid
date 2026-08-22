@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Release evidence and firmware toolchain contract.
+"""Release evidence, affected-area CI, and firmware toolchain contract.
 
 AC6 bootstrap has one owner: GitHub Actions. build_firmware.sh only consumes an
 already activated toolchain; it must not grow a second installer/license path.
+Long Android/iOS jobs are selected by the latest pushed change set, not by the
+cumulative lifetime of a release PR.
 """
 import json
 import subprocess
@@ -21,7 +23,15 @@ for script in (ROOT / "tools/build_firmware.sh", ROOT / "tools/flash_firmware.sh
     subprocess.run(["bash", "-n", str(script)], check=True)
 
 for token in (
-    'if [[ "$HEAD_REF" == release/* ]]',
+    "workflow_dispatch:",
+    "full_matrix:",
+    "EVENT_ACTION:",
+    "BEFORE_SHA:",
+    "shared_mobile=false",
+    "android_only=false",
+    "ios_only=false",
+    "if: needs.smoke.outputs.android == 'true'",
+    "if: needs.smoke.outputs.ios == 'true'",
     "Android unit tests",
     "PHY6252 Firmverse",
     "Firmware coverage + cppcheck",
@@ -30,11 +40,36 @@ for token in (
     "PHY6252 Keil MDK / AC6",
     "iOS adapter + Xcode host",
     "RC production gate",
+    "RC affected-area production gate: PASS",
     "BLE HCI LE_SetAdvEnable enabled=1",
     "max-insns: '3000000'",
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
+
+# A synchronize event must use the previous PR head, otherwise the cumulative
+# PR diff makes an old mobile change rebuild Android/iOS on every firmware push.
+for token in (
+    '"$EVENT_ACTION" == "synchronize"',
+    'base="$BEFORE_SHA"',
+    'git diff --name-only "$base" "$head"',
+):
+    if token not in ci:
+        raise SystemExit(f"incremental PR diff contract missing: {token}")
+
+# Release branches no longer force unrelated platforms. The release gate knows
+# whether a skipped job was intentionally unaffected and still fails if an
+# affected job did not succeed.
+for forbidden in (
+    'release_pr=true\n            mobile=true',
+    "needs.smoke.outputs.release_pr == 'true' || needs.smoke.outputs.mobile == 'true'",
+    "if: github.event_name != 'pull_request' || needs.smoke.outputs.release_pr == 'true'",
+):
+    if forbidden in ci:
+        raise SystemExit(f"CI regained cumulative release-matrix forcing: {forbidden}")
+
+if "1.4.2-rc8" in ci or "rc=8" in ci:
+    raise SystemExit("RC9 CI still publishes RC8-labelled artifacts")
 
 for token in (
     "test_flash_firmware.py",
@@ -111,6 +146,9 @@ if '-r wh "$HEX"' not in flash or "зажмите KEY1" not in flash:
     raise SystemExit("production flasher lost manual KEY1 + vendor wh contract")
 
 print("CI/DX contract: PASS")
+print("  affected-area CI: synchronize diffs previous PR head -> new head")
+print("  Android/iOS run only for shared or platform-specific mobile changes")
+print("  manual full_matrix remains available for final release evidence")
 print("  one exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
 print("  PB-03F flashing: manual KEY1 + vendor wh, no unsupported auto-reset")
 print("  Firmverse remains strict with a bounded 3,000,000-instruction boot budget")
