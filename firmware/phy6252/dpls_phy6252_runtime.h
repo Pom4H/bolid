@@ -4,6 +4,11 @@
 #include "bcomdef.h"
 #include "types.h"
 
+typedef enum {
+    DPLS_LINK_PROFILE_ACTIVE = 0,
+    DPLS_LINK_PROFILE_IDLE
+} dpls_link_profile_t;
+
 void dpls_phy6252_runtime_init(uint8 task_id);
 void dpls_phy6252_runtime_connected(uint16 conn_handle);
 void dpls_phy6252_runtime_disconnected(void);
@@ -12,11 +17,15 @@ void dpls_phy6252_runtime_process_adc(void);
 void dpls_phy6252_runtime_process_tx(void);
 void dpls_phy6252_runtime_process_storage(void);
 void dpls_phy6252_runtime_tx_confirmed(void);
-/* RC9: timer callback is one-shot. The shell asks runtime when it next needs to
- * wake instead of running a permanent 1/5 Hz correctness poll. */
+/* One application timer owns physical sampling, LED edges and every semantic
+ * deadline. The shell asks runtime when it next needs to wake. */
 void dpls_phy6252_runtime_process_timer(void);
 uint32 dpls_phy6252_runtime_next_wakeup_ms(void);
-uint32 dpls_phy6252_runtime_led_tick(void);
+
+/* ACTIVE while pairing/authenticating or a dangerous mode is energized; IDLE
+ * only for authenticated NORMAL. The target maps this semantic fact to BLE
+ * connection parameters without duplicating domain state. */
+dpls_link_profile_t dpls_phy6252_runtime_link_profile(void);
 
 /* Target shell никогда не хранит shadow link state: спрашивает runtime/transport. */
 bool dpls_phy6252_runtime_link_active(void);
