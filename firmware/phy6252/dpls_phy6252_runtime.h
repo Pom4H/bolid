@@ -12,7 +12,10 @@ void dpls_phy6252_runtime_process_adc(void);
 void dpls_phy6252_runtime_process_tx(void);
 void dpls_phy6252_runtime_process_storage(void);
 void dpls_phy6252_runtime_tx_confirmed(void);
-void dpls_phy6252_runtime_tick(void);
+/* RC9: timer callback is one-shot. The shell asks runtime when it next needs to
+ * wake instead of running a permanent 1/5 Hz correctness poll. */
+void dpls_phy6252_runtime_process_timer(void);
+uint32 dpls_phy6252_runtime_next_wakeup_ms(void);
 uint32 dpls_phy6252_runtime_led_tick(void);
 
 /* Target shell никогда не хранит shadow link state: спрашивает runtime/transport. */
