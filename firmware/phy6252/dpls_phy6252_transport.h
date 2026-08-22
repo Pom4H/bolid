@@ -20,8 +20,10 @@ void dpls_phy6252_transport_disconnect(void *context);
 
 void dpls_phy6252_transport_process_tx(void);
 void dpls_phy6252_transport_tx_confirmed(void);
-void dpls_phy6252_transport_tick_tx(uint32 now_ms);
-void dpls_phy6252_transport_tick_security(uint32 now_ms);
+/* RC9 has no periodic transport tick. Runtime asks for the nearest absolute
+ * monotonic deadline and wakes only when it is due. */
+void dpls_phy6252_transport_check_deadlines(uint32 now_ms);
+uint32 dpls_phy6252_transport_next_deadline_ms(uint32 now_ms);
 bool dpls_phy6252_transport_tx_idle(void);
 
 /* Единственный допустимый путь удаления bonds — явный физический factory reset.
