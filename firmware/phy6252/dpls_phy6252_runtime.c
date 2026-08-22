@@ -50,8 +50,6 @@ static dpls_hal_t server_hal(void)
 
     hal.link.encrypted = dpls_phy6252_transport_encrypted;
     hal.link.indicate = dpls_phy6252_transport_indicate;
-    /* Domain never owns physical disconnect. */
-    hal.link.disconnect = NULL;
 
     hal.hardware.apply_mode = dpls_phy6252_outputs_apply_mode;
     hal.hardware.safe_normal = dpls_phy6252_outputs_safe_normal;
