@@ -257,10 +257,15 @@ static void test_core_flow(void) {
     uint8_t payload[64];
     size_t n;
     unsigned apply_count;
+    uint16_t i;
 
     init_server(&fake, &server, true);
     assert(server.safety.mode == DPLS_MODE_NORMAL && fake.normal);
     authenticate(&server, &fake, buf);
+    assert(fake.event_count >= 3u);
+    for (i = 0u; i < fake.event_count; ++i) {
+        assert(fake.events[i].timestamp_seconds == 0u);
+    }
 
     auth_payload(&server, payload);
     n = request(DPLS_MSG_STATE_GET, 20u, payload, 12u, buf);
@@ -298,6 +303,8 @@ static void test_core_flow(void) {
     r = response(&fake);
     assert(r.type == DPLS_MSG_TIME_SYNC && r.sequence == 30u && r.payload_length == 0u);
     assert(server.clock.valid);
+    dpls_server_log(&server, 12u, 0u);
+    assert(fake.events[fake.event_count - 1u].timestamp_seconds == 0x6a7c7780u);
 
     auth_payload(&server, payload);
     payload[12] = 3u;

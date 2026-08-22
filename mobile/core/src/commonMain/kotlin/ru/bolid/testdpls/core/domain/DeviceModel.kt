@@ -78,15 +78,10 @@ data class DeviceState(
 
 data class EventRecord(
     val sequence: Long,
+    /** 0 means that UTC was unknown when firmware wrote the event. */
     val timestampSeconds: Long,
     val type: Int,
     val parameter: Int,
-)
-
-data class JournalTimeAnchor(
-    val bootFirstSequence: Long,
-    val bootEpochSeconds: Long,
-    val lastSequence: Long,
 )
 
 data class LogHistogram(

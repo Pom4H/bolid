@@ -20,71 +20,26 @@ internal data class JournalTimeline(
     }
 }
 
-internal fun buildJournalTimeline(
-    records: List<EventRecord>,
-    sessions: List<JournalBootSession> = emptyList(),
-): JournalTimeline {
+internal fun buildJournalTimeline(records: List<EventRecord>): JournalTimeline {
     if (records.isEmpty()) return JournalTimeline(emptyList())
     val timeline = LongArray(records.size)
     val order = records.indices.sortedBy { records[it].sequence }
-    val gaps = journalSessionGaps(sessions)
-    var bootOffset = 0L
-    var previousWithinBoot = 0L
-    var previousRecord: EventRecord? = null
-    var previousSessionFirst: Long? = null
-    var inferredUtcEpoch: Long? = null
-
+    var cursor = 0L
+    var previousUtc: Long? = null
+    var hasPrevious = false
     for (index in order) {
-        val record = records[index]
-        val session = journalSessionFor(record.sequence, sessions)
-        val sessionFirst = session?.firstSequence
-        val previous = previousRecord
-
-        val crossedBoot = when {
-            sessions.isNotEmpty() && sessionFirst != null && previousSessionFirst != null ->
-                sessionFirst != previousSessionFirst
-            sessions.isEmpty() && previous != null -> {
-                val prevUtc = eventTimestampBasis(previous.timestampSeconds) == "utc"
-                val nowUtc = eventTimestampBasis(record.timestampSeconds) == "utc"
-                (prevUtc && !nowUtc) ||
-                    (!prevUtc && !nowUtc && record.timestampSeconds + 1L < previous.timestampSeconds) ||
-                    record.type == 1
-            }
-            else -> false
-        }
-
-        if (crossedBoot) {
-            val gap = if (sessions.isNotEmpty() && previousSessionFirst != null) {
-                val olderIndex = sessions.indexOfFirst { it.firstSequence == previousSessionFirst }
-                gaps.getOrNull(olderIndex) ?: 1L
+        val timestamp = records[index].timestampSeconds
+        val utc = timestamp.takeIf { eventTimestampBasis(it) == "utc" }
+        if (hasPrevious) {
+            cursor += if (utc != null && previousUtc != null) {
+                (utc - previousUtc).coerceAtLeast(1L)
             } else {
                 1L
             }
-            bootOffset += previousWithinBoot + gap
-            previousWithinBoot = 0L
-            inferredUtcEpoch = null
         }
-
-        if (previousSessionFirst == null || crossedBoot) previousSessionFirst = sessionFirst
-
-        val withinBoot = journalRecordUptimeSeconds(record, session?.epochSeconds) ?: run {
-            if (eventTimestampBasis(record.timestampSeconds) == "utc") {
-                /* Для старого журнала без сохранённого anchor выравниваем первый
-                 * UTC timestamp по уже известной части uptime этой boot-сессии.
-                 * Дальше разности Unix timestamps дают корректную длительность,
-                 * не растягивая график на десятилетия. */
-                val epoch = inferredUtcEpoch ?: (record.timestampSeconds - previousWithinBoot).also {
-                    inferredUtcEpoch = it
-                }
-                (record.timestampSeconds - epoch).coerceAtLeast(previousWithinBoot)
-            } else {
-                record.timestampSeconds.coerceAtLeast(0L)
-            }
-        }
-
-        timeline[index] = bootOffset + withinBoot
-        previousWithinBoot = maxOf(previousWithinBoot, withinBoot)
-        previousRecord = record
+        timeline[index] = cursor
+        previousUtc = utc
+        hasPrevious = true
     }
     return JournalTimeline(timeline.toList())
 }
@@ -266,11 +221,12 @@ internal fun buildLogHistogram(
     targetBars: Int = 32,
     bucketSeconds: Long? = null,
 ): LogTimeHistogram? {
-    if (records.isEmpty()) return null
+    val dated = records.filter { eventTimestampBasis(it.timestampSeconds) == "utc" }
+    if (dated.isEmpty()) return null
     return buildLogHistogram(
-        records,
-        records.minOf { it.timestampSeconds },
-        records.maxOf { it.timestampSeconds },
+        dated,
+        dated.minOf { it.timestampSeconds },
+        dated.maxOf { it.timestampSeconds },
         targetBars,
         bucketSeconds,
     )
