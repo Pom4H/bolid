@@ -56,6 +56,21 @@ for required in (
 if "osal_stop_timerEx(app_task_id, SBP_DPLS_TIMER_EVT)" not in target:
     raise SystemExit("target must own exactly one replaceable runtime timer")
 
+# A request arriving after a domain deadline must not refresh activity before the
+# overdue safety/identify state is reconciled. This is the key packet-vs-timer
+# commutativity invariant of RC9.
+try:
+    rx_body = runtime.split("void dpls_phy6252_runtime_process_rx(void)", 1)[1].split(
+        "void dpls_phy6252_runtime_process_adc(void)", 1
+    )[0]
+except IndexError as exc:
+    raise SystemExit("cannot isolate runtime_process_rx") from exc
+first_tick = rx_body.find("dpls_server_tick(&server, now);")
+receive = rx_body.find("dpls_server_receive(&server, frame, length, now)")
+second_tick = rx_body.find("dpls_server_tick(&server, now);", first_tick + 1)
+if first_tick < 0 or receive < 0 or second_tick < 0 or not (first_tick < receive < second_tick):
+    raise SystemExit("RX must reconcile domain deadlines both before and after request processing")
+
 # TX completion may be an ATT confirmation or a successful unconfirmed
 # notification. There must be no guessed 80 ms completion/pacing timer.
 for forbidden in ("DPLS_TX_NOTIFY_PACE_MS", "transport_tick_tx", "transport_tick_security"):
@@ -76,8 +91,8 @@ for required in (
 # delayed until the next sampling timer.
 if "update_power_state(mode);" not in measurements:
     raise SystemExit("ADC completion does not reconcile derived safety state")
-if runtime.count("dpls_server_tick(&server, now);") < 2:
-    raise SystemExit("runtime must reconcile safety on both events and deadlines")
+if runtime.count("dpls_server_tick(&server, now);") < 3:
+    raise SystemExit("runtime must reconcile safety on RX, ADC and deadline events")
 
 # PHY6252 power ownership is deliberate. MOD_USR0 is retained for the entire
 # connected session because real PB-03F/SDK 3.1.2 testing exposed an ADC/radio
@@ -111,4 +126,4 @@ if "performanceNow()" not in web_platform:
 if "CONNECT_TIMEOUT_MS" not in client:
     raise SystemExit("mobile connect liveness deadline unexpectedly missing")
 
-print("RC9 timing/power contract: PASS (independent deadlines, one-shot runtime, monotonic clocks, explicit sleep owners)")
+print("RC9 timing/power contract: PASS (commutative RX deadlines, one-shot runtime, monotonic clocks, explicit sleep owners)")
