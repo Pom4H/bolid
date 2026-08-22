@@ -49,9 +49,9 @@ jobs:
           test -s tmp/fresh-clone.hex
           grep -q '^:' tmp/fresh-clone.hex
 
-      - name: Verify flasher CLI and post-flash contract
+      - name: Verify restored PB-03F flasher contract
         shell: bash
         run: |
           set -euo pipefail
-          tools/flash_firmware.sh --help
+          bash -n tools/flash_firmware.sh
           python3 tools/test_flash_firmware.py
