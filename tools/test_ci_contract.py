@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+FIRMVERSE_SHA = "ad7302407c690d4a65399560cf19b9b0f946d5aa"
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
@@ -41,6 +42,7 @@ for token in (
     "if: needs.smoke.outputs.ios == 'true'",
     "Android unit tests",
     "PHY6252 Firmverse",
+    f"Pom4H/firmverse@{FIRMVERSE_SHA}",
     "Firmware coverage + cppcheck",
     "Soft-BLE DplsClient ↔ simulator",
     "PHY6252 GNU Arm GCC",
@@ -53,6 +55,9 @@ for token in (
 ):
     if token not in ci:
         raise SystemExit(f"CI contract missing: {token}")
+
+if "Pom4H/firmverse@v1" in ci or "Pom4H/firmverse@main" in ci:
+    raise SystemExit("Firmverse must be pinned to the validated pulled revision, not a mutable ref")
 
 # A synchronize event uses the previous PR head, otherwise an old mobile change
 # rebuilds Android/iOS on every subsequent firmware-only push.
@@ -187,4 +192,4 @@ print("  reproducible GCC A/B pair isolates connected-sleep delta")
 print("  manual full_matrix remains available for final release evidence")
 print("  exact AC6 6.24.0 + CMSIS-Toolbox 2.14.1 bootstrap: GitHub Actions")
 print("  PB-03F flashing: manual KEY1 + vendor wh, no unsupported auto-reset")
-print("  Firmverse remains strict with a bounded 3,000,000-instruction boot budget")
+print(f"  Firmverse pinned at {FIRMVERSE_SHA[:8]} (ROM-UART reset + deterministic flasher harness)")
