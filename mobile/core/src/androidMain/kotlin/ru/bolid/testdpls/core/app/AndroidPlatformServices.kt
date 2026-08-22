@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -28,8 +29,14 @@ class AndroidPlatformServices(context: Context) : DplsPlatformServices {
     private val random = SecureRandom()
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val verifierStore = AndroidVerifierStore(prefs)
+    /* Wall time is sampled once. All later elapsed-time decisions use the
+     * monotonic boot clock, while the resulting value is still an epoch time
+     * suitable for TIME_SYNC. NTP/manual clock jumps cannot reorder deadlines. */
+    private val epochBaseMillis = System.currentTimeMillis()
+    private val elapsedBaseMillis = SystemClock.elapsedRealtime()
 
-    override fun nowMillis(): Long = System.currentTimeMillis()
+    override fun nowMillis(): Long =
+        epochBaseMillis + (SystemClock.elapsedRealtime() - elapsedBaseMillis)
 
     override fun secureRandomBytes(count: Int): ByteArray =
         ByteArray(count).also(random::nextBytes)
