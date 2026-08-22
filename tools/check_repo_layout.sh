@@ -56,7 +56,7 @@ test ! -e firmware/phy6252_emu
 test ! -e firmware/zmu
 
 # Production target behavior проверяется внешним emulator.
-grep -q 'uses: Pom4H/firmverse@0c2e3b915db507448eb158cd0a49ccd1c2362b59' .github/workflows/ci.yml
+grep -q 'uses: Pom4H/firmverse@03422429fe25382ed95b2d96a7482bd43907b6eb' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
 
