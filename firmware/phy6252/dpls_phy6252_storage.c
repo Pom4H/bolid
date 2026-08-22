@@ -7,6 +7,13 @@
 #include <stdint.h>
 #include <string.h>
 
+/* 0x80/0x81 are the rc3/rc4 single-copy settings format. They remain a
+ * read-only migration source so a firmware update never turns an initialized
+ * device back into an apparently blank one. */
+#define DPLS_LEGACY_SETTINGS_MAGIC 0x534c5044u
+#define DPLS_LEGACY_SETTINGS_SNV_ID 0x80u
+#define DPLS_LEGACY_SETTINGS_STATE_SNV_ID 0x81u
+#define DPLS_LEGACY_SETTINGS_EMPTY_MARKER 0x45u
 #define DPLS_SETTINGS_SLOT_A_SNV_ID 0x85u
 #define DPLS_SETTINGS_SLOT_B_SNV_ID 0x86u
 #define DPLS_CALIB_SNV_ID 0x83u
@@ -19,6 +26,14 @@
 #define DPLS_JOURNAL_BLOCK_SIZE (DPLS_JOURNAL_EVENTS_PER_BLOCK * DPLS_JOURNAL_RECORD_SIZE)
 #define DPLS_CALIB_MAGIC 0x434c5044u
 #define DPLS_VCAP_NOMINAL_GAIN_MILLI 2000u
+
+typedef struct {
+    uint32_t magic;
+    char name[DPLS_DURABLE_SETTINGS_NAME_SIZE];
+    uint8_t salt[DPLS_AUTH_SALT_SIZE];
+    uint8_t verifier[DPLS_AUTH_PROOF_SIZE];
+    uint16_t crc;
+} dpls_legacy_settings_t;
 
 typedef struct {
     uint32_t magic;
@@ -207,6 +222,38 @@ static bool journal_sequence_for_slot(uint16_t slot, uint32_t *sequence)
     return true;
 }
 
+static bool load_legacy_settings(void)
+{
+    dpls_legacy_settings_t legacy;
+    uint16_t expected_crc;
+    uint8_t marker = 0u;
+
+    memset(&legacy, 0, sizeof(legacy));
+    if (osal_snv_read(DPLS_LEGACY_SETTINGS_SNV_ID, sizeof(legacy), &legacy) == SUCCESS) {
+        expected_crc = dpls_crc16((const uint8_t *)&legacy,
+                                  offsetof(dpls_legacy_settings_t, crc));
+        if (legacy.magic == DPLS_LEGACY_SETTINGS_MAGIC && legacy.crc == expected_crc) {
+            memset(&settings, 0, sizeof(settings));
+            settings.generation = dpls_durable_settings_next_generation(0u);
+            settings.state = DPLS_DURABLE_SETTINGS_VALID;
+            memcpy(settings.name, legacy.name, sizeof(settings.name));
+            memcpy(settings.salt, legacy.salt, sizeof(settings.salt));
+            memcpy(settings.verifier, legacy.verifier, sizeof(settings.verifier));
+            settings_state = DPLS_SETTINGS_VALID;
+            selected_settings_slot = 0xffu;
+            settings_dirty = true;
+            return true;
+        }
+    }
+
+    if (osal_snv_read(DPLS_LEGACY_SETTINGS_STATE_SNV_ID, sizeof(marker), &marker) == SUCCESS &&
+        marker == DPLS_LEGACY_SETTINGS_EMPTY_MARKER) {
+        settings_state = DPLS_SETTINGS_EMPTY;
+        return true;
+    }
+    return false;
+}
+
 static void load_settings(void)
 {
     uint8_t raw_a[DPLS_DURABLE_SETTINGS_RECORD_SIZE];
@@ -230,6 +277,11 @@ static void load_settings(void)
         return;
     }
 
+    /* No durable record yet is the normal upgrade path from rc3/rc4. Preserve
+     * the old credentials in RAM immediately and stage the first dual-slot
+     * generation before BLE starts. Corrupt durable records stay CORRUPT: an
+     * old legacy copy must not resurrect credentials after a later reset. */
+    if (!read_a && !read_b && load_legacy_settings()) return;
     settings_state = (read_a || read_b) ? DPLS_SETTINGS_CORRUPT : DPLS_SETTINGS_EMPTY;
 }
 
@@ -327,6 +379,11 @@ static bool commit_one_journal_block(void)
 void dpls_phy6252_storage_init(void)
 {
     load_settings();
+    /* Migration happens before transport init, while radio ownership is
+     * unambiguous. If persistence fails, settings_dirty remains set and the
+     * runtime will retry offline instead of exposing a fake EMPTY device. */
+    if (settings_dirty && settings_state == DPLS_SETTINGS_VALID)
+        (void)commit_settings();
     load_auth_lock();
     load_journal();
 }
