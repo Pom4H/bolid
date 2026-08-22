@@ -42,13 +42,13 @@ jobs:
           test -s tmp/test-dpls-1.4.2-rc9.hex
           sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
 
-      # Pin the exact Firmverse commit that exposes `phy6252-flash --harness`.
+      # Pin the exact merged Firmverse commit that exposes `phy6252-flash --harness`.
       # This makes RC9 reproducible even if Firmverse main moves later.
       - name: Checkout pinned Firmverse flasher harness
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: 6d9264c812739d8f3a0a1d3cf35ab69d5a445f73
+          ref: ad7302407c690d4a65399560cf19b9b0f946d5aa
           path: tmp/firmverse
           submodules: recursive
 
