@@ -5,6 +5,7 @@ Correctness may use absolute deadlines, but must not depend on independent timer
 ordering. One runtime timer owns application wakeups. One power module owns every
 pwrmgr lock. Mobile traffic follows risk instead of polling every second forever.
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +151,12 @@ for required in (
 ):
     if required not in client:
         raise SystemExit(f"mobile low-traffic/safety cadence missing: {required}")
-for forbidden in ("STATE_REFRESH_MS = 1_000L", "KEEP_ALIVE_TICKS", "RSSI_SESSION_POLL_MS = 1_000L"):
+
+# Reject the old global one-second poll by identifier, not by substring: the
+# intended DANGEROUS_STATE_REFRESH_MS name legitimately contains STATE_REFRESH_MS.
+if re.search(r"(?<![A-Za-z0-9_])STATE_REFRESH_MS\s*=\s*1_000L\b", client):
+    raise SystemExit("mobile periodic traffic regression: STATE_REFRESH_MS = 1_000L")
+for forbidden in ("KEEP_ALIVE_TICKS", "RSSI_SESSION_POLL_MS = 1_000L"):
     if forbidden in client:
         raise SystemExit(f"mobile periodic traffic regression: {forbidden}")
 
