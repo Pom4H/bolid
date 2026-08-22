@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIRMVERSE_SHA = "5dc70304456628d4d524a1e8b6292b2a175346a1"
+FIRMVERSE_SHA = "078cb957bbe4b096e7a228611bfe6144c0d927c3"
 ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 dx = (ROOT / ".github/workflows/firmware-dx.yml").read_text(encoding="utf-8")
 host = (ROOT / "tools/run_host_invariant_gate.sh").read_text(encoding="utf-8")
