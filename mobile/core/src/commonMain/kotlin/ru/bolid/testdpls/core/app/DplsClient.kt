@@ -1090,6 +1090,12 @@ class DplsClient(
         if (logLoadPending && !journal.isActive && operation == null) {
             refreshEventLog()
         }
+        /* Mode changes alter both the firmware BLE profile and the required
+         * client lease cadence. Re-arm immediately instead of waiting for the
+         * previous NORMAL/DANGEROUS sleep interval to finish. */
+        if (previousMode != device.mode && session is DeviceSession.Online) {
+            startSessionLoop()
+        }
     }
 
     private fun handleTimeSyncAck(frame: DplsProtocol.Frame) {
@@ -1320,21 +1326,35 @@ class DplsClient(
         if (!session.isAuthenticated || !transport.hasConnection() || journal.isActive) return
         val generation = linkGeneration
         sessionLoopJob = scope.launch {
-            var ticks = 0
+            var lastLeaseActivityMillis = platform.nowMillis()
             while (isActive && generation == linkGeneration && session.isAuthenticated && transport.hasConnection()) {
-                delay(STATE_REFRESH_MS)
-                ++ticks
+                val dangerousBeforeDelay = state.state?.mode?.dangerous == true
+                delay(if (dangerousBeforeDelay) DANGEROUS_STATE_REFRESH_MS else NORMAL_STATE_REFRESH_MS)
                 if (generation != linkGeneration) return@launch
-                if (journal.isActive || operation is Operation.TimeSync) continue
+
+                val dangerous = state.state?.mode?.dangerous == true
+                val now = platform.nowMillis()
+                if (journal.isActive || operation is Operation.TimeSync) {
+                    if (dangerous && now - lastLeaseActivityMillis >= SAFETY_KEEP_ALIVE_MS) {
+                        oneWay(DplsProtocol.Type.KEEP_ALIVE, authenticatedPayload())
+                        lastLeaseActivityMillis = now
+                    }
+                    continue
+                }
+
                 val shouldRefresh = !state.commandInProgress && state.logProgress == null && state.state != null
                 if (shouldRefresh) {
                     val receivedAt = state.state?.receivedAtMillis
-                    if (receivedAt != null && platform.nowMillis() - receivedAt >= TELEMETRY_STALE_MS) {
+                    val staleAfter = if (dangerous) DANGEROUS_TELEMETRY_STALE_MS else NORMAL_TELEMETRY_STALE_MS
+                    if (receivedAt != null && now - receivedAt >= staleAfter) {
                         updateState { it.copy(staleState = true) }
                     }
-                    request(DplsProtocol.Type.STATE_GET, authenticatedPayload())
-                } else if (ticks % KEEP_ALIVE_TICKS == 0) {
+                    if (request(DplsProtocol.Type.STATE_GET, authenticatedPayload()) != null && dangerous) {
+                        lastLeaseActivityMillis = now
+                    }
+                } else if (dangerous && now - lastLeaseActivityMillis >= SAFETY_KEEP_ALIVE_MS) {
                     oneWay(DplsProtocol.Type.KEEP_ALIVE, authenticatedPayload())
+                    lastLeaseActivityMillis = now
                 }
             }
         }
@@ -1654,14 +1674,16 @@ class DplsClient(
         private const val SCAN_DURATION_MS = 20_000L
         private const val CONNECT_TIMEOUT_MS = 55_000L
         private const val COMMAND_TIMEOUT_MS = 3_000L
-        private const val STATE_REFRESH_MS = 1_000L
-        private const val TELEMETRY_STALE_MS = 3_000L
-        private const val KEEP_ALIVE_TICKS = 3
+        private const val DANGEROUS_STATE_REFRESH_MS = 1_000L
+        private const val NORMAL_STATE_REFRESH_MS = 5_000L
+        private const val DANGEROUS_TELEMETRY_STALE_MS = 3_000L
+        private const val NORMAL_TELEMETRY_STALE_MS = 15_000L
+        private const val SAFETY_KEEP_ALIVE_MS = 3_000L
         private const val LOG_CHUNK_TIMEOUT_MS = 15_000L
         private const val SETTINGS_TIMEOUT_MS = 10_000L
         private const val ONE_SHOT_REQUEST_TIMEOUT_MS = 2_000L
         private const val RSSI_IDENTIFY_POLL_MS = 350L
-        private const val RSSI_SESSION_POLL_MS = 1_000L
+        private const val RSSI_SESSION_POLL_MS = 10_000L
         private const val RECONNECT_DELAY_MS = 500L
     }
 }
