@@ -216,17 +216,19 @@ void dpls_phy6252_measurements_tick(bool connected, dpls_mode_t mode)
     if (++adc_decimate >= DPLS_ADC_DECIMATE) {
         adc_decimate = 0u;
         /* Do not overwrite an unfinished conversion series. A late ADC IRQ must
-         * finish or fail explicitly before a fresh 1 Hz cycle can begin. */
+         * finish or fail explicitly before a fresh sample can begin. */
         if (!adc_busy && !adc_raw_ready && adc_pending == 0u) {
             adc_pending = connected ? (uint8_t)DPLS_ADC_NEED_ALL
                                     : (uint8_t)(DPLS_ADC_NEED_PORT1 | DPLS_ADC_NEED_VCAP);
             adc_kick();
         }
     }
+    /* Reconcile the already-completed sample before the new conversion series.
+     * Fresh samples are reconciled again immediately in process(). */
     update_power_state(mode);
 }
 
-void dpls_phy6252_measurements_process(void)
+void dpls_phy6252_measurements_process(dpls_mode_t mode)
 {
     if (adc_raw_ready) {
         adc_CH_t ch = adc_raw_channel;
@@ -256,6 +258,10 @@ void dpls_phy6252_measurements_process(void)
         default:
             break;
         }
+        /* Safety-relevant derived facts change at the ADC completion event, not
+         * at an unrelated periodic timer. Runtime evaluates dpls_safety directly
+         * after this function returns. */
+        update_power_state(mode);
     }
     adc_kick();
 }
