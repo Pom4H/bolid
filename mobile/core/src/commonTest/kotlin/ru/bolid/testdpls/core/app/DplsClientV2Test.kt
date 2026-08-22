@@ -213,6 +213,7 @@ class DplsClientV2Test {
 
         assertTrue(client.uiState.value.state?.reserveLow == true)
         assertFalse(client.uiState.value.controlsEnabled)
+        assertEquals(DplsMode.NORMAL, client.uiState.value.state?.mode)
         client.requestMode(DplsMode.SHORT_1)
         assertNull(client.uiState.value.pendingMode)
         client.close()
