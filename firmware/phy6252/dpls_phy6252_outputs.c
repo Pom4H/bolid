@@ -24,21 +24,27 @@ static void mode_outputs_off(void)
     hal_gpio_write(DPLS_PIN_KZ_T, 0);
 }
 
-static void control_sleep_guard(bool energized)
+static bool control_sleep_guard(bool energized)
 {
-    if (energized == control_sleep_locked) return;
+    if (energized == control_sleep_locked) return true;
     if (energized) {
-        if (hal_pwrmgr_lock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = true;
-    } else {
-        if (hal_pwrmgr_unlock(MOD_USR1) == PPlus_SUCCESS) control_sleep_locked = false;
+        if (hal_pwrmgr_lock(MOD_USR1) != PPlus_SUCCESS) return false;
+        control_sleep_locked = true;
+        return true;
     }
+
+    if (hal_pwrmgr_unlock(MOD_USR1) != PPlus_SUCCESS) return false;
+    control_sleep_locked = false;
+    return true;
 }
 
 void dpls_phy6252_outputs_safe_normal(void *context)
 {
     (void)context;
+    /* GPIO sink state is unconditional. Even if pwrmgr bookkeeping is damaged,
+     * a failed unlock can never leave a dangerous output energized. */
     mode_outputs_off();
-    control_sleep_guard(false);
+    (void)control_sleep_guard(false);
 }
 
 bool dpls_phy6252_outputs_apply_mode(void *context, dpls_mode_t mode)
@@ -49,9 +55,19 @@ bool dpls_phy6252_outputs_apply_mode(void *context, dpls_mode_t mode)
     /* Break-before-make lives at the GPIO boundary. Logical mode is NOT copied
      * here: dpls_safety_t is the only owner of that fact. */
     mode_outputs_off();
+
+    if (mode == DPLS_MODE_NORMAL) {
+        /* NORMAL remains safe even if an unlock reports failure: all physical
+         * mode outputs are already low. */
+        (void)control_sleep_guard(false);
+        return true;
+    }
+
+    /* A dangerous output may exist only while sleep is positively inhibited.
+     * Acquire the resource before energizing any pin; failure leaves NORMAL. */
+    if (!control_sleep_guard(true)) return false;
+
     switch (mode) {
-    case DPLS_MODE_NORMAL:
-        break;
     case DPLS_MODE_OPEN_T:
         hal_gpio_write(DPLS_PIN_ISO_T, 1);
         break;
@@ -67,10 +83,12 @@ bool dpls_phy6252_outputs_apply_mode(void *context, dpls_mode_t mode)
     case DPLS_MODE_SHORT_T:
         hal_gpio_write(DPLS_PIN_KZ_T, 1);
         break;
+    case DPLS_MODE_NORMAL:
     default:
+        /* Defensive only: NORMAL returned above and range was validated. */
+        (void)control_sleep_guard(false);
         return false;
     }
-    control_sleep_guard(mode != DPLS_MODE_NORMAL);
     LOG("DPLS MODE %u\n", (unsigned)mode);
     return true;
 }
