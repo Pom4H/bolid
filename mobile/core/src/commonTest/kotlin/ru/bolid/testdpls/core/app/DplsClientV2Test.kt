@@ -181,12 +181,17 @@ class DplsClientV2Test {
         transport.discover(DplsTransportDevice("ble-1", "Test-DPLS", 0x1234, -40))
         client.identify("ble-1")
         transport.connected()
+        /* Model time spent encoding/queueing the ATT write. The RTT timestamp must
+         * be taken before this work or the UI preview starts late. */
+        transport.onSend = { platform.now += 10 }
         transport.subscribed()
+        transport.onSend = null
         val identify = transport.lastFrame()
         assertFalse(client.uiState.value.identifyLedLive)
-        platform.now = 100_080
+        platform.now = 100_090
         transport.reply(DplsProtocol.Type.IDENTIFY_START, byteArrayOf(), identify.sequence)
         assertTrue(client.uiState.value.identifyLedLive)
+        assertEquals(45L, client.uiState.value.identifyLedPhaseOffsetMs)
         transport.emitRssi(-55)
         assertEquals(-55, client.uiState.value.linkRssi)
         client.confirmIdentifiedDevice()
@@ -194,6 +199,22 @@ class DplsClientV2Test {
         assertEquals(-55, client.uiState.value.linkRssi)
         transport.emitRssi(-72)
         assertEquals(-72, client.uiState.value.linkRssi)
+        client.close()
+    }
+
+    @Test
+    fun lowReserveCannotArmDangerousMode() {
+        val transport = FakeTransport()
+        val client = readyClient(transport, FakePlatform())
+        client.refreshState()
+        val request = transport.lastFrame()
+        val lowReserve = statePayload(DplsMode.NORMAL).also { it[6] = 1 }
+        transport.reply(DplsProtocol.Type.STATE_REPORT, lowReserve, request.sequence)
+
+        assertTrue(client.uiState.value.state?.reserveLow == true)
+        assertFalse(client.uiState.value.controlsEnabled)
+        client.requestMode(DplsMode.SHORT_1)
+        assertNull(client.uiState.value.pendingMode)
         client.close()
     }
 
@@ -340,6 +361,7 @@ class DplsClientV2Test {
         var rssiReads = 0
             private set
         var nextRssi = -40
+        var onSend: (() -> Unit)? = null
 
         override fun setListener(listener: DplsTransportListener) {
             this.listener = listener
@@ -359,6 +381,7 @@ class DplsClientV2Test {
         override fun send(bytes: ByteArray, priority: Boolean, flush: Boolean): Boolean {
             if (flush) writes.clear()
             writes += bytes.copyOf()
+            onSend?.invoke()
             listener.onWriteComplete(null)
             return true
         }
