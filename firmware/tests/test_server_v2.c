@@ -161,6 +161,7 @@ static dpls_hal_t hal(fake_t *f) {
     memset(&h, 0, sizeof(h));
     h.link.encrypted = encrypted;
     h.link.indicate = tx;
+    /* Spy only: pure domain must never invoke physical disconnect directly. */
     h.link.disconnect = disconnect;
     h.hardware.apply_mode = apply;
     h.hardware.safe_normal = normal;
@@ -417,7 +418,8 @@ static void test_device_settings_and_keep_alive(void) {
     assert(response_status(&fake, DPLS_MSG_SETTINGS_RESULT) == 0u);
     assert(!dpls_server_authenticated(&server));
     dpls_server_tick(&server, 509u);
-    assert(fake.disconnect_count == 1u);
+    /* Persistence disconnect is a runtime/storage decision, never a domain timer. */
+    assert(fake.disconnect_count == 0u);
 }
 
 static void test_setup_paths(void) {
@@ -453,7 +455,7 @@ static void test_setup_paths(void) {
     assert(dpls_server_receive(&server, buf, length, 5u));
     assert(response_status(&fake, DPLS_MSG_AUTH_RESULT) == 3u);
     dpls_server_tick(&server, 505u);
-    assert(fake.disconnect_count == 1u);
+    assert(fake.disconnect_count == 0u);
 }
 
 static void test_auth_lockout_and_rng_failure(void) {
@@ -488,7 +490,7 @@ static void test_auth_lockout_and_rng_failure(void) {
     length = request(DPLS_MSG_AUTH_PROOF, 83u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 3u));
     assert(server.critical_fault && fake.diagnostic_count == 1u);
-    assert(fake.disconnect_count == 1u);
+    assert(fake.disconnect_count == 0u);
     assert(response_status(&fake, DPLS_MSG_AUTH_RESULT) == 4u);
 }
 
@@ -510,14 +512,14 @@ static void test_mode_failures_and_safety_returns(void) {
     apply_count = fake.apply_count;
     length = request(DPLS_MSG_MODE_SET, 89u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 4u));
-    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 7u);
     assert(fake.apply_count == apply_count && server.safety.mode == DPLS_MODE_NORMAL);
 
     fake.measurement_validity = FULL_SAFETY_VALIDITY;
     fake.low_reserve = true;
     length = request(DPLS_MSG_MODE_SET, 90u, payload, sizeof(payload), buf);
     assert(dpls_server_receive(&server, buf, length, 5u));
-    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 5u);
+    assert(response_status(&fake, DPLS_MSG_COMMAND_RESULT) == 6u);
     assert(server.safety.mode == DPLS_MODE_NORMAL);
     fake.low_reserve = false;
 
@@ -563,7 +565,7 @@ static void test_audit_failure_is_fail_safe(void) {
     assert(server.critical_fault);
     assert(!dpls_server_authenticated(&server));
     assert(server.safety.mode == DPLS_MODE_NORMAL && fake.normal);
-    assert(fake.disconnect_count == 1u);
+    assert(fake.disconnect_count == 0u);
     assert(fake.diagnostic_count == 1u);
 }
 
