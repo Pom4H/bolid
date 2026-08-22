@@ -18,6 +18,11 @@ ROM_SYM := $(SDK)/misc/bb_rom_sym_m0.txt
 ROM_LD := $(BUILD)/rom_symbols.ld
 LDSCRIPT := phy6252.ld
 
+# Release/current-measurement defaults. Override explicitly for diagnostics or
+# Monday A/B: `make DEBUG_INFO=1` or `make DPLS_CONNECTED_SLEEP=0`.
+DEBUG_INFO ?= 0
+DPLS_CONNECTED_SLEEP ?= 1
+
 ARCH := -mcpu=cortex-m0 -mthumb
 CFLAGS := $(ARCH) -std=c99 -Os -g3 \
 	-funsigned-char -fshort-enums -fshort-wchar \
@@ -33,7 +38,8 @@ DEFS := \
 	-DHCI_TL_NONE=1 \
 	-DENABLE_LOG_ROM_=0 \
 	-D_BUILD_FOR_DTM_=0 \
-	-DDEBUG_INFO=1 \
+	-DDEBUG_INFO=$(DEBUG_INFO) \
+	-DDPLS_CONNECTED_SLEEP=$(DPLS_CONNECTED_SLEEP) \
 	-DDBG_ROM_MAIN=0 \
 	-DAPP_CFG=0 \
 	-DOSALMEM_METRICS=0 \
