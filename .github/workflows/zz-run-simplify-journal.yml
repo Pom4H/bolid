@@ -1,0 +1,49 @@
+name: Run journal simplification
+
+on:
+  pull_request:
+    branches:
+      - release/1.4.2-rc9
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'fix/rc9-identify-journal-reserve'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/rc9-identify-journal-reserve
+      - name: Apply simplification and remove bootstrap workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          source = Path('.github/workflows/zz-simplify-journal-time.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          body = source[start:end]
+          lines = []
+          for line in body.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          patch = Path('/tmp/simplify_journal.py')
+          patch.write_text('\n'.join(lines) + '\n')
+          subprocess.run(['python3', str(patch)], check=True)
+          PY
+
+          git diff --check
+          git rm .github/workflows/zz-simplify-journal-time.yml .github/workflows/zz-run-simplify-journal.yml
+          git add firmware mobile docs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(journal): use UTC or unknown timestamps"
+          git push origin HEAD:fix/rc9-identify-journal-reserve
