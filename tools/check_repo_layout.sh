@@ -8,7 +8,7 @@ for path in firmware mobile/wire mobile/runtime mobile/core mobile/android mobil
   test -d "$path" || { echo "missing required directory: $path" >&2; exit 1; }
 done
 
-# Один shared KMP stack; без дублирующих приложений/controllers.
+# One shared KMP application stack.
 grep -q 'include(":wire")' mobile/settings.gradle.kts
 grep -q 'include(":runtime")' mobile/settings.gradle.kts
 grep -q 'include(":core")' mobile/settings.gradle.kts
@@ -27,7 +27,7 @@ test "$(find mobile/ios/TestDPLS -type f -name '*.swift' | wc -l | tr -d ' ')" =
 test "$(find mobile/core/src/androidMain -type f -name 'AndroidBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 test "$(find mobile/core/src/iosMain -type f -name 'IosBleTransport.kt' | wc -l | tr -d ' ')" = "1"
 
-# PHY6252: только split runtime RC8. Монолит и промежуточные facade удалены физически.
+# Split PHY6252 runtime plus one CMSIS/AC6 target description.
 for path in \
   firmware/phy6252/dpls_phy6252_runtime.c \
   firmware/phy6252/dpls_phy6252_transport.c \
@@ -36,10 +36,13 @@ for path in \
   firmware/phy6252/dpls_phy6252_outputs.c \
   firmware/phy6252/dpls_phy6252_auth.c \
   firmware/phy6252/dpls_phy6252_supervisor.c \
-  firmware/targets/phy6252/Makefile \
-  firmware/targets/phy6252/test-dpls.cproject.yml; do
-  test -f "$path" || { echo "missing RC8 production source: $path" >&2; exit 1; }
+  firmware/targets/phy6252/test-dpls.cproject.yml \
+  firmware/targets/phy6252/test-dpls.csolution.yml \
+  firmware/targets/phy6252/scatter_load.sct \
+  firmware/targets/phy6252/vcpkg-configuration.json; do
+  test -f "$path" || { echo "missing production source: $path" >&2; exit 1; }
 done
+
 for path in \
   firmware/phy6252/dpls_phy6252_app.c \
   firmware/phy6252/dpls_phy6252_app.h \
@@ -55,15 +58,13 @@ test ! -e third_party/phy6252-emu
 test ! -e firmware/phy6252_emu
 test ! -e firmware/zmu
 
-# Production target behavior проверяется внешним emulator.
+# Firmverse executes the production artifact.
 grep -q 'uses: Pom4H/firmverse@7b6b480ab887151ebe657f15bf109ec8b8c4a56f' .github/workflows/ci.yml
+grep -q 'actions/download-artifact@v7' .github/workflows/ci.yml
 grep -q 'board: pb03f-kit' .github/workflows/ci.yml
 grep -q "strict: 'true'" .github/workflows/ci.yml
 
-# Один application flasher; проверенный PB-03F path — ручной KEY1 + vendor wh.
-# У штатного адаптера кита RTS/DTR не разведены, поэтому auto-reset в wrapper
-# запрещён. Обычная прошивка не трогает factory sector, а --erase чистит только
-# SNV work area и никогда не вызывает vendor all-chip erase.
+# One application flasher; PB-03F uses manual KEY1 + vendor wh.
 test -f tools/flash_firmware.sh
 test ! -e tools/flash_firmware_agent.sh
 ! grep -q -- '--auto-rst' tools/flash_firmware.sh
@@ -72,5 +73,26 @@ test ! -e tools/flash_firmware_agent.sh
 ! grep -q 'ARGS=(-p "$PORT" -a\|cmd_erase_all_flash' tools/flash_firmware.sh
 grep -q 'er 0x3C000 0x3000' tools/flash_firmware.sh
 grep -q -- '-r wh' tools/flash_firmware.sh
+
+# Reject the removed second target toolchain anywhere in first-party tracked text.
+legacy="$(printf '%s%s%s' g c c)"
+while IFS= read -r path; do
+  case "$path" in
+    third_party/*) continue ;;
+  esac
+  lower="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lower" == *"$legacy"* ]]; then
+    echo "legacy target toolchain filename remains: $path" >&2
+    exit 1
+  fi
+  case "$path" in
+    *.yml|*.yaml|*.sh|*.py|*.md|*.c|*.h|*.kt|*.kts|*.swift|*.pbxproj|*.json|*.toml|*.txt|*.env|*.sct|Makefile)
+      if grep -qi "$legacy" "$path"; then
+        echo "legacy target toolchain reference remains: $path" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done < <(git ls-files)
 
 echo 'Repository layout: PASS'

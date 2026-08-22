@@ -7,11 +7,34 @@ PHY6252 firmware версии **1.4.2**. Код разделён на перен
 | Путь | Назначение |
 |---|---|
 | `src/`, `include/` | protocol, server, safety, LED, HMAC, calibration |
-| `sim/` | быстрый Test-DPLS simulator для lab/replay/Soft-BLE |
+| `sim/` | Test-DPLS simulator для lab/replay/Soft-BLE |
 | `tests/` | host behavioral/fault tests |
 | `phy6252/` | HAL/GATT/ADC/persistence/board mapping |
-| `targets/phy6252/` | Keil и GNU Arm target builds |
+| `targets/phy6252/` | единственный production target: CMSIS project + scatter file |
 | `sdk/phy6252-sdk.env` | pin PHY62XX SDK 3.1.2 |
+
+## Production build
+
+```sh
+tools/build_firmware.sh
+tools/flash_firmware.sh
+```
+
+`tools/build_firmware.sh` всегда собирает один и тот же target Arm Compiler 6.24.0 через CMSIS-Toolbox 2.14.1. Селекторов toolchain и второго target source graph нет.
+
+По умолчанию создаётся:
+
+```text
+tmp/test-dpls.hex
+```
+
+Другой output path можно передать единственным аргументом:
+
+```sh
+tools/build_firmware.sh tmp/rc9.hex
+```
+
+CI публикует этот artifact и передаёт его же Firmverse. На PB-03F прошивается тот же HEX.
 
 ## Safety invariants
 
@@ -20,7 +43,7 @@ PHY6252 firmware версии **1.4.2**. Код разделён на перен
 - low reserve / real-short override requested mode;
 - силовые выходы переключаются break-before-make;
 - auth lock хранится durable;
-- один ATT PDU in flight;
+- один ATT request in flight;
 - hardware apply error переводит physical и logical state в `NORMAL`.
 
 ## Boot / BLE
@@ -45,29 +68,12 @@ idle/deferred flash work
 
 Текущие правила:
 
-- XIP linker window: `0x11020000 + 0x20000`;
-- фактический application HEX обязан заканчиваться до SNV `0x1103C000`;
-- identity использует factory PHY6252 MAC → SNV `0x82` → однократную генерацию;
-- `HCI_EXT_SetBDADDRCmd()` выполняется до `GAPRole_StartDevice()`;
+- XIP window: `0x11020000 + 0x20000`;
+- application HEX обязан заканчиваться до SNV `0x1103C000`;
+- identity использует factory PHY6252 MAC → SNV fallback → однократную генерацию;
+- controller address задаётся до запуска GAP role;
 - ошибка identity не блокирует advertising;
 - blocking flash не выполняется при active BLE link.
-
-## Build / flash
-
-```sh
-tools/build_firmware.sh keil tmp/test-dpls.hex
-tools/build_firmware.sh gcc  tmp/test-dpls-gcc.hex
-
-tools/flash_firmware.sh tmp/test-dpls.hex
-```
-
-Сборка создаёт один application HEX, прошивка выполняет один `wh`.
-
-Для полностью автоматического стенда с заведёнными control lines:
-
-```sh
-bash tools/flash_firmware_agent.sh tmp/test-dpls.hex
-```
 
 ## Проверки
 
@@ -78,7 +84,7 @@ bash tools/lint_firmware.sh
 bash tools/soft_ble_e2e.sh
 ```
 
-Release CI отдельно собирает GCC и Keil/AC6 targets. Firmverse исполняет production HEX и обязан увидеть реальное включение BLE advertising, а не только факт старта CPU.
+Release CI отдельно проверяет host invariants, static analysis, один production target, strict Firmverse boot и mobile integration.
 
 ## BLE/GATT
 

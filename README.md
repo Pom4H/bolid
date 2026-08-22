@@ -8,9 +8,9 @@ Firmware и мобильное ПО для BLE-тестера ДПЛС на PHY6
 - Android/iOS: **1.4.1**;
 - wire protocol: **v2**.
 
-## Быстрый старт firmware
+## Firmware DX
 
-На macOS/Linux разработчику не нужно вручную искать CMSIS Toolbox, Arm Compiler или прописывать пути из `~/.vcpkg`.
+У production firmware один build path и один application HEX.
 
 ```sh
 git clone https://github.com/Pom4H/bolid.git
@@ -20,97 +20,50 @@ tools/build_firmware.sh
 tools/flash_firmware.sh
 ```
 
-Первый `build` автоматически:
+Production toolchain закреплён проектом:
 
-1. скачивает pinned PHY62XX SDK 3.1.2;
-2. при необходимости ставит pinned `vcpkg 2026.04.27` в `.toolchains/`;
-3. через Arm artifact registry активирует **CMSIS-Toolbox 2.14.1** и **Arm Compiler 6.24.0**;
-4. получает из vcpkg окружение `PATH` и `AC6_TOOLCHAIN_6_24_0` внутри самого скрипта;
-5. если MDK-лицензии ещё нет, активирует **Keil MDK Community (`KEMDK-COM0`)**;
-6. собирает `tmp/test-dpls.hex`.
+- PHY62XX SDK **3.1.2**;
+- CMSIS-Toolbox **2.14.1**;
+- Arm Compiler **6.24.0**;
+- CMake **3.31.12**;
+- Ninja **1.13.2**.
 
-То есть эти ручные действия больше не требуются:
-
-```sh
-# НЕ НУЖНО делать вручную:
-# export PATH=".../compilers.arm.armclang/6.24.0/bin:.../cmsis.toolbox/2.14.1/bin:$PATH"
-# export AC6_TOOLCHAIN_6_24_0=".../compilers.arm.armclang/6.24.0/bin"
-```
-
-`KEMDK-COM0` — бесплатная **non-commercial** лицензия Arm. Если на машине уже активна подходящая MDK Essentials/Professional/Community лицензия, скрипт использует её. Для другой user-based лицензии можно передать:
-
-```sh
-ARM_LICENSE_CODE='<activation-code>' tools/build_firmware.sh
-```
-
-или:
-
-```sh
-ARM_LICENSE_PRODUCT='<product>' \
-ARM_LICENSE_SERVER='https://license-server.example' \
-tools/build_firmware.sh
-```
-
-GNU build тоже zero-setup: при отсутствии подходящего `arm-none-eabi-gcc` скрипт скачает pinned Arm GNU Toolchain 13.2.rel1.
-
-```sh
-tools/build_firmware.sh gcc tmp/test-dpls-gcc.hex
-```
+В CI окружение активируется через официальный CMSIS Actions bootstrap. `tools/build_firmware.sh` не выбирает компилятор и не содержит второго способа установки toolchain: он только собирает production target и создаёт `tmp/test-dpls.hex`.
 
 ## Прошивка PB-03F
-
-Один скрипт обслуживает и человека, и автоматический стенд.
-
-Ручной вход в ROM — KEY1/reset, но **Enter нажимать не нужно**:
 
 ```sh
 tools/flash_firmware.sh
 ```
 
-Скрипт сам:
+Штатный USB-UART путь PB-03F использует ручной вход в ROM: скрипт просит зажать **KEY1**, выполняет handshake `UXTDWU` на 9600 бод и пишет application HEX vendor-командой `wh`.
 
-- берёт `tmp/test-dpls.hex` после обычного build;
-- находит `/dev/cu.wchusbserial*`, `/dev/cu.usbserial*`, `/dev/cu.usbmodem*`, `/dev/ttyUSB*` или `/dev/ttyACM*`;
-- локально ставит `pyserial==3.5`, если его нет;
-- посылает ROM handshake `UXTDWU` на **9600 бод**;
-- ждёт `cmd>>:` и дальше использует штатный PHY62x2 flash protocol.
-
-Можно явно указать HEX или порт:
+Можно явно указать HEX и порт:
 
 ```sh
-tools/flash_firmware.sh 1.4.2-rc7.hex
-tools/flash_firmware.sh 1.4.2-rc7.hex --port /dev/cu.wchusbserial110
+tools/flash_firmware.sh tmp/test-dpls.hex --port /dev/cu.wchusbserial110
 ```
 
-Для стенда/агента, где USB-UART control lines подключены как `RTS -> RST_N` и `DTR -> TM`, тот же файл умеет полностью автоматический ROM entry без KEY1:
+Обычная прошивка не стирает factory sector. `--erase` очищает только рабочую SNV-область, когда это явно требуется.
 
-```sh
-tools/flash_firmware.sh --auto-rst
-```
+## Один production artifact
 
-или:
+CI строит один PHY6252 HEX. Этот же artifact:
 
-```sh
-tools/flash_firmware.sh 1.4.2-rc7.hex --auto-rst
-```
+1. публикуется как release evidence;
+2. передаётся Firmverse для strict CPU/MMIO boot-проверки;
+3. используется flash harness;
+4. прошивается на PB-03F.
 
-`--auto-rst` использует штатную последовательность vendor programmer: reset/test-mode через RTS/DTR, затем `UXTDWU@9600`. Если эти control lines физически не подключены к плате, программно заменить KEY1 невозможно — используйте обычный ручной режим.
+Отдельной альтернативной target-сборки нет. Поэтому emulator, release и реальная плата проверяют один и тот же бинарник.
 
-Полный chip erase доступен только явно:
-
-```sh
-tools/flash_firmware.sh --erase
-```
-
-Он стирает SNV/bonds, поэтому BLE identity и ключи будут созданы заново обычным boot path.
-
-## Главные архитектурные правила
+## Архитектурные правила
 
 1. **Firmware владеет hardware safety.** Телефон не может обойти таймауты, автоизоляцию и безопасный `NORMAL`.
 2. **Kotlin `commonMain` владеет общим поведением Android/iOS.** Здесь находятся `DplsClient`, protocol/crypto/domain/session и Compose UI.
 3. **Platform-код только адаптирует OS API.** Android/iOS не содержат вторых controllers, protocol codecs или независимых UI.
 4. **Production HEX проверяется внешним Firmverse.** Bolid не хранит собственный PHY6252/ZMU emulator.
-5. **Boot не зависит от provisioning sidecar.** Плата должна запустить GAP и advertising из одного application HEX.
+5. **Boot не зависит от provisioning sidecar.** Плата запускает GAP и advertising из одного application HEX.
 
 Подробнее: [docs/architecture.md](docs/architecture.md).
 
@@ -118,8 +71,8 @@ tools/flash_firmware.sh --erase
 
 | Путь | Назначение |
 |---|---|
-| `firmware/` | переносимый C99 server, PHY6252 HAL/GATT adapter, host tests и target builds |
-| `firmware/sim/` | Test-DPLS host simulator для lab/replay/Soft-BLE; не исполняет production HEX |
+| `firmware/` | переносимый C99 server, PHY6252 adapter, host tests и production target |
+| `firmware/sim/` | быстрый simulator для lab/replay/Soft-BLE; не исполняет target HEX |
 | `mobile/core/` | общий KMP controller, protocol, crypto, domain/session, Compose UI и platform transports |
 | `mobile/android/` | Android shell и debug E2E |
 | `mobile/ios/` | Xcode shell и минимальный Swift bootstrap |
@@ -127,45 +80,7 @@ tools/flash_firmware.sh --erase
 | `docs/` | архитектура, bring-up и технические reference |
 | `tools/` | build, flash, проверки и lab/session utilities |
 
-Production PHY62XX SDK не vendored: точная версия **3.1.2** закреплена в `firmware/sdk/phy6252-sdk.env`.
-
-## BLE identity
-
-Текущая схема identity:
-
-1. firmware спрашивает заводской MAC PHY6252 через vendor `check_chip_mAddr()`;
-2. если заводского MAC нет, используется сохранённый SNV MAC;
-3. если и его нет, один раз генерируется MAC и сохраняется в SNV;
-4. IRK/CSRK аналогично живут в BLE SNV;
-5. public BD_ADDR задаётся через `HCI_EXT_SetBDADDRCmd()` до `GAPRole_StartDevice()`.
-
-Отдельного factory record в `0x1103F000` нет. Он не нужен для запуска BLE и не участвует в build/flash path.
-
-Имя в эфире — `Test-DPLS-XXXX`, где `XXXX` берётся из identity MAC. Это discovery hint, не authoritative `NodeId`. Полный device identity подтверждается через `DEVICE_INFO_REPORT` после аутентификации.
-
-Ошибка подготовки identity не блокирует advertising: плата остаётся видимой как `Test-DPLS-0000` вместо того, чтобы исчезнуть из эфира.
-
-## Mobile architecture
-
-```text
-                 Test-DPLS wire protocol v2
-                          │
-                ┌─────────▼─────────┐
-                │ commonMain        │
-                │ DplsClient        │
-                │ protocol/crypto   │
-                │ domain/session    │
-                │ DplsApp Compose   │
-                └─────────┬─────────┘
-                          │ DplsTransport
-                 ┌────────┴────────┐
-                 │                 │
-          Android adapter     iOS adapter
-                 │                 │
-          Android shell       Xcode shell
-```
-
-Swift не содержит отдельный BLE client или SwiftUI-копию приложения.
+Точная версия PHY62XX SDK закреплена в `firmware/sdk/phy6252-sdk.env`.
 
 ## Safety model
 
@@ -185,37 +100,19 @@ Firmware гарантирует:
 
 ```sh
 bash tools/check_all.sh
-```
-
-Mobile loop:
-
-```sh
 bash tools/check_mobile.sh
-```
-
-Soft-BLE product E2E:
-
-```sh
 bash tools/soft_ble_e2e.sh
-```
-
-Host lab с тем же Compose UI:
-
-```sh
 bash tools/dpls_lab.sh
-# http://127.0.0.1:8787
 ```
 
-### Production HEX / Firmverse
-
-Реальный target HEX собирается в CI и запускается через [Pom4H/firmverse](https://github.com/Pom4H/firmverse). CI обязан подтвердить, что firmware не только исполняется, но и реально доходит до включения BLE advertising.
+`tools/check_repo_layout.sh` и `tools/test_ci_contract.py` дополнительно защищают правило одного production toolchain/source graph.
 
 ## Boot order PHY6252
 
 ```text
 power/reset
   ↓
-RAM retention + FS mount
+RAM retention + SNV mount
   ↓
 BLE identity prepare
   ↓
@@ -230,7 +127,7 @@ advertising ON
 idle/deferred flash work
 ```
 
-Boot journal не имеет права задерживать GAP/advertising. Deferred flash обслуживается без active BLE link.
+Boot journal не задерживает GAP/advertising. Deferred flash обслуживается без active BLE link.
 
 ## BLE/GATT
 
@@ -240,7 +137,7 @@ Boot journal не имеет права задерживать GAP/advertising. 
 | RX / WRITE | `7b5f1001-5d7a-4d2f-9a4c-14b7d5f00001` |
 | TX / INDICATE+NOTIFY | `7b5f1002-5d7a-4d2f-9a4c-14b7d5f00001` |
 
-CCCD доступен до SMP, а защищённая protocol boundary — encrypted RX characteristic.
+CCCD доступен до SMP, а encrypted RX characteristic является защищённой protocol boundary.
 
 ## Hardware revision 2
 
@@ -252,6 +149,6 @@ CCCD доступен до SMP, а защищённая protocol boundary — en
 | RGB R / G / B | P7 / P11 / P18 |
 | Factory reset | P34 |
 
-Логика силовых управляющих сигналов — 3,3 В active-high; все нули соответствуют безопасному `NORMAL`.
+Все control outputs = 0 соответствуют безопасному `NORMAL`.
 
 Аппаратная приёмка: [docs/bring-up-checklist.md](docs/bring-up-checklist.md).

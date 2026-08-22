@@ -12,10 +12,6 @@ on:
         default: false
         type: boolean
 
-# Every PR synchronize validates exactly that pushed change-set. Runs are
-# intentionally independent: a later firmware-only push must neither cancel nor
-# serialize the Android/iOS proof started by an earlier mobile change.
-
 jobs:
   smoke:
     name: Cheap PR smoke
@@ -64,23 +60,16 @@ jobs:
 
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
               head="$PR_HEAD_SHA"
-              # On synchronize GitHub gives the previous PR head. Diff only the
-              # newly pushed commits, so a firmware-only follow-up does not
-              # rebuild unchanged Android/iOS code from the cumulative PR diff.
               if [[ "$EVENT_ACTION" == "synchronize" && -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
                 base="$BEFORE_SHA"
               else
-                # First/opened/reopened run validates every area changed by the PR.
                 base="$BASE_SHA"
               fi
             elif [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
               base="$BEFORE_SHA"
             fi
 
-            if [[ -z "$base" ]]; then
-              base="${head}^"
-            fi
-
+            if [[ -z "$base" ]]; then base="${head}^"; fi
             git fetch --no-tags --depth=2 origin "$head" "$base" || git fetch --no-tags origin "$head" "$base"
             git diff --name-only "$base" "$head" > /tmp/changed.txt
             echo "Changed files ($base..$head):"
@@ -92,27 +81,20 @@ jobs:
             ios_only=false
             soft_ble_only=false
 
-            if grep -qE '^\.github/(workflows/ci\.yml|actions/)' /tmp/changed.txt; then ci_changed=true; fi
-
-            # Shared KMP code/build configuration affects both native platforms.
-            if grep -qE '^(mobile/(wire|runtime)/|mobile/core/(build\.gradle\.kts|src/(commonMain|commonTest)/)|mobile/(build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradle/|gradlew$|interop/))' /tmp/changed.txt; then
-              shared_mobile=true
-            fi
+            if grep -qE '^\.github/workflows/ci\.yml' /tmp/changed.txt; then ci_changed=true; fi
+            if grep -qE '^(mobile/(wire|runtime)/|mobile/core/(build\.gradle\.kts|src/(commonMain|commonTest)/)|mobile/(build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradle/|gradlew$|interop/))' /tmp/changed.txt; then shared_mobile=true; fi
             if grep -qE '^(mobile/android/|mobile/core/src/(androidMain|androidUnitTest)/)' /tmp/changed.txt; then android_only=true; fi
             if grep -qE '^(mobile/ios/|mobile/core/src/iosMain/)' /tmp/changed.txt; then ios_only=true; fi
-            if grep -qE '^(mobile/core/src/jvmMain/|tools/soft_ble_e2e\.sh|tools/session_capture/|firmware/(sim|src|include|phy6252_emu)/)' /tmp/changed.txt; then
-              soft_ble_only=true
-            fi
+            if grep -qE '^(mobile/core/src/jvmMain/|tools/soft_ble_e2e\.sh|tools/session_capture/|firmware/(sim|src|include)/)' /tmp/changed.txt; then soft_ble_only=true; fi
 
             if [[ "$shared_mobile" == true || "$android_only" == true ]]; then android=true; fi
             if [[ "$shared_mobile" == true || "$ios_only" == true ]]; then ios=true; fi
             if [[ "$shared_mobile" == true || "$soft_ble_only" == true ]]; then soft_ble=true; fi
 
-            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|build_power_ab|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py)' /tmp/changed.txt; then
+            if grep -qE '^(firmware/|tools/(coverage_firmware|lint_firmware|build_firmware|fetch_phy6252_sdk|run_host_invariant_gate|check_repo_layout)\.sh|tools/(architecture_guard|test_ci_contract|test_ble_timeout_contract)\.py|\.github/workflows/(firmware-dx|firmverse-flash-harness)\.yml)' /tmp/changed.txt; then
               firmware=true
             fi
 
-            # A CI implementation change validates the whole matrix once.
             if [[ "$ci_changed" == true ]]; then
               android=true
               ios=true
@@ -126,10 +108,11 @@ jobs:
           echo "firmware=$firmware" >> "$GITHUB_OUTPUT"
           echo "soft_ble=$soft_ble" >> "$GITHUB_OUTPUT"
           echo "release_pr=$release_pr" >> "$GITHUB_OUTPUT"
-          printf 'Selected: android=%s ios=%s firmware=%s soft_ble=%s release_pr=%s\n' \
-            "$android" "$ios" "$firmware" "$soft_ble" "$release_pr"
+          printf 'Selected: android=%s ios=%s firmware=%s soft_ble=%s release_pr=%s\n' "$android" "$ios" "$firmware" "$soft_ble" "$release_pr"
+
       - name: Host invariants + sanitizers
         run: bash tools/run_host_invariant_gate.sh
+
       - name: Verify revision 2 pinout contract
         run: |
           grep -q 'DPLS_BOARD_ASSERT(factory_reset_p34' firmware/phy6252/dpls_board.h
@@ -181,27 +164,60 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  firmverse:
-    name: PHY6252 Firmverse
+  firmware_image:
+    name: PHY6252 firmware / Arm Compiler 6.24
     needs: smoke
     if: needs.smoke.outputs.firmware == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install runtime dependencies
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y libpython3.9 libtinfo5
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+      - name: Activate CMSIS Toolbox and Arm Compiler 6
+        uses: ARM-software/cmsis-actions/vcpkg@v1
+        with:
+          config: firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+      - name: Activate Arm Community license
+        uses: ARM-software/cmsis-actions/armlm@v1
+      - name: Build production image
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/firmware
+          bash tools/build_firmware.sh tmp/firmware/TestDPLS-1.4.2-rc9.hex 2>&1 | tee tmp/firmware/build.log
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/firmware/test-dpls.axf
+          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/firmware/test-dpls.map
+          sha256sum tmp/firmware/TestDPLS-1.4.2-rc9.hex > tmp/firmware/TestDPLS-1.4.2-rc9.hex.sha256
+          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\n' "$GITHUB_SHA" > tmp/firmware/BUILD.txt
+      - uses: actions/upload-artifact@v6
+        with:
+          name: test-dpls-phy6252-1.4.2-rc9
+          path: tmp/firmware
+          if-no-files-found: error
+          retention-days: 7
+
+  firmverse:
+    name: PHY6252 Firmverse
+    needs: [smoke, firmware_image]
+    if: needs.smoke.outputs.firmware == 'true' && needs.firmware_image.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
-      - name: Setup cached ARM GNU Toolchain
-        uses: ./.github/actions/setup-arm-gcc
-      - name: Build production PHY6252 HEX
-        run: |
-          mkdir -p tmp
-          bash tools/build_firmware.sh gcc tmp/test-dpls-firmverse.hex
-      - name: Run production HEX in Firmverse
+      - uses: actions/download-artifact@v7
+        with:
+          name: test-dpls-phy6252-1.4.2-rc9
+          path: tmp/firmware
+      - name: Run the production image in Firmverse
         id: firmverse
-        # Pin the Firmverse revision that models PHY6252 ROM OSAL calls,
-        # SPI flash Unique ID and the SDK's timer semantics used by production.
         uses: Pom4H/firmverse@7b6b480ab887151ebe657f15bf109ec8b8c4a56f
         with:
-          firmware: tmp/test-dpls-firmverse.hex
+          firmware: tmp/firmware/TestDPLS-1.4.2-rc9.hex
           board: pb03f-kit
           strict: 'true'
           max-insns: '3000000'
@@ -212,9 +228,7 @@ jobs:
         if: always()
         with:
           name: test-dpls-firmverse
-          path: |
-            tmp/test-dpls-firmverse.hex
-            ${{ steps.firmverse.outputs.log }}
+          path: ${{ steps.firmverse.outputs.log }}
           if-no-files-found: warn
           retention-days: 3
 
@@ -248,73 +262,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - name: Run soft-BLE phone E2E scenarios
         run: bash tools/soft_ble_e2e.sh
-
-  firmware_gcc:
-    name: PHY6252 GNU Arm GCC
-    needs: smoke
-    if: needs.smoke.outputs.firmware == 'true'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup cached ARM GNU Toolchain
-        uses: ./.github/actions/setup-arm-gcc
-      - name: Fetch pinned PHY62XX SDK 3.1.2
-        run: bash tools/fetch_phy6252_sdk.sh
-      - name: Build
-        run: |
-          set -o pipefail
-          mkdir -p tmp/gcc
-          bash tools/build_firmware.sh gcc tmp/gcc/test-dpls-gcc.hex 2>&1 | tee tmp/gcc/gcc-build.log
-          sha256sum tmp/gcc/test-dpls-gcc.hex > tmp/gcc/test-dpls-gcc.hex.sha256
-          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=GNU-Arm-13.2.1\n' "$GITHUB_SHA" > tmp/gcc/BUILD.txt
-      - uses: actions/upload-artifact@v6
-        with:
-          name: test-dpls-phy6252-gcc-1.4.2-rc9
-          path: |
-            tmp/gcc
-            firmware/targets/phy6252/build/test-dpls.elf
-            firmware/targets/phy6252/build/test-dpls.map
-          if-no-files-found: error
-          retention-days: 7
-
-  firmware_keil:
-    name: PHY6252 Keil MDK / AC6
-    needs: smoke
-    if: needs.smoke.outputs.firmware == 'true'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install AC6 runtime dependencies
-        run: |
-          sudo add-apt-repository -y ppa:deadsnakes/ppa
-          sudo apt-get update
-          sudo apt-get install -y libpython3.9 libtinfo5
-      - name: Fetch pinned PHY62XX SDK 3.1.2
-        run: bash tools/fetch_phy6252_sdk.sh
-      - name: Activate CMSIS Toolbox and Arm Compiler 6
-        uses: ARM-software/cmsis-actions/vcpkg@v1
-        with:
-          config: firmware/targets/phy6252/vcpkg-configuration.json
-          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
-      - name: Activate Arm Community license
-        uses: ARM-software/cmsis-actions/armlm@v1
-      - name: Build
-        run: |
-          set -o pipefail
-          mkdir -p tmp/keil
-          bash tools/build_firmware.sh keil tmp/keil/TestDPLS-1.4.2-rc9.hex 2>&1 | tee tmp/keil/keil-build.log
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf tmp/keil/test-dpls.axf
-          cp firmware/targets/phy6252/out/test-dpls/*/test-dpls.axf.map tmp/keil/test-dpls.map
-          sha256sum tmp/keil/TestDPLS-1.4.2-rc9.hex > tmp/keil/TestDPLS-1.4.2-rc9.hex.sha256
-          printf 'version=1.4.2\nrc=9\ncommit=%s\ntoolchain=Arm-Compiler-6.24.0\npreferred_for_hardware=yes\n' "$GITHUB_SHA" > tmp/keil/BUILD.txt
-      - uses: actions/upload-artifact@v6
-        with:
-          name: test-dpls-phy6252-keil-1.4.2-rc9
-          path: tmp/keil
-          if-no-files-found: error
-          retention-days: 7
 
   ios:
     name: iOS adapter + Xcode host
@@ -363,11 +310,10 @@ jobs:
     needs:
       - smoke
       - android
+      - firmware_image
       - firmverse
       - firmware_quality
       - soft_ble_e2e
-      - firmware_gcc
-      - firmware_keil
       - ios
     if: always() && needs.smoke.outputs.release_pr == 'true'
     runs-on: ubuntu-latest
@@ -378,11 +324,10 @@ jobs:
         env:
           SMOKE: ${{ needs.smoke.result }}
           ANDROID: ${{ needs.android.result }}
+          FIRMWARE_IMAGE: ${{ needs.firmware_image.result }}
           FIRMVERSE: ${{ needs.firmverse.result }}
           QUALITY: ${{ needs.firmware_quality.result }}
           SOFT_BLE: ${{ needs.soft_ble_e2e.result }}
-          GCC: ${{ needs.firmware_gcc.result }}
-          KEIL: ${{ needs.firmware_keil.result }}
           IOS: ${{ needs.ios.result }}
           NEED_ANDROID: ${{ needs.smoke.outputs.android }}
           NEED_IOS: ${{ needs.smoke.outputs.ios }}
@@ -404,10 +349,9 @@ jobs:
           [[ "$SMOKE" == "success" ]]
           require_if_needed android "$ANDROID" "$NEED_ANDROID"
           require_if_needed ios "$IOS" "$NEED_IOS"
+          require_if_needed firmware-image "$FIRMWARE_IMAGE" "$NEED_FIRMWARE"
           require_if_needed firmverse "$FIRMVERSE" "$NEED_FIRMWARE"
           require_if_needed firmware-quality "$QUALITY" "$NEED_FIRMWARE"
-          require_if_needed firmware-gcc "$GCC" "$NEED_FIRMWARE"
-          require_if_needed firmware-keil "$KEIL" "$NEED_FIRMWARE"
           if [[ "$NEED_FIRMWARE" == "true" || "$NEED_SOFT_BLE" == "true" ]]; then
             require_if_needed soft-ble-e2e "$SOFT_BLE" true
           else

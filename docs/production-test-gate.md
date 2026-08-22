@@ -1,113 +1,69 @@
 # Production test gate Test-DPLS
 
-Этот документ задаёт обязательные доказательства для release-candidate. Цель CI — не показать, что код «обычно работает», а автоматически проверять конечные пространства состояний и отказов там, где это возможно.
+Этот документ задаёт обязательные evidence sources для release-candidate.
 
 ## Главные инварианты
 
 1. **Fail-safe:** физический режим, отличный от `NORMAL`, допустим только при активной аутентифицированной сессии, свежих safety-измерениях, нормальном резерве и отсутствии реального КЗ.
-2. **Disconnect => NORMAL:** потеря BLE-сессии не может оставить опасный режим включённым.
-3. **Unknown != safe:** неизвестные/просроченные измерения не разрешают вход в опасный режим и принудительно возвращают `NORMAL`.
-4. **Один владелец состояния:** product session принадлежит `DeviceSession`, wire transaction — `Frame.sequence`, физический BLE link — `connection_handle`, commanded mode — `dpls_server.safety.mode`.
-5. **Audit is safety:** физическое изменение, которое невозможно записать в обязательный журнал, не считается успешным и переводит прибор в fail-safe.
-6. **Power loss old-or-new:** после reset в любой точке commit durable settings выбирается либо предыдущая валидная generation, либо полностью записанная новая. Полузапись не может стать текущей.
-7. **BLE security is event-driven:** plaintext CCCD не является доказательством security; защищённый RX 5/15 означает pairing-required; timeout не превращается в success и не является доказательством stale bond.
-8. **Generic SMP failure не стирает bonds.** Удаление ключей разрешено только явным пользовательским/физическим reset flow.
-9. **Flash и live BLE разделены:** deferred journal не программирует SNV при активном connection handle; advertising не должен открывать новый link во время storage drain.
-10. **Production binaries equivalent by contract:** GNU Arm GCC и Keil/AC6 обязаны собирать один source set и проходить release gate.
-11. **Auth lock is durable or fail-closed:** 300-секундная блокировка после пяти неверных паролей не может существовать только в RAM. Ошибка записи/снятия lock переводит сервер в critical fail-safe, сбрасывает authentication и завершает link.
+2. **Disconnect => NORMAL.**
+3. **Unknown != safe:** неизвестные/просроченные измерения не разрешают dangerous mode.
+4. **Один владелец состояния:** product session — `DeviceSession`, wire transaction — `Frame.sequence`, BLE link — `connection_handle`, commanded mode — `dpls_server.safety.mode`.
+5. **Audit is safety:** физическое изменение без обязательной записи переводит прибор в fail-safe.
+6. **Power loss old-or-new:** durable settings выбирают предыдущую или полностью записанную новую generation.
+7. **Generic SMP failure не стирает bonds.**
+8. **Flash и live BLE разделены:** app-owned persistent write выполняется только offline.
+9. **Один production firmware artifact:** target собирается один раз Arm Compiler 6.24.0; этот же HEX используется Firmverse и hardware flow.
+10. **Auth lock durable or fail-closed.**
 
-## Локальный обязательный gate
+## Локальный gate
 
-```bash
+```sh
 bash tools/run_host_invariant_gate.sh
 ```
 
-Он запускает один и тот же набор production-core проверок, который используется в GitHub Actions:
-
-- repository layout;
-- CI topology contract;
-- protocol CRC contract;
-- session-capture parser;
-- architecture ownership guard;
-- host build с AddressSanitizer + UndefinedBehaviorSanitizer;
-- весь CTest suite;
-- deterministic protocol fuzz (300k+ входов);
-- safety state-space tests;
-- deterministic server state/event sequences (96k переходов);
-- auth-lock persistence fail-safe tests;
-- durable-settings power-cut/corruption matrix;
-- ATT simulator tests;
-- обязательный differential wire replay Python reference framing ↔ production C simulator.
-
-Фиксированные seeds являются частью контракта: падение всегда воспроизводимо. Новые найденные crash/event traces должны добавляться отдельными regression cases, а не заменяться новым seed.
+Он проверяет repository/CI contracts, protocol CRC, architecture ownership, ASan/UBSan, CTest, deterministic fuzz/state sequences, durable-settings fault matrix, ATT simulator и differential wire replay.
 
 ## Release PR
 
-Любая ветка `release/*` принудительно включает полную матрицу независимо от path filtering:
-
 | Gate | Что доказывает |
 | --- | --- |
-| Cheap PR smoke | Host invariants, ASan/UBSan, fuzz, state/fault models, differential wire replay |
-| Android unit tests | common runtime/core и Android transport policy; lint + APK |
-| PHY6252 Firmverse | Реальный production HEX запускается в строгой модели PB-03F |
+| Cheap PR smoke | Host invariants, sanitizers, fuzz, state/fault models, differential replay |
+| Android unit tests | common runtime/core и Android transport policy |
+| PHY6252 firmware / Arm Compiler 6.24 | единственный production target реально собирается |
+| PHY6252 Firmverse | тот же production HEX запускается в strict PB-03F model и доходит до advertising |
 | Firmware coverage + cppcheck | host coverage и статический анализ C |
-| Soft-BLE | Реальный `DplsClient` против реального firmware core simulator |
-| PHY6252 GNU Arm GCC | production target собирается pinned SDK 3.1.2 |
-| PHY6252 Keil MDK / AC6 | второй production compiler собирает тот же target |
-| iOS adapter + Xcode host | Kotlin/Native tests, framework link, Xcode integration smoke |
-| RC production gate | Все перечисленные независимые evidence sources имеют `success` |
+| Soft-BLE | `DplsClient` против firmware core simulator |
+| iOS adapter + Xcode host | Kotlin/Native + Xcode integration smoke |
+| RC production gate | все затронутые evidence sources имеют `success` |
 
-`RC production gate` должен быть required check в branch protection для релизной ветки. CI-код сам проверяет свою топологию через `tools/test_ci_contract.py`, но repository branch protection остаётся внешним trust boundary.
+`RC production gate` должен быть required check в branch protection релизной ветки.
+
+## Single-artifact rule
+
+Production job создаёт `TestDPLS-1.4.2-rc9.hex` один раз. Firmverse скачивает этот artifact через Actions и не запускает вторую target-сборку. Flash harness и аппаратная приёмка используют тот же формат image.
+
+`tools/check_repo_layout.sh` и `tools/test_ci_contract.py` запрещают возврат второго PHY6252 production toolchain/source graph.
 
 ## Power-loss testing
 
-Durable settings используют две generation-записи с CRC. Host tests моделируют:
-
-- reset после каждого байта erase;
-- reset после каждого байта program;
-- смесь байтов старой и новой generation;
-- torn factory-reset tombstone;
-- одиночную corruption каждого байта;
-- отсутствие обеих валидных копий;
-- wrap generation counter.
-
-Критерий один: новая generation становится authoritative только после полностью валидной записи. Во всех остальных одиночных отказах выбирается предыдущая валидная generation.
+Host tests моделируют reset во время erase/program, torn generation, corruption, отсутствие обеих валидных копий и wrap generation counter. Новая generation authoritative только после полной валидной записи.
 
 ## State/event testing
 
-`test_server_state_sequences` выполняет десятки тысяч детерминированных перестановок:
-
-- mode request;
-- reserve low / restore;
-- real-short / restore;
-- measurement lost / restore;
-- disconnect / reconnect / re-auth;
-- большие и малые tick;
-- изменение security link state.
-
-После каждого transition проверяется глобальный safety invariant. Это дополняет exhaustive boolean state-space в `test_safety`: один тест проверяет все снимки входов, второй — историю переходов.
-
-`test_auth_lock_fail_safe` отдельно fault-injects отказ durable auth lock: запись блокировки, снятие истёкшей блокировки и очистку lock перед успешной авторизацией. Во всех трёх случаях ожидается critical fail-safe, а не продолжение с RAM-only security state.
-
-## Differential wire replay
-
-`tools/session_capture/test_differential_replay.py` является обязательной частью host gate. Он гонит каноническую wire-последовательность через production C simulator и декодирует его ответы независимым Python framing implementation. Проверяются type/sequence, стабильные поля challenge и единая реакция на повреждённый CRC. Отсутствие теста является ошибкой gate, а не `skip`.
-
-Реальные телефон ↔ PHY6252 traces из `tmp/sessions` остаются дополнительным аппаратным evidence: подтверждённое расхождение обязательно превращается в committed regression case.
+`test_server_state_sequences` переставляет mode request, reserve, real-short, measurement validity, disconnect/reconnect/re-auth, tick и security events. После каждого transition проверяется глобальный safety invariant.
 
 ## Что CI принципиально не доказывает
 
 Без аппаратного стенда CI не доказывает:
 
-- RF/SMP особенности конкретного iPhone/Samsung;
-- реальную длительность PHY6252 flash stall относительно controller radio events;
-- электрические уровни/фронты GPIO и реальное сопротивление КЗ;
-- поведение ионистора при переходе на резерв;
-- reset cause на реальном silicon под длительной нагрузкой.
+- RF/SMP особенности конкретного телефона;
+- реальную длительность flash stall относительно radio events;
+- электрические уровни/фронты GPIO и сопротивление КЗ;
+- поведение ионистора;
+- reset cause на реальном silicon под длительной нагрузкой;
+- абсолютный ток изделия.
 
-Поэтому `RC production gate` — необходимое, но не достаточное условие выпуска.
-
-## Hardware acceptance для релиза
+## Hardware acceptance
 
 После зелёного RC gate обязательны:
 
@@ -116,12 +72,13 @@ Durable settings используют две generation-записи с CRC. Hos
 3. stale-bond recovery без retry-loop;
 4. clean pairing iOS;
 5. reconnect с валидным iOS bond;
-6. не менее 100 последовательных connect/auth/disconnect циклов на каждой платформе;
-7. длительная encrypted session без `[REST CAUSE] 1`;
-8. вход/выход каждого опасного режима и fail-safe при disconnect;
-9. потеря/просрочка ADC в опасном режиме => `NORMAL`;
-10. заполнение и wrap журнала;
-11. power cut во время settings/password/reset операций;
-12. переход линия -> резерв -> линия.
+6. не менее 100 connect/auth/disconnect циклов на каждой платформе;
+7. длительная encrypted session без unexpected reset;
+8. вход/выход dangerous modes и fail-safe при disconnect;
+9. measurement lost в dangerous mode => `NORMAL`;
+10. заполнение/wrap журнала;
+11. power cut во время settings/password/reset;
+12. линия → резерв → линия;
+13. power/current protocol из `rc9-power-measurement.md`.
 
-Любой аппаратный failure сначала превращается в минимальный воспроизводимый regression test или captured-session fixture; только после этого исправляется production code.
+Аппаратный failure сначала превращается в минимальный regression test или captured-session fixture, затем исправляется production code.

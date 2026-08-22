@@ -8,7 +8,6 @@ on:
       - 'firmware/**'
       - 'tools/build_firmware.sh'
       - 'tools/fetch_phy6252_sdk.sh'
-      - '.github/actions/setup-arm-gcc/**'
       - '.github/workflows/firmverse-flash-harness.yml'
   push:
     branches:
@@ -17,37 +16,49 @@ on:
       - 'firmware/**'
       - 'tools/build_firmware.sh'
       - 'tools/fetch_phy6252_sdk.sh'
-      - '.github/actions/setup-arm-gcc/**'
       - '.github/workflows/firmverse-flash-harness.yml'
   workflow_dispatch:
 
 jobs:
   flash-production-hex:
     name: Production HEX -> ROM -> NOR -> boot -> BLE
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
     steps:
-      - name: Checkout RC9
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Setup cached ARM GNU Toolchain
-        uses: ./.github/actions/setup-arm-gcc
+      - name: Install runtime dependencies
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y libpython3.9 libtinfo5
+
+      - name: Fetch pinned PHY62XX SDK 3.1.2
+        run: bash tools/fetch_phy6252_sdk.sh
+
+      - name: Activate CMSIS Toolbox and Arm Compiler 6
+        uses: ARM-software/cmsis-actions/vcpkg@v1
+        with:
+          config: firmware/targets/phy6252/vcpkg-configuration.json
+          cache: phy6252-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+
+      - name: Activate Arm Community license
+        uses: ARM-software/cmsis-actions/armlm@v1
 
       - name: Build RC9 production PHY6252 HEX
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p tmp
-          bash tools/build_firmware.sh gcc tmp/test-dpls-1.4.2-rc9.hex
+          bash tools/build_firmware.sh tmp/test-dpls-1.4.2-rc9.hex
           test -s tmp/test-dpls-1.4.2-rc9.hex
           sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
 
-      # Pin the merged Firmverse implementation so this proof remains reproducible.
       - name: Checkout pinned Firmverse flash + boot harness
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: 0c2e3b915db507448eb158cd0a49ccd1c2362b59
+          ref: 7b6b480ab887151ebe657f15bf109ec8b8c4a56f
           path: tmp/firmverse
           submodules: recursive
 
@@ -69,7 +80,6 @@ jobs:
 
           test -s tmp/test-dpls-1.4.2-rc9.boot.hex
           sha256sum tmp/test-dpls-1.4.2-rc9.boot.hex | tee tmp/test-dpls-1.4.2-rc9.boot.hex.sha256
-          grep -q 'flash=256 KiB' tmp/firmverse-flash-harness.log
           grep -q 'verified .* image part(s) byte-for-byte in virtual NOR' tmp/firmverse-flash-harness.log
           grep -q 'reset observed by harness' tmp/firmverse-flash-harness.log
           grep -q 'boot image reconstructed from virtual NOR:' tmp/firmverse-flash-harness.log

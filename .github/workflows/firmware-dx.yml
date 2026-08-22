@@ -6,6 +6,7 @@ on:
       - 'tools/build_firmware.sh'
       - 'tools/flash_firmware.sh'
       - 'tools/test_flash_firmware.py'
+      - 'tools/test_ci_contract.py'
       - 'firmware/targets/phy6252/vcpkg-configuration.json'
       - 'firmware/targets/phy6252/test-dpls.csolution.yml'
       - 'firmware/targets/phy6252/test-dpls.cproject.yml'
@@ -15,15 +16,13 @@ on:
 
 jobs:
   fresh-clone:
-    name: Fresh clone → AC6 6.24 build + flasher contract
+    name: Fresh clone → Arm Compiler 6.24 build + flasher contract
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v6
 
-      # Держим этот bootstrap идентичным production AC6 job в ci.yml.
-      # Не изобретаем второй способ установки/лицензирования toolchain.
-      - name: Install AC6 runtime dependencies
+      - name: Install runtime dependencies
         run: |
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update
@@ -36,20 +35,20 @@ jobs:
         uses: ARM-software/cmsis-actions/vcpkg@v1
         with:
           config: firmware/targets/phy6252/vcpkg-configuration.json
-          cache: phy6252-keil-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
+          cache: phy6252-ac6-${{ hashFiles('firmware/targets/phy6252/vcpkg-configuration.json') }}
 
       - name: Activate Arm Community license
         uses: ARM-software/cmsis-actions/armlm@v1
 
-      - name: Build from a clean clone with Arm Compiler 6.24
+      - name: Build production image
         shell: bash
         run: |
           set -euo pipefail
-          tools/build_firmware.sh keil tmp/fresh-clone.hex
+          tools/build_firmware.sh tmp/fresh-clone.hex
           test -s tmp/fresh-clone.hex
           grep -q '^:' tmp/fresh-clone.hex
 
-      - name: Verify restored PB-03F flasher contract
+      - name: Verify PB-03F flasher contract
         shell: bash
         run: |
           set -euo pipefail
