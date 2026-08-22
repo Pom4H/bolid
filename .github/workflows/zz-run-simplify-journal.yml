@@ -23,7 +23,7 @@ jobs:
           python3 tools/fix_simplify_journal_script.py
           python3 tools/simplify_journal_time.py
           git diff --check
-          git rm \
+          git rm -f \
             .github/workflows/zz-simplify-journal-time.yml \
             .github/workflows/zz-run-simplify-journal.yml \
             tools/fix_simplify_journal_script.py \
