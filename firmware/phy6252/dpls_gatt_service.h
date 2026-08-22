@@ -10,8 +10,9 @@
 typedef uint8 (*dpls_gatt_rx_cb_t)(const uint8 *data, uint16 length);
 
 bStatus_t dpls_gatt_add_service(dpls_gatt_rx_cb_t rx_callback);
-/* RC9 production TX is indication-only. SUCCESS means the indication entered
- * ATT; transaction completion is ATT_HANDLE_VALUE_CFM, never a fixed delay. */
+/* SUCCESS means the ATT host accepted the PDU. Indications remain in flight
+ * until ATT_HANDLE_VALUE_CFM. The Samsung-compatible notification path is
+ * complete immediately on SUCCESS; there is no fixed pacing timeout in RC9. */
 bStatus_t dpls_gatt_send_indication(uint16 conn_handle, const uint8 *data, uint16 length, uint8 task_id);
 bool dpls_gatt_needs_confirmation(uint16 conn_handle);
 bool dpls_gatt_subscribed(void);
