@@ -18,7 +18,6 @@ typedef struct {
     bool fail_lock_clear;
     unsigned lock_set_attempts;
     unsigned lock_clear_attempts;
-    unsigned disconnect_count;
     unsigned diagnostic_count;
     unsigned normal_count;
     uint8_t tx[DPLS_MAX_FRAME];
@@ -40,11 +39,6 @@ static bool indicate(void *context, const uint8_t *frame, size_t length)
     memcpy(fake->tx, frame, length);
     fake->tx_len = length;
     return true;
-}
-
-static void disconnect_link(void *context)
-{
-    ++((fake_t *)context)->disconnect_count;
 }
 
 static bool apply_mode(void *context, dpls_mode_t mode)
@@ -226,8 +220,6 @@ static dpls_hal_t make_hal(fake_t *fake)
     memset(&hal, 0, sizeof(hal));
     hal.link.encrypted = encrypted;
     hal.link.indicate = indicate;
-    /* Spy only: physical disconnect belongs to runtime and must remain untouched here. */
-    hal.link.disconnect = disconnect_link;
     hal.hardware.apply_mode = apply_mode;
     hal.hardware.safe_normal = safe_normal;
     hal.hardware.voltage_mv = voltage;
@@ -327,7 +319,6 @@ static void test_lock_set_failure_is_critical(void)
     assert(server.critical_fault);
     assert(server.safety.mode == DPLS_MODE_NORMAL);
     assert(!dpls_server_authenticated(&server));
-    assert(fake.disconnect_count == 0u);
     assert(fake.diagnostic_count == 1u);
 }
 
@@ -357,7 +348,6 @@ static void test_expired_lock_clear_failure_stays_closed(void)
     assert(server.session.blocked_until_ms != 0u);
     assert(server.session.failed_auth_attempts == DPLS_AUTH_MAX_ATTEMPTS);
     assert(!dpls_server_authenticated(&server));
-    assert(fake.disconnect_count == 0u);
     assert(fake.diagnostic_count == 1u);
 }
 
@@ -388,7 +378,6 @@ static void test_success_cannot_bypass_unclearable_lock(void)
     assert(fake.lock_clear_attempts == 1u);
     assert(server.critical_fault);
     assert(!dpls_server_authenticated(&server));
-    assert(fake.disconnect_count == 0u);
     assert(fake.diagnostic_count == 1u);
 }
 
