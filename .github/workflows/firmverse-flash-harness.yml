@@ -23,7 +23,7 @@ on:
 
 jobs:
   flash-production-hex:
-    name: Production HEX -> PHY62xx ROM harness
+    name: Production HEX -> ROM -> NOR -> boot -> BLE
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -42,20 +42,20 @@ jobs:
           test -s tmp/test-dpls-1.4.2-rc9.hex
           sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
 
-      # Pin the exact merged Firmverse commit that exposes `phy6252-flash --harness`.
-      # This makes RC9 reproducible even if Firmverse main moves later.
-      - name: Checkout pinned Firmverse flasher harness
+      # Temporary PR-head pin while Firmverse #15 proves the full flash -> boot chain.
+      # The Bolid PR will be repinned to the merged Firmverse commit before merge.
+      - name: Checkout pinned Firmverse flash + boot harness
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: ad7302407c690d4a65399560cf19b9b0f946d5aa
+          ref: b41cbabce7a42e3c01d775f315b3fe68e02dc5ba
           path: tmp/firmverse
           submodules: recursive
 
       - name: Setup Rust for Firmverse
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Program RC9 image through emulated PHY62xx ROM
+      - name: Program RC9 image and reconstruct boot image from virtual NOR
         shell: bash
         run: |
           set -euo pipefail
@@ -65,21 +65,44 @@ jobs:
             tmp/test-dpls-1.4.2-rc9.hex \
             --harness \
             --harness-flash-size 262144 \
-            | tee tmp/firmverse-flash-harness.log
+            --harness-boot-hex tmp/test-dpls-1.4.2-rc9.boot.hex \
+            2>&1 | tee tmp/firmverse-flash-harness.log
 
+          test -s tmp/test-dpls-1.4.2-rc9.boot.hex
+          sha256sum tmp/test-dpls-1.4.2-rc9.boot.hex | tee tmp/test-dpls-1.4.2-rc9.boot.hex.sha256
           grep -q 'flash=256 KiB' tmp/firmverse-flash-harness.log
           grep -q 'verified .* image part(s) byte-for-byte in virtual NOR' tmp/firmverse-flash-harness.log
           grep -q 'reset observed by harness' tmp/firmverse-flash-harness.log
+          grep -q 'boot image reconstructed from virtual NOR:' tmp/firmverse-flash-harness.log
           grep -q 'harness flash ok' tmp/firmverse-flash-harness.log
 
-      - name: Upload flash-harness evidence
+      - name: Boot only the image reconstructed from programmed NOR
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --locked \
+            --manifest-path tmp/firmverse/Cargo.toml \
+            --bin firmverse -- \
+            tmp/test-dpls-1.4.2-rc9.boot.hex \
+            --once \
+            --strict \
+            --max-insns 3000000 \
+            2>&1 | tee tmp/firmverse-boot-from-nor.log
+
+          grep -q 'BLE HCI LE_SetAdvEnable enabled=1' tmp/firmverse-boot-from-nor.log
+          echo 'flash -> reset -> boot-from-NOR -> BLE advertising: PASS'
+
+      - name: Upload flash-to-boot evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: rc9-firmverse-flash-harness
+          name: rc9-firmverse-flash-boot-chain
           path: |
             tmp/test-dpls-1.4.2-rc9.hex
             tmp/test-dpls-1.4.2-rc9.hex.sha256
+            tmp/test-dpls-1.4.2-rc9.boot.hex
+            tmp/test-dpls-1.4.2-rc9.boot.hex.sha256
             tmp/firmverse-flash-harness.log
+            tmp/firmverse-boot-from-nor.log
           if-no-files-found: warn
           retention-days: 7
