@@ -77,7 +77,11 @@ data class DplsUiState(
     val hapticsEnabled: Boolean = true,
     val savedCredentials: Boolean = false,
 ) {
-    val controlsEnabled: Boolean get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress
+    /* A depleted reserve is already a firmware safety interlock. Mirror it in
+     * presentation state so dangerous test controls cannot even be armed. */
+    val controlsEnabled: Boolean
+        get() = phase == ConnectionPhase.READY && authenticated && !commandInProgress &&
+            state?.reserveLow != true
     val needsPeriodicStateRefresh: Boolean
         get() = authenticated && !commandInProgress && logProgress == null &&
             (state != null || phase == ConnectionPhase.SYNCHRONIZING)
