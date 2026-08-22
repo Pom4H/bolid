@@ -19,8 +19,6 @@
 #define DEFAULT_MIN_CONN_INTERVAL 24
 #define DEFAULT_MAX_CONN_INTERVAL 80
 #define DEFAULT_CONN_TIMEOUT 3000
-#define DPLS_TICK_MS 1000u
-#define DPLS_TICK_IDLE_MS 5000u
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
@@ -67,6 +65,16 @@ static void enable_advertising(void)
     GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(enabled), &enabled);
 }
 
+static void schedule_runtime_timer(void)
+{
+    uint32 next_ms = dpls_phy6252_runtime_next_wakeup_ms();
+    /* Exactly one runtime timer exists. Re-arming replaces a stale deadline
+     * after link/auth/TX state changes instead of relying on timeout ordering. */
+    (void)osal_stop_timerEx(app_task_id, SBP_DPLS_TIMER_EVT);
+    if (next_ms != 0u)
+        (void)osal_start_timerEx(app_task_id, SBP_DPLS_TIMER_EVT, next_ms);
+}
+
 static void schedule_led_if_needed(void)
 {
     uint32 next_ms = dpls_phy6252_runtime_led_tick();
@@ -81,7 +89,7 @@ static void state_changed(gaprole_States_t state)
         /* Controller/HCI жив только здесь. Identity никогда не gate-ит radio. */
         dpls_ble_identity_on_stack_started();
         enable_advertising();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_IDLE_MS);
+        schedule_runtime_timer();
         schedule_led_if_needed();
         break;
 
@@ -90,7 +98,7 @@ static void state_changed(gaprole_States_t state)
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
         (void)hal_pwrmgr_lock(MOD_USR0);
         dpls_phy6252_runtime_connected(handle);
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT, DPLS_TICK_MS);
+        schedule_runtime_timer();
         break;
     }
 
@@ -98,6 +106,7 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         dpls_phy6252_runtime_disconnected();
         (void)hal_pwrmgr_unlock(MOD_USR0);
+        schedule_runtime_timer();
         schedule_led_if_needed();
         if (!dpls_phy6252_runtime_flash_pending()) enable_advertising();
         break;
@@ -169,9 +178,9 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(advertising_type), &advertising_type);
     GAPRole_SetParameter(GAPROLE_ADV_CHANNEL_MAP, sizeof(channels), &channels);
     GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(advertising_enabled), &advertising_enabled);
-    GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
+    GAPRole_SetParameter(GAPROLE_ADV_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
-    GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertising_data), advertising_data);
+    GAPRole_SetParameter(GAPROLE_ADV_DATA, sizeof(advertising_data), advertising_data);
     GAPRole_SetParameter(GAPROLE_PARAM_UPDATE_ENABLE, sizeof(update_enabled), &update_enabled);
     GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(min_interval), &min_interval);
     GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(max_interval), &max_interval);
@@ -206,8 +215,10 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
         if (message) {
             osal_event_hdr_t *hdr = (osal_event_hdr_t *)message;
             if (hdr->event == GATT_MSG_EVENT &&
-                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM)
+                ((gattMsgEvent_t *)message)->method == ATT_HANDLE_VALUE_CFM) {
                 dpls_phy6252_runtime_tx_confirmed();
+                schedule_runtime_timer();
+            }
             osal_msg_deallocate(message);
         }
         return events ^ SYS_EVENT_MSG;
@@ -221,16 +232,16 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_runtime_process_rx();
+        schedule_runtime_timer();
         schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
 
-    if (events & SBP_DPLS_TICK_EVT) {
-        dpls_phy6252_runtime_tick();
+    if (events & SBP_DPLS_TIMER_EVT) {
+        dpls_phy6252_runtime_process_timer();
+        schedule_runtime_timer();
         schedule_led_if_needed();
-        osal_start_timerEx(app_task_id, SBP_DPLS_TICK_EVT,
-                           dpls_phy6252_runtime_link_active() ? DPLS_TICK_MS : DPLS_TICK_IDLE_MS);
-        return events ^ SBP_DPLS_TICK_EVT;
+        return events ^ SBP_DPLS_TIMER_EVT;
     }
 
     if (events & SBP_DPLS_LED_EVT) {
@@ -240,16 +251,19 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 
     if (events & DPLS_PHY6252_TX_EVT) {
         dpls_phy6252_runtime_process_tx();
+        schedule_runtime_timer();
         return events ^ DPLS_PHY6252_TX_EVT;
     }
 
     if (events & DPLS_PHY6252_ADC_EVT) {
         dpls_phy6252_runtime_process_adc();
+        schedule_runtime_timer();
         return events ^ DPLS_PHY6252_ADC_EVT;
     }
 
     if (events & DPLS_PHY6252_STORAGE_EVT) {
         dpls_phy6252_runtime_process_storage();
+        schedule_runtime_timer();
         if (!dpls_phy6252_runtime_link_active() && !dpls_phy6252_runtime_flash_pending())
             enable_advertising();
         return events ^ DPLS_PHY6252_STORAGE_EVT;
