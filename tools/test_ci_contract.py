@@ -34,7 +34,6 @@ for token in (
     "full_matrix:",
     "EVENT_ACTION:",
     "BEFORE_SHA:",
-    "cancel-in-progress: false",
     "shared_mobile=false",
     "android_only=false",
     "ios_only=false",
@@ -65,6 +64,8 @@ for token in (
     if token not in ci:
         raise SystemExit(f"incremental PR diff contract missing: {token}")
 
+# Runs are intentionally independent. There is no concurrency group, so the
+# only forbidden form is one that explicitly cancels an earlier proof.
 if "cancel-in-progress: true" in ci:
     raise SystemExit("affected-area CI must not cancel the only proof for an earlier change set")
 
