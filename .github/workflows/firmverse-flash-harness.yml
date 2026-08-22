@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Checkout Bolid RC9
+      - name: Checkout RC9
         uses: actions/checkout@v6
 
       - name: Setup cached ARM GNU Toolchain
@@ -42,13 +42,12 @@ jobs:
           test -s tmp/test-dpls-1.4.2-rc9.hex
           sha256sum tmp/test-dpls-1.4.2-rc9.hex | tee tmp/test-dpls-1.4.2-rc9.hex.sha256
 
-      # Temporary PR-head pin while Firmverse #15 proves the full flash -> boot chain.
-      # The Bolid PR will be repinned to the merged Firmverse commit before merge.
+      # Pin the merged Firmverse implementation so this proof remains reproducible.
       - name: Checkout pinned Firmverse flash + boot harness
         uses: actions/checkout@v6
         with:
           repository: Pom4H/firmverse
-          ref: b41cbabce7a42e3c01d775f315b3fe68e02dc5ba
+          ref: 0c2e3b915db507448eb158cd0a49ccd1c2362b59
           path: tmp/firmverse
           submodules: recursive
 
