@@ -11,17 +11,28 @@
 #include "ll_common.h"
 #include "dpls_ble_identity.h"
 #include "dpls_phy6252_events.h"
+#include "dpls_phy6252_power.h"
 #include "dpls_phy6252_runtime.h"
 #include "simpleBLEPeripheral.h"
 #include "pwrmgr.h"
 #include "fs.h"
+#include "log.h"
 
-#define DEFAULT_MIN_CONN_INTERVAL 24
-#define DEFAULT_MAX_CONN_INTERVAL 80
-#define DEFAULT_CONN_TIMEOUT 3000
+/* BLE units are 1.25 ms for connection interval and 10 ms for supervision
+ * timeout. ACTIVE keeps pairing/control responsive. IDLE allows up to ~600 ms
+ * effective peripheral latency, still below the 1 s product control budget. */
+#define DPLS_ACTIVE_MIN_CONN_INTERVAL 24u
+#define DPLS_ACTIVE_MAX_CONN_INTERVAL 40u
+#define DPLS_ACTIVE_SLAVE_LATENCY 0u
+#define DPLS_IDLE_MIN_CONN_INTERVAL 96u
+#define DPLS_IDLE_MAX_CONN_INTERVAL 120u
+#define DPLS_IDLE_SLAVE_LATENCY 3u
+#define DPLS_CONN_TIMEOUT 3000u
 #define DPLS_ADV_INTERVAL 800u
 
 static uint8 app_task_id;
+static bool link_profile_known;
+static dpls_link_profile_t applied_link_profile;
 
 static uint8 scan_response[] = {
     0x0f, GAP_ADTYPE_LOCAL_NAME_COMPLETE,
@@ -68,36 +79,65 @@ static void enable_advertising(void)
 static void schedule_runtime_timer(void)
 {
     uint32 next_ms = dpls_phy6252_runtime_next_wakeup_ms();
-    /* Exactly one runtime timer exists. Re-arming replaces a stale deadline
-     * after link/auth/TX state changes instead of relying on timeout ordering. */
+    /* There is exactly one application timer. LED edges, ADC cadence and every
+     * semantic/transport deadline are merged by runtime. */
     (void)osal_stop_timerEx(app_task_id, SBP_DPLS_TIMER_EVT);
     if (next_ms != 0u)
         (void)osal_start_timerEx(app_task_id, SBP_DPLS_TIMER_EVT, next_ms);
 }
 
-static void schedule_led_if_needed(void)
+static void apply_link_profile_if_needed(void)
 {
-    uint32 next_ms = dpls_phy6252_runtime_led_tick();
-    if (next_ms != 0u)
-        osal_start_timerEx(app_task_id, SBP_DPLS_LED_EVT, next_ms);
+    dpls_link_profile_t desired;
+    uint16 min_interval;
+    uint16 max_interval;
+    uint16 latency;
+    bStatus_t rc;
+
+    if (!dpls_phy6252_runtime_link_active()) return;
+    desired = dpls_phy6252_runtime_link_profile();
+    if (link_profile_known && desired == applied_link_profile) return;
+
+    if (desired == DPLS_LINK_PROFILE_IDLE) {
+        min_interval = DPLS_IDLE_MIN_CONN_INTERVAL;
+        max_interval = DPLS_IDLE_MAX_CONN_INTERVAL;
+        latency = DPLS_IDLE_SLAVE_LATENCY;
+    } else {
+        min_interval = DPLS_ACTIVE_MIN_CONN_INTERVAL;
+        max_interval = DPLS_ACTIVE_MAX_CONN_INTERVAL;
+        latency = DPLS_ACTIVE_SLAVE_LATENCY;
+    }
+
+    rc = GAPRole_SendUpdateParam(min_interval, max_interval, latency,
+                                 DPLS_CONN_TIMEOUT, GAPROLE_NO_ACTION);
+    if (rc == SUCCESS || rc == bleAlreadyInRequestedMode) {
+        applied_link_profile = desired;
+        link_profile_known = true;
+        LOG("DPLS BLE profile=%u min=%u max=%u lat=%u\n",
+            (unsigned)desired, min_interval, max_interval, latency);
+    } else {
+        /* Transient host pressure is retried on the next real runtime event; no
+         * dedicated polling timer exists for connection-parameter updates. */
+        LOG("DPLS BLE profile retry=%u rc=%u\n", (unsigned)desired, rc);
+    }
 }
 
 static void state_changed(gaprole_States_t state)
 {
     switch (state) {
     case GAPROLE_STARTED:
-        /* Controller/HCI жив только здесь. Identity никогда не gate-ит radio. */
         dpls_ble_identity_on_stack_started();
         enable_advertising();
         schedule_runtime_timer();
-        schedule_led_if_needed();
         break;
 
     case GAPROLE_CONNECTED: {
         uint16 handle = INVALID_CONNHANDLE;
         GAPRole_GetParameter(GAPROLE_CONNHANDLE, &handle);
-        (void)hal_pwrmgr_lock(MOD_USR0);
+        link_profile_known = false;
+        dpls_phy6252_power_link_connected();
         dpls_phy6252_runtime_connected(handle);
+        apply_link_profile_if_needed();
         schedule_runtime_timer();
         break;
     }
@@ -105,9 +145,9 @@ static void state_changed(gaprole_States_t state)
     case GAPROLE_WAITING:
     case GAPROLE_WAITING_AFTER_TIMEOUT:
         dpls_phy6252_runtime_disconnected();
-        (void)hal_pwrmgr_unlock(MOD_USR0);
+        dpls_phy6252_power_link_disconnected();
+        link_profile_known = false;
         schedule_runtime_timer();
-        schedule_led_if_needed();
         if (!dpls_phy6252_runtime_flash_pending()) enable_advertising();
         break;
 
@@ -123,8 +163,6 @@ static void rssi_changed(int8 rssi)
 
 static void bond_pair_state_cb(uint16 conn_handle, uint8 state, uint8 status)
 {
-    /* Vendor GAPBondMgr требует callback registration; application state от
-     * pairing callback не зависит и ключи отсюда никогда не стираются. */
     (void)conn_handle;
     (void)state;
     (void)status;
@@ -140,10 +178,10 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     uint8 channels = GAP_ADVCHAN_37 | GAP_ADVCHAN_38 | GAP_ADVCHAN_39;
     uint8 advertising_type = LL_ADV_CONNECTABLE_UNDIRECTED_EVT;
     uint16 advertising_off_time = 0;
-    uint16 min_interval = DEFAULT_MIN_CONN_INTERVAL;
-    uint16 max_interval = DEFAULT_MAX_CONN_INTERVAL;
-    uint16 latency = 0;
-    uint16 timeout = DEFAULT_CONN_TIMEOUT;
+    uint16 min_interval = DPLS_ACTIVE_MIN_CONN_INTERVAL;
+    uint16 max_interval = DPLS_ACTIVE_MAX_CONN_INTERVAL;
+    uint16 latency = DPLS_ACTIVE_SLAVE_LATENCY;
+    uint16 timeout = DPLS_CONN_TIMEOUT;
     uint16 advertising_interval = DPLS_ADV_INTERVAL;
     uint32 passkey = 0;
     uint8 pairing_mode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
@@ -157,15 +195,12 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
                              GAPBOND_KEYDIST_MIDKEY;
 
     app_task_id = task_id;
+    link_profile_known = false;
 
     hal_pwrmgr_RAM_retention(RET_SRAM0 | RET_SRAM1 | RET_SRAM2);
     hal_pwrmgr_RAM_retention_set();
     (void)hal_pwrmgr_LowCurrentLdo_enable();
-
-    /* Три независимых sleep owner: link / силовые выходы / ADC-series. */
-    (void)hal_pwrmgr_register(MOD_USR0, NULL, NULL);
-    (void)hal_pwrmgr_register(MOD_USR1, NULL, NULL);
-    (void)hal_pwrmgr_register(MOD_USR2, NULL, NULL);
+    dpls_phy6252_power_init();
 
     if (!hal_fs_initialized())
         (void)hal_fs_init(0x1103C000u, 3);
@@ -181,6 +216,8 @@ void SimpleBLEPeripheral_Init(uint8 task_id)
     GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(advertising_off_time), &advertising_off_time);
     GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scan_response), scan_response);
     GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertising_data), advertising_data);
+    /* Runtime owns profile changes; disable the vendor's independent automatic
+     * timer so connection policy still has one semantic owner. */
     GAPRole_SetParameter(GAPROLE_PARAM_UPDATE_ENABLE, sizeof(update_enabled), &update_enabled);
     GAPRole_SetParameter(GAPROLE_MIN_CONN_INTERVAL, sizeof(min_interval), &min_interval);
     GAPRole_SetParameter(GAPROLE_MAX_CONN_INTERVAL, sizeof(max_interval), &max_interval);
@@ -232,21 +269,16 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 
     if (events & DPLS_PHY6252_RX_EVT) {
         dpls_phy6252_runtime_process_rx();
+        apply_link_profile_if_needed();
         schedule_runtime_timer();
-        schedule_led_if_needed();
         return events ^ DPLS_PHY6252_RX_EVT;
     }
 
     if (events & SBP_DPLS_TIMER_EVT) {
         dpls_phy6252_runtime_process_timer();
+        apply_link_profile_if_needed();
         schedule_runtime_timer();
-        schedule_led_if_needed();
         return events ^ SBP_DPLS_TIMER_EVT;
-    }
-
-    if (events & SBP_DPLS_LED_EVT) {
-        schedule_led_if_needed();
-        return events ^ SBP_DPLS_LED_EVT;
     }
 
     if (events & DPLS_PHY6252_TX_EVT) {
@@ -257,6 +289,7 @@ uint16 SimpleBLEPeripheral_ProcessEvent(uint8 task_id, uint16 events)
 
     if (events & DPLS_PHY6252_ADC_EVT) {
         dpls_phy6252_runtime_process_adc();
+        apply_link_profile_if_needed();
         schedule_runtime_timer();
         return events ^ DPLS_PHY6252_ADC_EVT;
     }
