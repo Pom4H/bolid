@@ -157,11 +157,13 @@ typedef struct {
     bool connected;
     bool authenticated;
     bool hello_received;
+    bool setup_completed;
     uint8_t failed_auth_attempts;
     uint32_t blocked_until_ms;
     uint32_t last_auth_proof_ms;
     uint32_t session_id;
     uint32_t last_authenticated_activity_ms;
+    uint32_t setup_fingerprint;
     uint8_t device_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t client_nonce[DPLS_AUTH_NONCE_SIZE];
     uint8_t token[DPLS_SESSION_TOKEN_SIZE];
