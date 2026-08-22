@@ -35,8 +35,19 @@ jobs:
               if line.startswith('          '):
                   line = line[10:]
               lines.append(line)
+          script = '\n'.join(lines) + '\n'
+          needle = 's = replace_once(s, old, new, "client formatter")'
+          replacement = '''if s.count(old) == 1:
+              s = s.replace(old, new)
+          else:
+              formatter_start = s.index("    override fun formatEventTime(record: EventRecord): String =")
+              formatter_end = s.index("\n\n    fun close()", formatter_start)
+              s = s[:formatter_start] + new.rstrip() + s[formatter_end:]'''
+          if needle not in script:
+              raise SystemExit('client formatter patch hook missing')
+          script = script.replace(needle, replacement, 1)
           patch = Path('/tmp/simplify_journal.py')
-          patch.write_text('\n'.join(lines) + '\n')
+          patch.write_text(script)
           subprocess.run(['python3', str(patch)], check=True)
           PY
 
