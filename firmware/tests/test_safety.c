@@ -86,6 +86,40 @@ static void test_return_precedence(void)
            DPLS_SAFETY_RETURN_MODE_TIMEOUT);
 }
 
+/* RC9 intentionally permits deadlines/events to collide. The policy must have
+ * a deterministic answer independent of which timer callback happened to be
+ * dispatched first. Physical fail-safe facts dominate; when both logical
+ * deadlines expire at exactly the same instant, mode timeout is canonical. */
+static void test_deadline_collision_precedence(void)
+{
+    dpls_safety_t s;
+    dpls_safety_inputs_t in;
+    const uint32_t start = 1000u;
+    const uint32_t mode_deadline = start + DPLS_SAFETY_MODE_MAX_MS;
+
+    dpls_safety_init(&s);
+    dpls_safety_commit_mode(&s, DPLS_SAFE_SHORT_1, start);
+
+    in = healthy(mode_deadline - DPLS_SAFETY_SESSION_TIMEOUT_MS);
+    assert(dpls_safety_required_return(&s, &in, mode_deadline - 1u) ==
+           DPLS_SAFETY_RETURN_NONE);
+    assert(dpls_safety_required_return(&s, &in, mode_deadline) ==
+           DPLS_SAFETY_RETURN_MODE_TIMEOUT);
+
+    in.connected = false;
+    assert(dpls_safety_required_return(&s, &in, mode_deadline) ==
+           DPLS_SAFETY_RETURN_DISCONNECT);
+
+    in = healthy(mode_deadline - DPLS_SAFETY_SESSION_TIMEOUT_MS);
+    in.reserve_low = true;
+    assert(dpls_safety_required_return(&s, &in, mode_deadline) ==
+           DPLS_SAFETY_RETURN_LOW_RESERVE);
+
+    dpls_safety_force_normal(&s);
+    assert(dpls_safety_required_return(&s, &in, mode_deadline) ==
+           DPLS_SAFETY_RETURN_NONE);
+}
+
 /* Exhaust every Boolean input for every dangerous mode. The only accepted
  * steady state is connected + authenticated + measurements ready + no low
  * reserve + no real short. */
@@ -153,6 +187,7 @@ int main(void)
     test_mode_lifecycle();
     test_admission_is_fail_safe();
     test_return_precedence();
+    test_deadline_collision_precedence();
     test_dangerous_state_space();
     test_normal_is_always_fail_safe();
     test_deadline_wrap();
