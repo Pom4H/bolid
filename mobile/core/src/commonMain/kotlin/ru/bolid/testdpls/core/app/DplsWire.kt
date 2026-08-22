@@ -2,6 +2,7 @@ package ru.bolid.testdpls.core.app
 
 import ru.bolid.testdpls.core.protocol.DplsProtocol
 import ru.bolid.testdpls.core.protocol.decodeFrame
+import ru.bolid.testdpls.core.protocol.deviceErrorReason
 import ru.bolid.testdpls.core.protocol.encodeFrame
 import ru.bolid.testdpls.core.session.FrameSequencer
 
@@ -14,7 +15,17 @@ internal class DplsWire(
 
     fun reset() = sequencer.reset()
 
-    fun decode(bytes: ByteArray): DplsProtocol.DecodeResult = decodeFrame(bytes)
+    fun decode(bytes: ByteArray): DplsProtocol.DecodeResult {
+        val decoded = decodeFrame(bytes)
+        if (decoded is DplsProtocol.DecodeResult.Success && decoded.frame.isError) {
+            val code = decoded.frame.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
+            /* Bootstrap errors used to collapse into opaque ERROR 2. Keep the
+             * normal correlated error path for established-session operations,
+             * but surface setup/session failures immediately by meaning. */
+            if (code in 8..11) return DplsProtocol.DecodeResult.Failure(deviceErrorReason(code))
+        }
+        return decoded
+    }
 
     fun request(
         type: DplsProtocol.Type,
