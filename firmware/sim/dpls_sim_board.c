@@ -101,15 +101,6 @@ static bool link_indicate(void *context, const uint8_t *frame, size_t length)
     return phy6252_emu_enqueue_tx(&board->radio, frame, (uint16_t)length);
 }
 
-static void link_disconnect(void *context)
-{
-    dpls_sim_board_t *board = context;
-    board->connected = false;
-    phy6252_emu_disconnect(&board->radio);
-    if (board->config.on_disconnect) board->config.on_disconnect(board->config.callback_context);
-    dpls_server_disconnected(&board->server, board->now_ms);
-}
-
 static bool hardware_apply_mode(void *context, dpls_mode_t mode)
 {
     dpls_sim_board_t *board = context;
@@ -358,7 +349,6 @@ static dpls_hal_t make_hal(dpls_sim_board_t *board)
     hal.context = board;
     hal.link.encrypted = link_encrypted;
     hal.link.indicate = link_indicate;
-    hal.link.disconnect = link_disconnect;
     hal.hardware.apply_mode = hardware_apply_mode;
     hal.hardware.safe_normal = hardware_safe_normal;
     hal.hardware.voltage_mv = line_mv;
