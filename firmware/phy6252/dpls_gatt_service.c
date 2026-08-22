@@ -81,7 +81,9 @@ static bStatus_t write_cb(uint16 conn, gattAttribute_t *attr, uint8 *value, uint
         if (offset != 0) return ATT_ERR_ATTR_NOT_LONG;
         LOG("DPLS RX n=%u t=%02x\n", len, len > 1u ? value[1] : 0u);
         rc = app_rx ? app_rx(value, len) : SUCCESS;
-        if (rc != SUCCESS) LOG("DPLS RX reject %u\n", rc);
+        if (rc != SUCCESS) {
+            LOG("DPLS RX reject %u\n", rc);
+        }
         return rc;
     }
     return ATT_ERR_ATTR_NOT_FOUND;
